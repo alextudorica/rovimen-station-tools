@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Build-guide network schema: the simplest station network.
+
+  Hand-written rather than generated from Mermaid. Mermaid puts node labels in
+  <foreignObject> HTML, and an SVG loaded through <img src> is parsed in secure
+  static mode where that subtree is not rendered: every box came out empty.
+  Its non-HTML text fallback mangled inter-word spacing. Hand-authored plain
+  <text> renders identically everywhere.
+
+  Only numeric character references. Named HTML entities are undefined in
+  standalone SVG, which is how <img src> parses this file.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 880" width="1440" height="880"
+     font-family="Helvetica, Arial, sans-serif">
+
+  <style>
+    .ttl    { font-size: 22px; font-weight: bold; fill: #1a1a1a; }
+    .sub    { font-size: 14px; fill: #5a6672; }
+    .lbl    { font-size: 15px; font-weight: bold; fill: #1a1a1a; }
+    .note   { font-size: 12.5px; fill: #55606b; }
+    .tiny   { font-size: 11.5px; fill: #6b7681; }
+    .part   { fill: #f5f7f8; stroke: #5b6b7c; stroke-width: 1.6; }
+    .cloud  { fill: #eef2f6; stroke: #9aa5b1; stroke-width: 1.5; }
+    .cam    { fill: #eaf4ec; stroke: #3f9c56; stroke-width: 1.6; }
+    .remote { fill: #fdf6e3; stroke: #c9a227; stroke-width: 1.5; }
+    .outp   { fill: #fbfdfb; stroke: #c3d4c7; stroke-width: 1.3; stroke-dasharray: 5 4; }
+    .link   { stroke: #7c8794; stroke-width: 1.8; fill: none; }
+    .poe    { stroke: #5b6b7c; stroke-width: 2.6; fill: none; }
+    .vid    { stroke: #8a94a0; stroke-width: 1.6; fill: none; stroke-dasharray: 6 5; }
+  </style>
+
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#7c8794"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="880" fill="#ffffff"/>
+
+  <text class="ttl" x="52" y="50">The simplest station network</text>
+  <text class="sub" x="52" y="74">One PoE switch, one cable per camera, one PC. Everything sits on 192.168.1.x behind the router you already have.</text>
+
+  <!-- internet -->
+  <rect class="cloud" x="130" y="110" width="180" height="54" rx="27"/>
+  <text class="lbl" x="220" y="143" text-anchor="middle">Internet</text>
+  <path class="link" d="M 220 164 V 202" marker-end="url(#arw)"/>
+
+  <!-- router -->
+  <rect class="part" x="60" y="208" width="320" height="96" rx="7"/>
+  <text class="lbl" x="220" y="240" text-anchor="middle">Home router</text>
+  <text class="note" x="220" y="264" text-anchor="middle">192.168.1.1 &#183; hands out DHCP</text>
+  <text class="note" x="220" y="284" text-anchor="middle">the one you already have</text>
+
+  <!-- router to switch -->
+  <path class="link" d="M 380 256 H 450 V 344 H 506" marker-end="url(#arw)"/>
+  <text class="tiny" x="458" y="248">any LAN port, into a Gigabit uplink port</text>
+
+  <!-- switch -->
+  <rect class="part" x="512" y="300" width="392" height="140" rx="7"/>
+  <text class="lbl" x="708" y="336" text-anchor="middle">PoE switch</text>
+  <text class="note" x="708" y="360" text-anchor="middle">TP-Link LS1210P &#183; 8 x PoE+ &#183; 96 W total</text>
+  <text class="note" x="708" y="382" text-anchor="middle">cameras on the 10/100 PoE ports (plenty)</text>
+  <text class="note" x="708" y="404" text-anchor="middle">router and PC on the 2 Gigabit uplink ports</text>
+  <text class="note" x="708" y="426" text-anchor="middle">one cable per camera, no power supply outside</text>
+
+  <!-- PoE runs -->
+  <path class="poe" d="M 904 330 L 1022 216" marker-end="url(#arw)"/>
+  <path class="poe" d="M 904 370 L 1022 322" marker-end="url(#arw)"/>
+  <path class="poe" d="M 904 410 L 1022 432" marker-end="url(#arw)"/>
+  <text class="tiny" x="958" y="302" text-anchor="middle">PoE+</text>
+
+  <!-- outdoors -->
+  <rect class="outp" x="1000" y="110" width="400" height="430" rx="10"/>
+  <text class="tiny" x="1020" y="138">Outdoors &#183; one Cat6 cable per camera,</text>
+  <text class="tiny" x="1020" y="156">no separate power supply out there</text>
+
+  <rect class="cam" x="1024" y="176" width="352" height="78" rx="6"/>
+  <text class="lbl" x="1200" y="206" text-anchor="middle">Camera 1</text>
+  <text class="note" x="1200" y="228" text-anchor="middle">192.168.1.201 &#183; set by us</text>
+
+  <rect class="cam" x="1024" y="286" width="352" height="78" rx="6"/>
+  <text class="lbl" x="1200" y="316" text-anchor="middle">Camera 2</text>
+  <text class="note" x="1200" y="338" text-anchor="middle">192.168.1.202 &#183; set by us</text>
+
+  <rect class="cam" x="1024" y="396" width="352" height="78" rx="6"/>
+  <text class="lbl" x="1200" y="426" text-anchor="middle">Camera 3</text>
+  <text class="note" x="1200" y="448" text-anchor="middle">192.168.1.203 &#183; set by us</text>
+
+  <text class="note" x="1200" y="506" text-anchor="middle">Start with one. The switch takes 8, the PC is the real limit.</text>
+
+  <!-- switch to PC -->
+  <path class="link" d="M 708 440 V 550" marker-end="url(#arw)"/>
+  <text class="tiny" x="718" y="500">LAN</text>
+
+  <!-- station PC -->
+  <rect class="part" x="400" y="556" width="360" height="140" rx="7"/>
+  <text class="lbl" x="580" y="590" text-anchor="middle">Station PC</text>
+  <text class="note" x="580" y="614" text-anchor="middle">address from the router</text>
+  <text class="note" x="580" y="636" text-anchor="middle">Ubuntu 24.04 + RMS</text>
+  <text class="note" x="580" y="658" text-anchor="middle">records all night, processes at dawn,</text>
+  <text class="note" x="580" y="680" text-anchor="middle">uploads, then does it again</text>
+
+  <!-- video streams back to the PC -->
+  <path class="vid" d="M 1000 520 C 920 560, 850 586, 768 598" marker-end="url(#arw)"/>
+  <text class="note" x="930" y="530" text-anchor="end">RTSP video, ~8 Mbit/s per camera</text>
+
+  <!-- uploads -->
+  <path class="link" d="M 760 640 H 1074" marker-end="url(#arw)"/>
+  <text class="tiny" x="900" y="630" text-anchor="middle">detections, once a day at dawn</text>
+
+  <rect class="remote" x="1080" y="600" width="320" height="110" rx="7"/>
+  <text class="lbl" x="1240" y="634" text-anchor="middle">GMN server</text>
+  <text class="note" x="1240" y="658" text-anchor="middle">your data joins the network</text>
+  <text class="note" x="1240" y="680" text-anchor="middle">and gets trajectory-solved</text>
+
+  <path class="link" d="M 760 672 H 900 V 795 H 1074" marker-end="url(#arw)"/>
+  <text class="tiny" x="910" y="790">over Tailscale</text>
+
+  <rect class="remote" x="1080" y="740" width="320" height="110" rx="7"/>
+  <text class="lbl" x="1240" y="774" text-anchor="middle">ROVIMEN dashboard</text>
+  <text class="note" x="1240" y="798" text-anchor="middle">clips, night stacks, station health,</text>
+  <text class="note" x="1240" y="820" text-anchor="middle">remote support without a site visit</text>
+
+  <text class="tiny" x="60" y="866">Solid = Ethernet cable (it carries the power too) &#183; dashed = video stream travelling back over that same cable.</text>
+
+</svg>

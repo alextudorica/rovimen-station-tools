@@ -1,5 +1,5 @@
 [Unit]
-Description=ROVIMEN archive uploader to Hetzner Storage Box
+Description=ROVIMEN archive uploader (POSTs clip bytes to the VPS ingest)
 After=network-online.target
 Wants=network-online.target
 
@@ -10,6 +10,11 @@ Restart=always
 RestartSec=60
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONIOENCODING=utf-8
+# Shares the pusher's ingest identity (ROVIMEN_HOST_KEY, ROVIMEN_INGEST_BASE_URL)
+# so the byte uploader targets the same VPS with the same key. The '-' makes it
+# optional; the updater generates it from the pusher unit on stations that only
+# carry those vars inline in rovimen-pusher.service.
+EnvironmentFile=-%h/.config/rovimen/ingest.env
 
 [Install]
 WantedBy=default.target

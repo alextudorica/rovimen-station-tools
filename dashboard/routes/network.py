@@ -1,17 +1,45 @@
-"""Network map, coverage grid, version, and admin network config routes."""
+"""Network map, network stats, version, and admin network config routes."""
 
 import logging
+import os
 from pathlib import Path
 
-from flask import Flask, jsonify, redirect, request, url_for
+from flask import Flask, jsonify, request
 
-from auth import require_auth, require_admin, is_anonymous, \
-    station_is_public_for_request
-from http_caching import _json_cached
+from auth import require_admin, is_anonymous, station_is_public_for_request
 from security import public_route
 import gmn_data
 
 logger = logging.getLogger(__name__)
+
+
+def _bundle_version_file() -> Path:
+    """Path to the ``.version`` of the bundle channel THIS tier publishes.
+
+    Both channels are staged under the PROD tree — CI pushes the dev channel to
+    ``/opt/rovimen/station-bundle-dev``, not into ``/opt/rovimen-dev`` — so the
+    base directory is shared and only the channel sub-directory differs per
+    tier. ``ROVIMEN_BUNDLE_DIR`` overrides the base (same convention as
+    ``stack_overlay`` and ``station_watchdog``); the channel comes from
+    ``ROVIMEN_BUNDLE_CHANNEL`` when set, otherwise it is inferred from the
+    install root so the dev tier is correct without an env-file edit.
+    """
+    base = Path(os.environ.get("ROVIMEN_BUNDLE_DIR", "/opt/rovimen"))
+    channel = os.environ.get("ROVIMEN_BUNDLE_CHANNEL", "").strip().lower()
+    if not channel:
+        # routes/network.py -> <install root>. /opt/rovimen-dev => dev tier.
+        install_root = Path(__file__).resolve().parent.parent
+        channel = "dev" if install_root.name.endswith("-dev") else "main"
+    sub = "station-bundle-dev" if channel == "dev" else "station-bundle"
+    return base / sub / ".version"
+
+
+def bundle_version() -> str:
+    """Version string of the station bundle this tier publishes, or ``unknown``."""
+    try:
+        return _bundle_version_file().read_text().strip() or "unknown"
+    except OSError:
+        return "unknown"
 
 
 def register_network_routes(
@@ -33,11 +61,9 @@ def register_network_routes(
     """
     import network_stats as _net_stats_mod
 
-    # ── Pre-computation warmup ───────────────────────────────────────────
-    _net_stats_mod.register_precompute(config.model_dump())
-
-    import threading as _th
-    _th.Thread(target=gmn_data.orbit_counts, daemon=True, name="orbit-warmup").start()
+    # The coverage precompute and the GMN orbit-count warmup start in
+    # rovimen_dashboard._start_background_workers (one worker, off the boot
+    # path); these routes compute on demand when that has not run here.
 
     # ── Network stats ────────────────────────────────────────────────────
 
@@ -73,29 +99,11 @@ def register_network_routes(
                 }
         return jsonify(result)
 
-    # ── Coverage grid ────────────────────────────────────────────────────
-
-    @app.route("/api/coverage-grid")
-    @require_auth
-    def api_coverage_grid():
-        import platepar_store
-        import network_stats
-        alt = request.args.get("alt", 100.0, type=float)
-        alt = max(10.0, min(alt, 200.0))
-        platepars = platepar_store.get_all()
-        cfg_raw = config.model_dump()
-        cells = network_stats.get_coverage_grid(platepars, cfg_raw, alt)
-        return _json_cached({"altitude_km": alt, "cells": cells}, max_age=300)
-
     # ── Version endpoint ─────────────────────────────────────────────────
 
     @app.route("/api/version")
     def api_version():
-        version_file = Path("/opt/rovimen/station-bundle/.version")
-        version = "unknown"
-        if version_file.exists():
-            version = version_file.read_text().strip()
-        return jsonify({"version": version})
+        return jsonify({"version": bundle_version()})
 
     # ── Global config PATCH ──────────────────────────────────────────────
 
@@ -110,9 +118,3 @@ def register_network_routes(
         save_config()
         return jsonify({"ok": True, "correlation_window_s": config.correlation_window_s})
 
-    # ── Network status page ──────────────────────────────────────────────
-
-    @app.route("/network")
-    def network_page():
-        # No auth -- public redirect; network status now lives on the overview page
-        return redirect(url_for("index"))

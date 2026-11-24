@@ -1,46 +1,122 @@
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0d1117;--card:#161b22;--border:#30363d;
+  /* ── Design tokens ──────────────────────────────────────────────────────
+     The single place to restyle the site. Every page loads this file, and
+     the page stylesheets use these variables instead of literal values, so
+     changing one value here changes it everywhere.
+     Translucent tints are written as color-mix(in srgb, var(--x) N%,
+     transparent), so they follow their token too.
+     Left literal on purpose: pure black/white shadows and scrims, and
+     one-off data colours (spectral lines, magnitude scale, chart series). */
+
+  /* Surfaces */
+  --bg:#0d1117;               /* page background */
+  --card:#161b22;             /* cards, panels, menus */
+  --border:#30363d;           /* hairlines and control borders */
   /* --bg2 and --surface back card-like surfaces nested inside .card (RMS plots,
      events.html sf-toolbar, overview map row). Without these declarations they
      fell back to transparent, leaving cards invisible against the page bg. */
   --bg2:#161b22;--surface:#161b22;
-  --text:#c9d1d9;--muted:#8b949e;
-  --green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--purple:#bc8cff;
+
+  /* Text */
+  --text:#c9d1d9;             /* body text */
+  --text-strong:#e6edf3;      /* page and section headings */
+  --muted:#8b949e;            /* secondary text, labels */
+
+  /* Accents and states */
+  --blue:#58a6ff;             /* links, focus ring, selection */
+  --green:#3fb950;            /* online, success */
+  --red:#f85149;              /* offline, danger */
+  --error:#e74c3c;            /* invalid input, failed jobs */
+  --yellow:#d29922;           /* warning */
+  --orange:#e89b3c;           /* degraded (station reachable, comms issue) */
+  --purple:#bc8cff;
+
+  /* Header and brand (the shared header in _nav.html, primary buttons) */
+  --hdr-ink:#0f1626;          /* night sky behind the wordmark */
+  --hdr-ink-2:#0b111d;        /* the strip, one step darker */
+  --hdr-line:color-mix(in srgb,var(--hdr-text) 10%,transparent);
+  --hdr-text:#e6edf6;         /* starlight */
+  --hdr-muted:#8b97ab;        /* dusk */
+  --hdr-teal:#2bb5a6;         /* the wordmark's middle stop; primary buttons */
+  --hdr-teal-hover:#34c6b6;   /* primary button hover */
+  --on-teal:#062824;          /* text on a teal button */
+
+  /* Sky phases (tonight strip, event time bars) */
+  --sky-clear:#87ceeb; --sky-day:#3d5a6e; --sky-civ:#a8b870; --sky-naut:#d4c040; --sky-night:#1a2c5e;
+
+  /* Corner radii */
+  --radius-2xs:2px; --radius-xs:3px; --radius-sm:4px;
+  --radius-md:6px;            /* default: buttons, inputs, cards */
+  --radius-lg:8px; --radius-xl:10px; --radius-2xl:12px;
+  --radius-pill:999px;
+  --hc-r:8px;                 /* header controls */
+
+  /* Type: sans for the interface (nav, buttons, labels, headings, prose);
+     monospace for data (times, codes, coordinates, numeric cells, file names). */
+  --ui-font:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+  --mono-font:'SF Mono',ui-monospace,Consolas,Monaco,monospace;
+  --fs-2xs:9px; --fs-xs:10px; --fs-sm:11px; --fs-md:12px;
+  --fs-base:13px;             /* body text */
+  --fs-lg:14px; --fs-xl:15px; --fs-2xl:16px; --fs-3xl:18px; --fs-4xl:20px; --fs-5xl:24px;
+
+  /* Header sizes */
+  --hc-h:36px; --hdr-px:20px;
 }
-body{background:var(--bg);color:var(--text);font-family:'SF Mono',Consolas,Monaco,monospace;font-size:13px;min-height:100vh;
+html{color-scheme:dark;-webkit-tap-highlight-color:color-mix(in srgb,var(--blue) 18%,transparent);
+  /* Anchor jumps and focus scrolling land below the sticky header. */
+  scroll-padding-top:64px}
+h1,h2,h3{text-wrap:balance}
+code,pre,kbd,samp{font-family:var(--mono-font)}
+input[type="date"],input[type="time"],input[type="datetime-local"]{font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+/* Native controls: explicit colours so Windows dark mode does not paint them light. */
+:where(select){background-color:var(--bg);color:var(--text)}
+/* One focus ring for every interactive element; component rules may refine it. */
+:where(a,button,input,select,textarea,summary,[tabindex]):focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+:where(input,select,textarea):focus-visible{outline-offset:1px}
+:where(a,button,input,select,textarea,summary,[tabindex]):focus:not(:focus-visible){outline:none}
+:where(a,button,summary,label,select,[role="button"],[role="tab"],input[type="checkbox"],input[type="radio"],input[type="range"]){touch-action:manipulation}
+body{background:var(--bg);color:var(--text);font-family:var(--ui-font);font-size:var(--fs-base);min-height:100vh;
   padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
 
 /* ── Header ── */
-header{background:var(--card);border-bottom:1px solid var(--border);padding:10px 24px;
+/* `body > header`, not bare `header`: this rule is the app's sticky navigation
+   bar, and as an element selector it claimed every semantic <header> on the
+   page. The wiki hero hit that first (see dashboard-wiki.css) and reset it by
+   hand; the spectro event cards hit it next and could not be reset by hand,
+   because z-index:1001 put all 82 of a night's card headers ABOVE the z-index
+   1000 lightbox -- opening a plot showed the gallery's headers painted over
+   it. Scoped to the direct child of body, which is what the real header is in
+   every template that has one. */
+body > header{background:var(--card);border-bottom:1px solid var(--border);padding:10px 24px;
   display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:1001}
-.logo{font-size:15px;font-weight:700;color:var(--blue);letter-spacing:1px;flex-shrink:0}
+.logo{font-size:var(--fs-xl);font-weight:700;color:var(--blue);letter-spacing:1px;flex-shrink:0}
 /* ── Station dropdown ── */
 .station-dropdown-wrapper{flex:1;display:flex;align-items:center;gap:6px}
-.station-nav-btn{background:none;border:1px solid var(--border);border-radius:6px;
-  color:var(--muted);cursor:pointer;font-family:inherit;font-size:14px;font-weight:600;
+.station-nav-btn{background:none;border:1px solid var(--border);border-radius:var(--radius-md);
+  color:var(--muted);cursor:pointer;font-family:inherit;font-size:var(--fs-lg);font-weight:600;
   padding:4px 10px;line-height:1;transition:border-color .15s,color .15s,background .15s;
   user-select:none}
-.station-nav-btn:hover{border-color:var(--blue);color:var(--blue);background:rgba(88,166,255,.06)}
+.station-nav-btn:hover{border-color:var(--blue);color:var(--blue);background:color-mix(in srgb,var(--blue) 6%,transparent)}
 .station-nav-btn:disabled{opacity:.45;cursor:default}
 .station-nav-btn:disabled:hover{border-color:var(--border);color:var(--muted);background:none}
 .station-dropdown{position:relative;display:inline-block;min-width:200px}
 .station-dropdown-selected{display:flex;align-items:center;gap:8px;
-  background:none;border:1px solid var(--border);border-radius:6px;
-  color:var(--text);cursor:pointer;font-family:inherit;font-size:13px;font-weight:600;
+  background:none;border:1px solid var(--border);border-radius:var(--radius-md);
+  color:var(--text);cursor:pointer;font-family:inherit;font-size:var(--fs-base);font-weight:600;
   padding:5px 12px;transition:border-color .15s;user-select:none}
 .station-dropdown-selected:hover,.station-dropdown.open .station-dropdown-selected{border-color:var(--blue)}
-.station-dropdown-selected .station-dd-label{color:var(--muted);font-weight:400;font-size:11px}
-.station-dropdown-arrow{margin-left:auto;color:var(--muted);font-size:10px}
+.station-dropdown-selected .station-dd-label{color:var(--muted);font-weight:400;font-size:var(--fs-sm)}
+.station-dropdown-arrow{margin-left:auto;color:var(--muted);font-size:var(--fs-xs)}
 .station-dropdown-menu{display:none;position:absolute;top:calc(100% + 4px);left:0;
-  background:var(--card);border:1px solid var(--border);border-radius:6px;
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);
   min-width:100%;z-index:200;box-shadow:0 8px 24px rgba(0,0,0,.4);overflow:hidden}
 .station-dropdown.open .station-dropdown-menu{display:block}
 .station-option{display:flex;align-items:center;gap:8px;padding:8px 14px;
-  cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);transition:background .1s}
+  cursor:pointer;font-size:var(--fs-md);font-weight:600;color:var(--muted);transition:background .1s}
 .station-option:hover{background:rgba(255,255,255,.05);color:var(--text)}
-.station-option.active{color:var(--blue);background:rgba(88,166,255,.08)}
-.station-option .station-dd-label{font-weight:400;font-size:11px}
+.station-option.active{color:var(--blue);background:color-mix(in srgb,var(--blue) 8%,transparent)}
+.station-option .station-dd-label{font-weight:400;font-size:var(--fs-sm)}
 /* Status dot vocabulary — shape conveys state in addition to colour so
    red-green colour-blind users can distinguish online/offline at a glance:
      up      → filled green disc (online)
@@ -50,97 +126,167 @@ header{background:var(--card);border-bottom:1px solid var(--border);padding:10px
   background:transparent;box-sizing:border-box;border:1.5px solid var(--muted)}
 .pill-dot.dot-up{background:var(--green);border-color:var(--green);box-shadow:0 0 5px var(--green)}
 .pill-dot.dot-down{background:transparent;border-color:var(--red)}
-.hdr-right{display:flex;align-items:center;gap:10px;font-size:11px;color:var(--muted);flex-shrink:0}
+.hdr-right{display:flex;align-items:center;gap:10px;font-size:var(--fs-sm);color:var(--muted);flex-shrink:0}
 .hdr-clock-group{display:flex;align-items:center;gap:6px;flex-shrink:0}
-.hdr-clock-label{font-size:11px;color:var(--muted)}
-.hdr-clock{font-family:monospace;font-size:11px;color:var(--text);letter-spacing:.04em;flex-shrink:0}
+.hdr-clock-label{font-size:var(--fs-sm);color:var(--muted)}
+/* Prominent, always-legible UTC clock. Full "YYYY-MM-DD HH:MM:SS UTC" string,
+   painted on every page header by startUTCClock() in dashboard-common.js. */
+.hdr-clock{font-family:var(--mono-font);font-variant-numeric:tabular-nums;font-size:var(--fs-base);font-weight:600;
+  color:var(--text);letter-spacing:.03em;flex-shrink:0;white-space:nowrap;
+  background:color-mix(in srgb,var(--blue) 12%,transparent);border:1px solid color-mix(in srgb,var(--blue) 28%,transparent);
+  border-radius:var(--radius-md);padding:3px 9px;line-height:1.4}
+/* Header slot wrapper — keeps the clock together and lets a bare .ev-header /
+   .adm-header push it to the right when there's no other right-side content. */
+.hdr-clock-wrap{display:flex;align-items:center;flex-shrink:0}
+.ev-header .hdr-clock-wrap,.adm-header .hdr-clock-wrap{margin-left:auto}
 .hdr-next-capture{display:flex;align-items:center;gap:6px;white-space:nowrap;flex-shrink:0;border-left:1px solid var(--border);padding-left:30px;margin-left:20px}
-.hdr-btn{background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.35);
-  color:var(--blue);font-family:inherit;font-size:12px;font-weight:600;
-  padding:5px 14px;border-radius:5px;cursor:pointer;letter-spacing:.3px}
-.hdr-btn:hover{background:rgba(88,166,255,.22)}
+.hdr-btn{background:color-mix(in srgb,var(--blue) 12%,transparent);border:1px solid color-mix(in srgb,var(--blue) 35%,transparent);
+  color:var(--blue);font-family:inherit;font-size:var(--fs-md);font-weight:600;
+  padding:5px 14px;border-radius:var(--radius-md);cursor:pointer;letter-spacing:.3px}
+.hdr-btn:hover{background:color-mix(in srgb,var(--blue) 22%,transparent)}
 .hdr-btn:disabled{opacity:.5;cursor:default}
 
-/* ── Logo + main nav tabs ── */
-.nav-logo{color:var(--text);font-size:15px;font-weight:800;letter-spacing:.5px;
-  text-decoration:none;flex-shrink:0;padding:0 4px 0 0}
-.nav-logo:hover{color:var(--blue)}
-.main-nav{display:flex;align-items:center;gap:2px;flex-shrink:0}
-.nav-tab{display:inline-flex;align-items:center;padding:4px 12px;color:var(--muted);
-  font-size:11px;font-weight:500;text-decoration:none;border:none;background:none;
-  border-radius:4px;cursor:pointer;font-family:inherit;transition:color .12s,background .12s;
-  white-space:nowrap}
+/* ── Logo + main nav tabs ──
+   Tabs, the "Build a station" CTA and the Tools summary share one 32 px
+   control height so the row aligns whatever mix a page shows. */
+.nav-logo{display:inline-flex;align-items:center;color:var(--text);text-decoration:none;
+  flex-shrink:0;padding:0 4px 0 0;border-radius:var(--radius-md)}
+.nav-logo img{display:block;height:26px;width:auto}
+.main-nav{display:flex;align-items:center;gap:2px;flex-shrink:0;font-family:var(--ui-font)}
+.nav-tab{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;color:var(--muted);
+  font-family:var(--ui-font);font-size:var(--fs-base);font-weight:500;text-decoration:none;border:none;background:none;
+  border-radius:var(--radius-md);cursor:pointer;transition:color .12s,background-color .12s;white-space:nowrap}
 .nav-tab:hover{color:var(--text);background:rgba(255,255,255,.06)}
-.nav-tab.active{color:var(--blue);font-weight:600;background:rgba(88,166,255,.10)}
+.nav-tab.active{color:var(--blue);font-weight:600;background:color-mix(in srgb,var(--blue) 10%,transparent)}
+.skip-link{position:absolute;left:-9999px;top:8px;z-index:2000;background:var(--card);color:var(--text);
+  font-family:var(--ui-font);padding:8px 12px;border:1px solid var(--blue);border-radius:var(--radius-md)}
+.skip-link:focus{left:8px}
 
-/* ── App panel ── */
+/* ── App panel (About) ──
+   visibility (delayed on close) keeps the closed panel's links out of the
+   tab order while the fade still plays. */
 .app-panel{position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:2000;
   display:flex;align-items:center;justify-content:center;
-  opacity:0;pointer-events:none;transition:opacity .18s}
-.app-panel.open{opacity:1;pointer-events:auto}
-.app-panel-inner{background:var(--card);border:1px solid var(--border);border-radius:10px;
-  width:min(660px,92vw);max-height:82vh;overflow-y:auto;
-  transform:translateY(-12px);transition:transform .18s}
+  opacity:0;visibility:hidden;pointer-events:none;transition:opacity .18s,visibility 0s linear .18s}
+.app-panel.open{opacity:1;visibility:visible;pointer-events:auto;transition:opacity .18s}
+.app-panel-inner{background:var(--hdr-ink);border:1px solid var(--hdr-line);border-radius:var(--radius-xl);
+  width:min(680px,92vw);max-height:84vh;overflow-y:auto;overscroll-behavior:contain;
+  box-shadow:0 24px 64px rgba(0,0,0,.5);
+  transform:translateY(-12px);transition:transform .18s;
+  scrollbar-width:thin;scrollbar-color:var(--hdr-line) transparent}
 .app-panel.open .app-panel-inner{transform:translateY(0)}
-.app-panel-header{display:flex;align-items:center;justify-content:space-between;
-  padding:16px 20px;border-bottom:1px solid var(--border);margin-bottom:0}
-.app-panel-title{font-size:14px;font-weight:700;color:var(--text);letter-spacing:.4px}
-.app-panel-body-inner{padding:20px}
-.app-panel-body-inner h3{font-size:13px;font-weight:700;color:var(--blue);
-  margin-bottom:10px;text-transform:uppercase;letter-spacing:.8px}
-.app-panel-body-inner p{color:var(--muted);font-size:12px;line-height:1.7;margin-bottom:12px}
+/* The header stays put while the body scrolls */
+.app-panel-header{position:sticky;top:0;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:10px 12px 10px 24px;background:var(--hdr-ink);border-bottom:1px solid var(--hdr-line)}
+.app-panel-title{margin:0;font-size:17px;font-weight:700;color:var(--text-strong);text-wrap:balance}
+.app-panel-header .cam-modal-close{width:36px;height:36px;padding:0;display:inline-flex;align-items:center;justify-content:center;
+  border:1px solid var(--hdr-line);border-radius:var(--hc-r);background:none;color:var(--hdr-muted);font-size:var(--fs-lg)}
+.app-panel-header .cam-modal-close:hover{color:var(--hdr-text);border-color:var(--hdr-muted);background:none}
+.app-panel-body-inner{padding:22px 24px 24px}
+.app-panel-body-inner p{color:var(--hdr-muted);font-size:var(--fs-base);line-height:1.65;margin:0 0 12px}
+.app-panel-body-inner strong{color:var(--hdr-text);font-weight:600}
 .app-panel-body-inner a{color:var(--blue);text-decoration:none}
 .app-panel-body-inner a:hover{text-decoration:underline}
-.app-panel-placeholder{padding:40px 20px;text-align:center;color:var(--muted);font-size:12px}
-.app-panel-inner{scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.app-panel-body-inner a:focus-visible,.ap-stats summary:focus-visible{outline:2px solid var(--blue);outline-offset:2px;border-radius:var(--radius-2xs)}
+/* About ROVIMEN */
+.ap-intro{display:flex;flex-direction:column;align-items:flex-start;gap:14px;padding-bottom:20px;border-bottom:1px solid var(--hdr-line)}
+.ap-logo{width:220px;max-width:70%;height:auto}
+.app-panel-body-inner .ap-lede{margin:0;color:var(--text);font-size:var(--fs-xl);line-height:1.6}
+.app-panel-body-inner .ap-acronym{color:var(--hdr-teal);font-style:normal;font-weight:700}
+.ap-sec{padding:18px 0 4px;border-bottom:1px solid var(--hdr-line)}
+.ap-sec h3{margin:0 0 10px;font-size:var(--fs-xl);font-weight:600;color:var(--text-strong)}
+.ap-people{list-style:none;margin:0 0 14px;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px}
+.ap-people li{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border:1px solid var(--hdr-line);border-radius:var(--radius-md);font-size:var(--fs-base)}
+.ap-people span{color:var(--hdr-muted)}
+.ap-people a{font-size:var(--fs-md);overflow-wrap:anywhere}
+.ap-links{display:flex;flex-wrap:wrap;gap:6px 20px}
+.ap-partners{display:flex;align-items:center;gap:24px;flex-wrap:wrap;margin:4px 0 14px}
+.ap-partners a{display:inline-flex;align-items:center;text-decoration:none;border-radius:var(--radius-md)}
+.ap-partners img{display:block;width:auto}
+/* Participating associations: logo and name, the logo in a fixed box so
+   wide wordmarks and round badges line up */
+.ap-sub{margin:4px 0 10px;font-size:var(--fs-base);font-weight:600;color:var(--hdr-text)}
+.ap-orgs{list-style:none;margin:0 0 14px;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.ap-orgs li,.ap-orgs a{display:flex;align-items:center;gap:12px;min-width:0;color:var(--text);font-size:var(--fs-base)}
+.ap-orgs li{padding:8px 10px;border:1px solid var(--hdr-line);border-radius:var(--radius-md)}
+.app-panel-body-inner .ap-orgs a{color:var(--text);flex:1}
+.app-panel-body-inner .ap-orgs a:hover{color:var(--hdr-text);text-decoration:none}
+.ap-orgs li:has(a:hover){border-color:var(--hdr-muted)}
+.ap-org-logo{flex:0 0 96px;height:40px;display:flex;align-items:center;justify-content:center}
+.ap-org-logo img{display:block;max-width:96px;max-height:40px;width:auto;height:auto}
+.ap-org-round{border-radius:50%}
+.ap-logo-gmn{height:44px}
+.ap-logo-astro{height:14px}
+.ap-stats{font-size:var(--fs-md);color:var(--hdr-muted)}
+.ap-figures{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;margin:0 0 12px;
+  background:var(--hdr-line);border:1px solid var(--hdr-line);border-radius:var(--radius-md);overflow:hidden}
+.ap-figures div{display:flex;flex-direction:column-reverse;justify-content:flex-end;gap:4px;padding:10px 12px;background:var(--hdr-ink)}
+.ap-figures dt{color:var(--hdr-muted);font-size:var(--fs-sm);line-height:1.35}
+.ap-figures dd{margin:0;color:var(--hdr-text);font-family:var(--mono-font);font-size:var(--fs-3xl);font-weight:700;
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.ap-figures dd.ap-blue{color:var(--blue)}
+.ap-figures dd.ap-green{color:var(--green)}
+.ap-figures dd.ap-yellow{color:var(--yellow)}
+.app-panel-body-inner .ap-note{font-size:var(--fs-md)}
+.ap-note b{color:var(--hdr-text);font-family:var(--mono-font);font-weight:600;font-variant-numeric:tabular-nums}
+.ap-stats details{margin:4px 0 12px}
+.ap-stats summary{cursor:pointer;color:var(--blue);font-weight:600;font-size:var(--fs-md)}
+.ap-table{width:100%;border-collapse:collapse;font-size:var(--fs-sm);margin-top:8px}
+.ap-table thead tr{color:var(--hdr-muted);text-align:left;border-bottom:1px solid var(--hdr-line)}
+.ap-table th,.ap-table td{padding:5px 8px}
+.ap-table tbody tr+tr{border-top:1px solid color-mix(in srgb,var(--hdr-text) 5%,transparent)}
+.ap-table th{text-align:left;font-weight:600}
+.ap-table .ap-num{text-align:right;font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+.ap-table .ap-code{font-family:var(--mono-font);font-weight:600}
+.app-panel-body-inner .ap-foot{font-size:var(--fs-sm);margin-bottom:14px}
+.app-panel-body-inner .ap-license{margin:16px 0 0;font-size:var(--fs-sm)}
+@media(max-width:600px){
+  .ap-figures{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .ap-orgs{grid-template-columns:1fr}
+  .app-panel-body-inner .ap-lede{font-size:var(--fs-lg)}
+}
+.app-panel-placeholder{padding:40px 20px;text-align:center;color:var(--muted);font-size:var(--fs-md)}
 .app-panel-inner::-webkit-scrollbar{width:6px}
 .app-panel-inner::-webkit-scrollbar-track{background:transparent}
-.app-panel-inner::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.app-panel-inner::-webkit-scrollbar-thumb{background:var(--border);border-radius:var(--radius-xs)}
 .app-panel-inner::-webkit-scrollbar-thumb:hover{background:var(--muted)}
 
-/* ── Sub-tabs ── */
+/* ── Second-level tab rows ──
+   .sub-tabs (station page) and .inner-tabs (admin sections) share the site
+   tab-row look: sans label, muted until hovered, blue underline when active,
+   and a row that scrolls sideways on narrow screens instead of wrapping. */
 .sub-tabs{background:var(--card);border-bottom:1px solid var(--border);padding:0 24px;
-  display:flex;gap:0;position:sticky;top:42px;z-index:1000}
-.sub-tabs::after{content:'';position:absolute;right:0;top:0;bottom:0;width:24px;
-  background:linear-gradient(to right,transparent,var(--bg));pointer-events:none;z-index:1}
-.sub-tab{padding:9px 20px;background:none;border:none;border-bottom:2px solid transparent;
-  color:var(--muted);cursor:pointer;font-family:inherit;font-size:12px;font-weight:500;
-  transition:all .15s;letter-spacing:.4px}
+  display:flex;gap:4px;position:sticky;top:42px;z-index:1000;overflow-x:auto;
+  scrollbar-width:none;overscroll-behavior-x:contain}
+.sub-tabs::-webkit-scrollbar{display:none}
+.sub-tab{padding:10px 16px;background:none;border:none;border-bottom:2px solid transparent;
+  color:var(--muted);cursor:pointer;font-family:var(--ui-font);font-size:var(--fs-base);font-weight:500;
+  white-space:nowrap;flex-shrink:0;transition:color .15s,border-color .15s}
 .sub-tab:hover{color:var(--text)}
-.sub-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
-
-/* ── Inner tabs (System Admin sub-navigation) ── */
-.inner-tabs{display:flex;gap:0;flex-wrap:wrap;margin-bottom:18px;
-  border-bottom:1px solid var(--border)}
-.inner-tab{padding:7px 18px;background:none;border:none;border-bottom:2px solid transparent;
-  color:var(--muted);cursor:pointer;font-family:inherit;font-size:12px;font-weight:500;
-  transition:all .15s;white-space:nowrap}
-.inner-tab:hover{color:var(--text);background:rgba(255,255,255,.04)}
-.inner-tab.active{color:var(--blue);border-bottom-color:var(--blue);background:rgba(88,166,255,.07)}
+.sub-tab.active{color:var(--text);border-bottom-color:var(--blue)}
+.sub-tab:focus-visible{outline:2px solid var(--blue);outline-offset:-2px}
 
 /* ── Camera buttons ── */
 .cam-btns{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}
-.cam-btn{background:none;border:1px solid var(--border);border-radius:4px;
-  color:var(--muted);cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;
-  padding:5px 14px;transition:all .15s}
+.cam-btn{background:none;border:1px solid var(--border);border-radius:var(--radius-md);
+  color:var(--muted);cursor:pointer;font-family:inherit;font-size:var(--fs-md);font-weight:600;
+  padding:5px 14px;transition:color .15s,background-color .15s,border-color .15s}
 .cam-btn:hover{border-color:var(--blue);color:var(--text)}
-.cam-btn.active{background:rgba(88,166,255,.12);border-color:var(--blue);color:var(--blue)}
-#vdb-cam-pointing{display:block;font-size:11px;font-weight:600;font-family:'SF Mono',Consolas,monospace;
+.cam-btn.active{background:color-mix(in srgb,var(--blue) 12%,transparent);border-color:var(--blue);color:var(--blue)}
+#vdb-cam-pointing{display:block;font-size:var(--fs-sm);font-weight:600;font-family:var(--mono-font);font-variant-numeric:tabular-nums;
   color:var(--text);letter-spacing:.4px;margin-top:4px;min-height:1em}
-.tl-cam-pointing{font-size:11px;font-weight:500;font-family:'SF Mono',Consolas,monospace;
-  color:var(--muted);margin-left:8px;letter-spacing:.3px}
 
 /* ── Layout ── */
 main{padding:20px 24px;max-width:1500px;margin:0 auto}
 .tab-pane{display:none}.tab-pane.active{display:block}
 
 /* ── Cards ── */
-.card{background:var(--card);border:1px solid var(--border);border-radius:8px;
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xl);
   padding:18px 20px;margin-bottom:18px}
-.card-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.5px;
+.card-title{font-size:var(--fs-sm);font-weight:600;text-transform:uppercase;letter-spacing:1.5px;
   color:var(--muted);margin-bottom:14px;padding-bottom:10px;border-bottom:1px solid var(--border);
   display:flex;align-items:center;gap:10px}
-.offline{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.25);border-radius:6px;
+.offline{background:color-mix(in srgb,var(--red) 8%,transparent);border:1px solid color-mix(in srgb,var(--red) 25%,transparent);border-radius:var(--radius-md);
   padding:20px;color:var(--red);text-align:center;margin-bottom:18px}
 
 /* Sky-coverage dome — full-width card at the top of the RMS pane. The PNG
@@ -150,26 +296,14 @@ main{padding:20px 24px;max-width:1500px;margin:0 auto}
 .sky-dome-wrap{display:flex;justify-content:center;align-items:center}
 .sky-dome-img{max-width:min(560px,90%);width:100%;height:auto;
   aspect-ratio:1/1;object-fit:contain;cursor:zoom-in;
-  background:#05050f;border-radius:6px;display:block}
-.no-data{color:var(--muted);font-size:12px;padding:16px 0;text-align:center}
-.loading{color:var(--muted);font-size:12px;padding:8px 0}
+  background:#05050f;border-radius:var(--radius-md);display:block}
+.no-data{color:var(--muted);font-size:var(--fs-md);padding:16px 0;text-align:center}
+.loading{color:var(--muted);font-size:var(--fs-md);padding:8px 0}
 
 /* ── Vitals ── */
-.vitals-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
-.vitals-item{}
-.vitals-label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin-bottom:6px;
-  display:flex;justify-content:space-between}
 .vitals-val{font-size:22px;font-weight:700;margin-bottom:8px}
-.vitals-bar-track{height:4px;background:var(--border);border-radius:3px;overflow:hidden}
-.vitals-bar-fill{height:100%;border-radius:3px;transition:width .6s}
-.v-cpu{color:var(--blue)}.v-ram{color:var(--purple)}
 
-/* ── Services ── */
-.svc-group-label{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);
-  margin:12px 0 6px}.svc-group-label:first-child{margin-top:0}
-.svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:8px}
-.svc-item{display:flex;align-items:center;gap:8px;padding:9px 12px;
-  background:var(--bg);border:1px solid var(--border);border-radius:6px}
+/* ── Service status dots ── */
 /* Service status dots — same shape vocabulary as .pill-dot. Filled green
    disc = active service; red ring = failed/inactive; muted ring = unknown.
    Shape difference avoids colour-only encoding (8% of male users are
@@ -177,102 +311,64 @@ main{padding:20px 24px;max-width:1500px;margin:0 auto}
 .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;box-sizing:border-box;
   background:transparent;border:1.5px solid var(--muted)}
 .dot-active{background:var(--green);border-color:var(--green);box-shadow:0 0 5px var(--green)}
+/* Running, but not under a systemd unit we could resolve: green ring (up)
+   without the filled disc (not managed) — an OK-with-note, not a failure. */
+.dot-unmanaged{background:transparent;border-color:var(--green)}
 .dot-inactive,.dot-failed{background:transparent;border-color:var(--red)}
 .dot-unknown{background:transparent;border-color:var(--muted)}
-.svc-grid .svc-name{flex:1;font-size:12px;font-weight:500}
-.svc-cam{font-size:10px;color:var(--muted);background:rgba(255,255,255,.05);
-  padding:1px 6px;border-radius:3px}
-.svc-item.s-active{border-color:rgba(63,185,80,.18)}
-.svc-item.s-inactive,.svc-item.s-failed{border-color:rgba(248,81,73,.18)}
 
-/* ── Storage ── */
-.stbl{width:100%;border-collapse:collapse}
-.stbl th{text-align:left;padding:7px 12px;color:var(--muted);font-weight:500;
-  border-bottom:1px solid var(--border);font-size:10px;text-transform:uppercase;letter-spacing:.5px}
-.stbl td{padding:9px 12px;border-bottom:1px solid rgba(48,54,61,.4)}
-.stbl tr:last-child td{border-bottom:none}
-.stbl tr:hover td{background:rgba(255,255,255,.02)}
-.c-folder{color:var(--blue);font-weight:500}
-.c-size{color:var(--yellow);font-weight:600}
-.disk-section{margin-top:14px;padding-top:14px;border-top:1px solid var(--border)}
-.disk-meta{display:flex;justify-content:space-between;margin-bottom:6px;font-size:11px;color:var(--muted)}
-.disk-track{height:5px;background:var(--border);border-radius:3px;overflow:hidden}
-.disk-fill{height:100%;border-radius:3px;transition:width .5s}
-.ov-plot-btn{font-size:11px;padding:4px 8px;font-family:inherit;cursor:pointer;
-  background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:4px;
-  color:var(--muted);transition:all .15s}
+/* ── Plot buttons ── */
+.ov-plot-btn{font-size:var(--fs-sm);padding:4px 8px;font-family:inherit;cursor:pointer;
+  background:rgba(255,255,255,.06);border:1px solid var(--border);border-radius:var(--radius-md);
+  color:var(--muted);transition:color .15s,background-color .15s,border-color .15s}
 .ov-plot-btn:hover{color:var(--text);background:rgba(255,255,255,.12);border-color:var(--muted)}
 
 /* ── Camera windows ── */
-.cam-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(480px,1fr));gap:14px}
-.cam-window{background:var(--bg);border:1px solid var(--border);border-radius:8px;overflow:hidden}
-.cam-window-header{display:flex;align-items:center;gap:8px;padding:10px 14px;
-  background:var(--card);border-bottom:1px solid var(--border)}
-.cam-code{color:var(--green);font-weight:700;font-size:13px;flex:1}
-.cam-ip{font-size:10px;color:var(--muted)}
-.cam-live-btn{background:rgba(63,185,80,.12);border:1px solid rgba(63,185,80,.3);
-  color:var(--green);font-family:inherit;font-size:11px;font-weight:600;
-  padding:5px 12px;border-radius:5px;cursor:pointer;transition:all .15s}
-.cam-live-btn:hover{background:rgba(63,185,80,.22)}
-.cam-live-btn.stop{background:rgba(248,81,73,.12);border-color:rgba(248,81,73,.3);color:var(--red)}
-.cam-expand-btn{background:rgba(255,255,255,.06);border:1px solid var(--border);
-  color:var(--muted);font-family:inherit;font-size:11px;padding:5px 10px;
-  border-radius:5px;cursor:pointer;transition:all .15s;margin-left:4px}
-.cam-expand-btn:hover{color:var(--text);border-color:var(--blue)}
+.cam-code{color:var(--green);font-weight:700;font-size:var(--fs-base);flex:1}
+.cam-ip{font-size:var(--fs-xs);color:var(--muted)}
+
 .cam-body{position:relative;background:#000;aspect-ratio:16/9}
-.cam-body img{width:100%;height:100%;object-fit:cover;display:block}
-.cam-placeholder{width:100%;height:100%;display:flex;align-items:center;justify-content:center;
-  color:#555;font-size:12px;background:#0a0a0a}
+.cam-body img{width:100%;height:100%;object-fit:contain;display:block}
+
 .live-status{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-  color:#888;font-size:13px;background:rgba(0,0,0,.85);z-index:1;pointer-events:none;
+  color:#888;font-size:var(--fs-base);background:rgba(0,0,0,.85);z-index:1;pointer-events:none;
   text-align:center;padding:20px;box-sizing:border-box;word-break:break-word}
 .live-status.error{color:var(--red)}
-.cam-live-dot{width:8px;height:8px;border-radius:50%;background:var(--red);
-  animation:pulse 1s infinite;display:inline-block;margin-right:4px}
+
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 
 /* ── Camera / stack expand modal ── */
 .cam-modal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.85);
   z-index:200;align-items:center;justify-content:center;backdrop-filter:blur(4px)}
 .cam-modal.open{display:flex}
-.cam-modal-inner{background:var(--card);border:1px solid var(--border);border-radius:10px;
+.cam-modal-inner{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xl);
   overflow:hidden;width:min(1280px,96vw);max-height:92vh;display:flex;flex-direction:column}
 .cam-modal-header{display:flex;align-items:center;justify-content:space-between;
   padding:10px 16px;border-bottom:1px solid var(--border);flex-shrink:0}
-.cam-modal-title{color:var(--text);font-size:13px;font-weight:600}
-.cam-modal-close{background:none;border:1px solid var(--border);color:var(--text);font-size:12px;
-  cursor:pointer;padding:6px 14px;border-radius:5px;font-weight:500;white-space:nowrap}
+.cam-modal-title{color:var(--text);font-size:var(--fs-base);font-weight:600}
+.cam-modal-close{background:none;border:1px solid var(--border);color:var(--text);font-size:var(--fs-md);
+  cursor:pointer;padding:6px 14px;border-radius:var(--radius-md);font-weight:500;white-space:nowrap}
 .cam-modal-close:hover{background:rgba(255,255,255,.1);border-color:var(--blue)}
 .cam-modal-img{width:100%;max-height:80vh;object-fit:contain;display:block;background:#000}
 .cam-modal.plot-mode .cam-modal-inner{width:min(960px,96vw)}
 .cam-modal.plot-mode .cam-modal-img{width:100%;height:68vh;max-height:68vh;object-fit:contain}
 
 /* ── Timelapses ── */
-.tl-controls{display:flex;align-items:center;gap:12px;margin-bottom:14px}
-.tl-controls label{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
-.tl-night-sel{background:var(--bg);border:1px solid var(--border);color:var(--text);
-  font-family:inherit;font-size:12px;padding:5px 10px;border-radius:5px;cursor:pointer}
-.tl-night-sel:focus{outline:none;border-color:var(--blue)}
+
 .tl-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(480px,1fr));gap:14px}
-.tl-cam-block{background:var(--bg);border:1px solid var(--border);border-radius:6px;overflow:hidden}
-.tl-cam-header{padding:8px 14px;border-bottom:1px solid var(--border);
-  font-size:12px;font-weight:600;color:var(--green);display:flex;justify-content:space-between;align-items:center}
-.tl-dl-btn{font-size:11px;font-weight:400;color:var(--blue);text-decoration:none}
-.tl-dl-btn:hover{text-decoration:underline}
-.tl-video{width:100%;aspect-ratio:16/9;display:block;background:#000}
 
 /* ── Final Data Products: last-frame tiles ──
    One tile per camera, rolling colour chunk stack from /api/latest_frame.
    Sized the same as the timelapse grid so the two cards line up visually
    when both are open on the FDP tab. */
 .fdp-frame-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px}
-.fdp-frame-tile{background:var(--bg);border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.fdp-frame-tile{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);overflow:hidden}
 .fdp-frame-header{padding:8px 14px;border-bottom:1px solid var(--border);
-  font-size:12px;font-weight:600;color:var(--green);display:flex;justify-content:space-between;align-items:center;gap:8px}
-.fdp-cam-pointing{font-size:11px;font-weight:500;font-family:'SF Mono',Consolas,monospace;
+  font-size:var(--fs-md);font-weight:600;color:var(--green);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.fdp-cam-pointing{font-size:var(--fs-sm);font-weight:500;font-family:var(--mono-font);font-variant-numeric:tabular-nums;
   color:var(--muted);margin-left:6px}
-.fdp-frame-stamp{font-size:10px;font-weight:400;color:var(--muted);font-family:'SF Mono',Consolas,monospace}
-.fdp-frame-img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000;cursor:zoom-in}
+.fdp-frame-stamp{font-size:var(--fs-xs);font-weight:400;color:var(--muted);font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+.fdp-frame-img{width:100%;aspect-ratio:16/9;object-fit:contain;display:block;background:#000;cursor:zoom-in}
 @media (max-width: 600px) {
   .fdp-frame-grid{grid-template-columns:1fr}
 }
@@ -280,205 +376,140 @@ main{padding:20px 24px;max-width:1500px;margin:0 auto}
 /* ── Final Data Products: per-camera RMS night plots ──
    One row per camera with the most recent night that has plots; well-known
    plot files only (calibration/radiants/density/count/velocities/residuals). */
-.fdp-night-plots-cam-row{margin-bottom:14px}
-.fdp-night-plots-cam-header{font-size:12px;color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.06em}
-.fdp-night-plots-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px}
-.fdp-night-plots-tile{background:var(--card-2,#111);border-radius:6px;overflow:hidden;cursor:zoom-in;border:1px solid var(--border,#222);transition:border-color .15s}
-.fdp-night-plots-tile:hover{border-color:var(--blue,#2563eb)}
-.fdp-night-plots-tile img{width:100%;height:auto;display:block;aspect-ratio:4/3;object-fit:contain;background:#000}
-.fdp-night-plots-tile-cap{font-size:10px;color:var(--muted);padding:4px 6px;background:var(--card-3,#0a0a0a);border-top:1px solid var(--border,#222)}
+
+/* Plot night is older than the night that should be processed by now. */
 
 /* ── Final Data Products: per-camera color meteor stacks ── */
-.fdp-color-stack-cam-row{margin-bottom:14px}
-.fdp-color-stack-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
 
 /* Horizontal filmstrip rows for the Video DB "All cams" toggle. One row
    per camera, scrollable on the X axis. Native scrollbar styled subtle.
    The right-edge fade mask is a scroll affordance for iOS, where the
    native scrollbar is hidden — without it first-time mobile users don't
    discover the row is horizontally scrollable. */
-.vdb-cam-filmstrip{padding-bottom:6px;scrollbar-width:thin;scrollbar-color:var(--border,#222) transparent;
+.vdb-cam-filmstrip{padding-bottom:6px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;
   -webkit-mask-image:linear-gradient(to right,#000 0,#000 calc(100% - 12px),transparent 100%);
           mask-image:linear-gradient(to right,#000 0,#000 calc(100% - 12px),transparent 100%)}
 .vdb-cam-filmstrip::-webkit-scrollbar{height:8px}
 .vdb-cam-filmstrip::-webkit-scrollbar-track{background:transparent}
-.vdb-cam-filmstrip::-webkit-scrollbar-thumb{background:var(--border,#222);border-radius:4px}
-.vdb-cam-filmstrip::-webkit-scrollbar-thumb:hover{background:var(--muted,#444)}
+.vdb-cam-filmstrip::-webkit-scrollbar-thumb{background:var(--border);border-radius:var(--radius-md)}
+.vdb-cam-filmstrip::-webkit-scrollbar-thumb:hover{background:var(--muted)}
 
 /* ── RMS Detection ── */
-.rms-section{background:var(--bg);border:1px solid var(--border);border-radius:8px;
-  padding:16px 18px;margin-bottom:12px}
-.rms-section-header{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
-.rms-cam-code{font-size:14px;font-weight:700;color:var(--green);white-space:nowrap}
+
+.rms-cam-code{font-size:var(--fs-lg);font-weight:700;color:var(--green);white-space:nowrap}
 .rms-night-sel{background:var(--bg);border:1px solid var(--border);color:var(--text);
-  font-family:inherit;font-size:13px;padding:5px 10px;border-radius:5px;cursor:pointer;
+  font-family:inherit;font-size:var(--fs-base);padding:5px 10px;border-radius:var(--radius-md);cursor:pointer;
   flex:1;min-width:160px;max-width:280px}
-.rms-night-sel:focus{outline:none;border-color:var(--blue)}
-.rms-meteor-count{font-size:13px;color:var(--muted);margin-left:auto;white-space:nowrap}
-.rms-filter-row{display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin:0 0 12px;
-  padding:8px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px}
-.rms-flt-label{font-size:11px;color:var(--muted);display:flex;align-items:center;gap:6px;
-  text-transform:uppercase;letter-spacing:.4px;font-weight:600}
-.rms-flt-input,.rms-flt-select{background:var(--card);color:var(--text);
-  border:1px solid var(--border);border-radius:4px;padding:3px 6px;
-  font-size:12px;font-family:inherit}
-.rms-flt-input{width:54px;text-align:center;font-family:monospace}
-.rms-flt-input:hover,.rms-flt-select:hover{border-color:var(--blue)}
-.rms-flt-input:focus,.rms-flt-select:focus{outline:none;border-color:var(--blue)}
-.rms-flt-input.invalid{border-color:#e74c3c;color:#e74c3c}
-.rms-flt-btnrow{display:inline-flex;gap:4px;flex-wrap:wrap;align-items:center}
+.rms-night-sel:focus{border-color:var(--blue)}
+
+.rms-flt-input{background:var(--card);color:var(--text);
+  border:1px solid var(--border);border-radius:var(--radius-md);padding:3px 6px;
+  font-size:var(--fs-md);font-family:inherit}
+.rms-flt-input{width:54px;text-align:center;font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+.rms-flt-input:hover{border-color:var(--blue)}
+.rms-flt-input:focus{border-color:var(--blue)}
+.rms-flt-input.invalid{border-color:var(--error);color:var(--error)}
+
 /* Calendar night picker */
 .rms-cal-wrap{position:relative;display:inline-block}
 .rms-cal-btn{background:var(--card);color:var(--text);border:1px solid var(--border);
-  border-radius:4px;padding:4px 9px;font-size:12px;font-family:inherit;cursor:pointer;
+  border-radius:var(--radius-md);padding:4px 9px;font-size:var(--fs-md);font-family:inherit;cursor:pointer;
   display:inline-flex;align-items:center;gap:6px;transition:border-color .12s,color .12s}
 .rms-cal-btn:hover{border-color:var(--blue);color:var(--blue)}
 .rms-cal-btn.active{border-color:var(--blue);color:var(--blue)}
-.rms-cal-icon{font-size:13px}
-.rms-cal-chev{font-size:10px;color:var(--muted)}
+
 .rms-cal-pop{position:absolute;top:calc(100% + 6px);left:0;z-index:1000;
-  background:var(--card);border:1px solid var(--border);border-radius:6px;
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);
   box-shadow:0 6px 24px rgba(0,0,0,.5);padding:10px;min-width:240px;user-select:none}
 .rms-cal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-.rms-cal-month{font-size:12px;font-weight:600;color:var(--text)}
+.rms-cal-month{font-size:var(--fs-md);font-weight:600;color:var(--text)}
 .rms-cal-nav{background:transparent;border:1px solid var(--border);color:var(--text);
-  border-radius:4px;padding:6px 12px;cursor:pointer;font-size:12px}
+  border-radius:var(--radius-md);padding:6px 12px;cursor:pointer;font-size:var(--fs-md)}
 .rms-cal-nav:hover:not([disabled]){border-color:var(--blue);color:var(--blue)}
 .rms-cal-nav[disabled]{opacity:.3;cursor:not-allowed}
 .rms-cal-dows,.rms-cal-grid{display:grid;grid-template-columns:repeat(7,28px);gap:2px}
 .rms-cal-dows{margin-bottom:4px}
-.rms-cal-dows span{font-size:10px;color:var(--muted);text-align:center;text-transform:uppercase;letter-spacing:.5px}
+.rms-cal-dows span{font-size:var(--fs-xs);color:var(--muted);text-align:center;text-transform:uppercase;letter-spacing:.5px}
 .rms-cal-cell{display:inline-flex;align-items:center;justify-content:center;
-  width:28px;height:28px;font-size:12px;color:var(--text);border-radius:4px;cursor:pointer;
+  width:28px;height:28px;font-size:var(--fs-md);color:var(--text);border-radius:var(--radius-md);cursor:pointer;
   border:1px solid transparent}
 .rms-cal-cell:hover:not(.rms-cal-disabled):not(.rms-cal-empty){border-color:var(--blue)}
 .rms-cal-empty{visibility:hidden}
 .rms-cal-disabled{color:var(--muted);opacity:.45;cursor:not-allowed}
-.rms-cal-selected{background:var(--blue);color:#0d1117;font-weight:600}
+.rms-cal-selected{background:var(--blue);color:var(--bg);font-weight:600}
 .rms-cal-selected:hover{border-color:var(--text)}
 .rms-cal-foot{display:flex;align-items:center;gap:6px;margin-top:8px;padding-top:8px;
   border-top:1px solid var(--border)}
-.rms-cal-count{font-size:11px;color:var(--muted);flex:1}
+.rms-cal-count{font-size:var(--fs-sm);color:var(--muted);flex:1}
 .rms-cal-action{background:var(--bg);color:var(--text);border:1px solid var(--border);
-  border-radius:4px;padding:3px 10px;font-size:11px;font-family:inherit;cursor:pointer}
+  border-radius:var(--radius-md);padding:3px 10px;font-size:var(--fs-sm);font-family:inherit;cursor:pointer}
 .rms-cal-action:hover{border-color:var(--blue);color:var(--blue)}
-.rms-cal-go{background:var(--blue);color:#0d1117;border-color:var(--blue);font-weight:600}
-.rms-cal-go:hover{background:var(--text);border-color:var(--text);color:#0d1117}
-.rms-cal-empty-msg{font-size:12px;color:var(--muted);padding:20px;text-align:center}
+.rms-cal-go{background:var(--blue);color:var(--bg);border-color:var(--blue);font-weight:600}
+.rms-cal-go:hover{background:var(--text);border-color:var(--text);color:var(--bg)}
+.rms-cal-empty-msg{font-size:var(--fs-md);color:var(--muted);padding:20px;text-align:center}
 .rms-flt-btn{background:var(--card);color:var(--text);border:1px solid var(--border);
-  border-radius:4px;padding:3px 9px;font-size:12px;font-family:inherit;cursor:pointer;
+  border-radius:var(--radius-md);padding:3px 9px;font-size:var(--fs-md);font-family:inherit;cursor:pointer;
   transition:border-color .12s,background .12s,color .12s;white-space:nowrap}
 .rms-flt-btn:hover{border-color:var(--blue);color:var(--blue)}
-.rms-flt-btn.active{background:var(--blue);border-color:var(--blue);color:#0d1117;font-weight:600}
-.rms-flt-clear{background:transparent;color:var(--muted);border:1px solid var(--border);
-  border-radius:4px;padding:3px 8px;font-size:11px;cursor:pointer;font-family:inherit}
-.rms-flt-clear:hover{color:var(--text);border-color:var(--blue)}
-.rms-flt-summary{font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap;font-style:italic}
+.rms-flt-btn.active{background:var(--blue);border-color:var(--blue);color:var(--bg);font-weight:600}
+
+.rms-flt-summary{font-size:var(--fs-sm);color:var(--muted);margin-left:auto;white-space:nowrap;font-style:italic}
 .rms-chunk-area .vdb-chunk-grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}
 .rms-plots-section{margin-top:18px;border-top:1px solid var(--border);padding-top:14px}
-.rms-plots-title{font-size:13px;font-weight:600;color:var(--text);margin-bottom:10px;cursor:pointer;user-select:none;list-style:revert}
-.rms-plots-title::-webkit-details-marker{color:var(--muted)}
-details.rms-plots-section[open] .rms-plots-title{margin-bottom:10px}
-details.rms-plots-section:not([open]) .rms-plots-title{margin-bottom:0}
+
 /* Plots grid matches the video-thumbnail grid above (.vdb-chunk-grid) so plots
    and clips line up at the same size. The RMS zoom slider (rmsUpdateZoom)
    rescales both grids with the same minmax value. */
 .rms-plots-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px}
-.rms-plot-card{background:var(--bg2);border:1px solid var(--border);border-radius:6px;
+.rms-plot-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius-md);
   overflow:hidden;cursor:pointer;transition:border-color .15s;display:flex;flex-direction:column}
 .rms-plot-card:hover{border-color:var(--muted)}
 /* No fixed aspect-ratio — RMS plots have mixed ratios (stacks are 16:9, but
    fieldsums/calibration_variation are ~10:7, photometry is wider). Let each
    image keep its intrinsic ratio so nothing is letterboxed/stretched. */
 .rms-plot-card img{width:100%;height:auto;display:block;background:var(--bg)}
-.rms-plot-label{font-size:11px;font-weight:600;color:var(--text);padding:6px 8px;white-space:nowrap;
+.rms-plot-label{font-size:var(--fs-sm);font-weight:600;color:var(--text);padding:6px 8px;white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;flex-shrink:0;background:var(--bg2)}
 
 /* ── Settings ── */
-.settings-cam-block{background:var(--bg);border:1px solid var(--border);border-radius:8px;
+.settings-cam-block{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-xl);
   padding:16px 18px;margin-bottom:12px}
-.settings-cam-header{font-size:13px;font-weight:700;color:var(--green);margin-bottom:10px}
-.settings-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:12px}
+.settings-cam-header{font-size:var(--fs-base);font-weight:700;color:var(--green);margin-bottom:10px}
+.settings-kv{display:grid;grid-template-columns:auto 1fr;gap:4px 16px;font-size:var(--fs-md)}
 .settings-key{color:var(--muted);text-align:right;padding:2px 0}
 .settings-val{color:var(--text);padding:2px 0}
-.settings-section{font-size:10px;text-transform:uppercase;letter-spacing:1px;
-  color:var(--muted);margin:14px 0 6px;padding-bottom:4px;border-bottom:1px solid var(--border)}
-pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radius:6px;
-  padding:14px;font-size:11px;color:var(--text);overflow-x:auto;white-space:pre-wrap;word-break:break-all}
-.settings-edit-card{background:var(--bg);border:1px solid var(--border);border-radius:8px;
-  padding:16px 18px;margin-bottom:12px}
-.settings-edit-card code{font-family:'SF Mono',Consolas,monospace;font-size:11px;
-  background:rgba(88,166,255,.1);color:var(--blue);padding:1px 5px;border-radius:3px}
-.settings-edit-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:1.2px;
-  color:var(--muted);margin-bottom:12px}
-.settings-edit-grid{display:grid;grid-template-columns:auto 1fr auto;gap:6px 12px;
-  align-items:center;font-size:12px;margin-bottom:12px}
-.settings-edit-grid label{color:var(--muted);text-align:right}
-.settings-edit-grid input{background:var(--bg);border:1px solid var(--border);color:var(--text);
-  font-family:inherit;font-size:12px;padding:5px 10px;border-radius:5px;width:100%;max-width:120px}
-.settings-edit-grid input:focus{outline:none;border-color:var(--blue)}
-.unit{color:var(--muted);font-size:11px}
-/* ── Number spinner ── */
-.num-spinner{display:flex;align-items:center;gap:4px}
-.num-spinner input{width:70px;max-width:70px;text-align:center;flex-shrink:0}
-.spinner-btn{width:36px;height:36px;flex-shrink:0;background:rgba(255,255,255,.07);
-  border:1px solid var(--border);border-radius:4px;color:var(--text);cursor:pointer;
-  font-size:14px;font-family:inherit;line-height:1;transition:background .12s;padding:0}
-.spinner-btn:hover{background:rgba(255,255,255,.15)}
-.cfg-select{background:var(--bg);border:1px solid var(--border);color:var(--text);
-  font-family:inherit;font-size:12px;padding:5px 10px;border-radius:5px;cursor:pointer}
-.cfg-select:focus{outline:none;border-color:var(--blue)}
-.settings-save-btn{background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.35);
-  color:var(--blue);font-family:inherit;font-size:12px;font-weight:600;
-  padding:5px 16px;border-radius:5px;cursor:pointer;transition:all .15s}
-.settings-save-btn:hover:not(:disabled){background:rgba(88,166,255,.22)}
+
+.settings-save-btn{background:color-mix(in srgb,var(--blue) 12%,transparent);border:1px solid color-mix(in srgb,var(--blue) 35%,transparent);
+  color:var(--blue);font-family:inherit;font-size:var(--fs-md);font-weight:600;
+  padding:5px 16px;border-radius:var(--radius-md);cursor:pointer;transition:color .15s,background-color .15s,border-color .15s}
+.settings-save-btn:hover:not(:disabled){background:color-mix(in srgb,var(--blue) 22%,transparent)}
 .settings-save-btn:disabled{opacity:.5;cursor:default}
 .settings-save-btn.secondary{background:rgba(255,255,255,.08);border-color:var(--border);color:var(--muted)}
 .settings-save-btn.secondary:hover:not(:disabled){background:rgba(255,255,255,.14);color:var(--text)}
 
-/* ── Service rows ── */
-.svc-list{display:flex;flex-direction:column;gap:2px;margin-bottom:12px}
-.svc-group{border:1px solid var(--border);border-radius:7px;overflow:hidden}
-.svc-row{display:flex;align-items:center;gap:12px;padding:10px 14px;
-  background:var(--bg);transition:background .12s;border-bottom:1px solid var(--border)}
-.svc-row:last-child{border-bottom:none}
-.svc-row:hover{background:rgba(48,54,61,.5)}
-.svc-icon{font-size:15px;flex-shrink:0;width:20px;text-align:center}
-.svc-text{flex:1;min-width:0}
-.svc-name{font-size:12px;font-weight:600;color:var(--text)}
-.svc-desc{font-size:11px;color:var(--muted);margin-top:1px}
-.enc-secondary{font-size:11px;font-weight:400;color:var(--muted)}
-.svc-toggle{position:relative;flex-shrink:0}
-.svc-toggle input{opacity:0;width:0;height:0;position:absolute}
-.svc-toggle-track{display:block;width:34px;height:18px;border-radius:9px;
-  background:rgba(139,148,158,.2);border:1px solid var(--border);
-  cursor:pointer;transition:background .2s,border-color .2s;position:relative}
-.svc-toggle input:checked + .svc-toggle-track{background:rgba(63,185,80,.25);border-color:var(--green)}
-.svc-toggle-track::after{content:'';position:absolute;top:2px;left:2px;
-  width:12px;height:12px;border-radius:50%;background:var(--muted);transition:transform .2s,background .2s}
-.svc-toggle input:checked + .svc-toggle-track::after{transform:translateX(16px);background:var(--green)}
-.svc-saved-marker{font-size:11px;color:var(--green);margin-left:8px;animation:fadeout 2.5s forwards}
+/* ── Saved marker ── */
 .toggle-saved-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-  background:rgba(30,35,40,.5);border-radius:9px;font-size:9px;font-weight:600;color:var(--green);
+  background:rgba(30,35,40,.5);border-radius:9px;font-size:var(--fs-2xs);font-weight:600;color:var(--green);
   pointer-events:none;animation:fadeout 2s forwards;letter-spacing:.02em}
 @keyframes fadeout{0%,60%{opacity:1}100%{opacity:0}}
-.rovimen-disabled-banner{background:rgba(210,153,34,.15);border:1px solid var(--yellow);border-radius:8px;
-  padding:12px 16px;margin-bottom:16px;font-size:12px;color:var(--yellow);display:flex;align-items:center;gap:8px}
 
 /* ── Video Database ── */
-.vdb-sticky-header{position:sticky;top:74px;z-index:50;background:var(--bg);padding-top:6px}
+/* The Video DB controls card (camera, night, time range) scrolls with the page;
+   only the header and the station sub-tabs stay pinned. The class name is kept
+   because dashboard-vdb.js locates the card by it. */
+.vdb-sticky-header{position:static;background:var(--bg);padding-top:6px}
 .vdb-filter-card{margin-bottom:0}
 .vdb-filters{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin-bottom:12px}
 .vdb-filter-group{display:flex;flex-direction:column;gap:4px}
-.vdb-filter-group label{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
+.vdb-filter-group label{font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
 .vdb-filter-right{display:flex;align-items:center;gap:8px;margin-left:auto;flex-wrap:wrap}
 .vdb-filter-group select,.vdb-filter-right select{
   background:var(--bg);border:1px solid var(--border);color:var(--text);
-  font-family:inherit;font-size:12px;padding:6px 10px;border-radius:5px;cursor:pointer;min-width:120px}
-.vdb-filter-group select:focus,.vdb-filter-right select:focus{outline:none;border-color:var(--blue)}
+  font-family:inherit;font-size:var(--fs-md);padding:6px 10px;border-radius:var(--radius-md);cursor:pointer;min-width:120px}
+.vdb-filter-group select:focus,.vdb-filter-right select:focus{border-color:var(--blue)}
 .vdb-toggle-label{display:flex;align-items:center;gap:8px;cursor:pointer;
-  background:var(--bg);border:1px solid var(--border);border-radius:5px;
-  padding:6px 10px;font-size:12px;color:var(--muted);white-space:nowrap;
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);
+  padding:6px 10px;font-size:var(--fs-md);color:var(--muted);white-space:nowrap;
   transition:border-color .15s,color .15s}
 .vdb-toggle-label:hover{border-color:var(--blue)}
 .vdb-toggle-label input{accent-color:var(--blue);width:14px;height:14px;cursor:pointer;margin:0;flex-shrink:0}
@@ -486,30 +517,33 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
 /* Time slider */
 .vdb-time-section{margin:8px 0 0}
 .vdb-time-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-.vdb-time-header>label{font-size:10px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
-#vdb-time-label{font-size:13px;color:var(--blue);font-weight:600;font-family:monospace;
+.vdb-time-header>label{font-size:var(--fs-xs);text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
+#vdb-time-label{font-size:var(--fs-base);color:var(--blue);font-weight:600;font-family:var(--mono-font);font-variant-numeric:tabular-nums;
   display:inline-flex;align-items:center;gap:6px}
-.vdb-time-input{font-family:monospace;font-size:13px;font-weight:600;color:var(--blue);
-  background:transparent;border:1px solid var(--border);border-radius:4px;
+.vdb-time-input{font-family:var(--mono-font);font-variant-numeric:tabular-nums;font-size:var(--fs-base);font-weight:600;color:var(--blue);
+  background:transparent;border:1px solid var(--border);border-radius:var(--radius-md);
   padding:2px 4px;width:54px;text-align:center}
 .vdb-time-input:hover{border-color:var(--blue)}
-.vdb-time-input:focus{outline:none;border-color:var(--blue);background:var(--card)}
-.vdb-time-input.invalid{border-color:#e74c3c;color:#e74c3c}
+.vdb-time-input:focus{border-color:var(--blue);background:var(--card)}
+.vdb-time-input.invalid{border-color:var(--error);color:var(--error)}
 .vdb-time-arrow,.vdb-time-suffix{color:var(--muted);font-weight:400}
+.vdb-time-reset{font-family:inherit;font-size:var(--fs-sm);color:var(--muted);background:transparent;
+  border:1px solid var(--border);border-radius:var(--radius-md);padding:2px 8px;cursor:pointer}
+.vdb-time-reset:hover{color:var(--text);border-color:var(--blue)}
 .vdb-slider-wrap{position:relative;height:32px;margin:22px 7px 0}
 .vdb-slider-wrap::before{content:'';position:absolute;left:0;top:50%;width:100%;height:14px;
-  transform:translateY(-50%);border-radius:999px;pointer-events:none;
+  transform:translateY(-50%);border-radius:var(--radius-pill);pointer-events:none;
   background:var(--tl-gradient,
-    linear-gradient(to right,rgba(13,17,23,.5) 0%,rgba(13,17,23,.5) 22%,rgba(13,17,23,0) 22%,rgba(13,17,23,0) 74%,rgba(13,17,23,.5) 74%,rgba(13,17,23,.5) 100%),
-    linear-gradient(to right,#87ceeb 0%,#87ceeb 20%,#a8b870 22%,#a8b870 26%,#d4c040 28%,#d4c040 32%,#1a2c5e 34%,#1a2c5e 64%,#d4c040 66%,#d4c040 70%,#a8b870 72%,#a8b870 74%,#87ceeb 76%,#87ceeb 100%))}
+    linear-gradient(to right,color-mix(in srgb,var(--bg) 50%,transparent) 0%,color-mix(in srgb,var(--bg) 50%,transparent) 22%,rgba(13,17,23,0) 22%,rgba(13,17,23,0) 74%,color-mix(in srgb,var(--bg) 50%,transparent) 74%,color-mix(in srgb,var(--bg) 50%,transparent) 100%),
+    linear-gradient(to right,var(--sky-clear) 0%,var(--sky-clear) 20%,var(--sky-civ) 22%,var(--sky-civ) 26%,var(--sky-naut) 28%,var(--sky-naut) 32%,var(--sky-night) 34%,var(--sky-night) 64%,var(--sky-naut) 66%,var(--sky-naut) 70%,var(--sky-civ) 72%,var(--sky-civ) 74%,var(--sky-clear) 76%,var(--sky-clear) 100%))}
 .vdb-slider-wrap::after{content:'';position:absolute;left:0;top:calc(50% + 8px);width:100%;height:6px;
-  border-radius:999px;pointer-events:none;z-index:2;
+  border-radius:var(--radius-pill);pointer-events:none;z-index:2;
   background:var(--moon-gradient,transparent)}
-.vdb-moon-icon{font-size:16px;line-height:1;cursor:default;margin-left:6px;flex-shrink:0}
+.vdb-moon-icon{font-size:var(--fs-2xl);line-height:1;cursor:default;margin-left:6px;flex-shrink:0}
 #vdb-density-canvas{position:absolute;left:0;top:calc(50% - 7px);width:100%;height:5px;
-  border-radius:999px;display:block;z-index:3}
+  border-radius:var(--radius-pill);display:block;z-index:3}
 #vdb-midnight-label{position:absolute;left:50%;top:-10px;transform:translateX(-50%);
-  font-size:12px;color:var(--muted);font-family:monospace;white-space:nowrap;pointer-events:none}
+  font-size:var(--fs-md);color:var(--muted);font-family:var(--mono-font);font-variant-numeric:tabular-nums;white-space:nowrap;pointer-events:none}
 .vdb-slider-wrap input[type=range]{
   position:absolute;left:0;top:50%;transform:translateY(-50%);width:100%;height:14px;
   -webkit-appearance:none;appearance:none;
@@ -517,77 +551,67 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
 .vdb-slider-wrap input[type=range]::-webkit-slider-thumb{
   -webkit-appearance:none;width:18px;height:18px;
   background:var(--blue);border-radius:50%;cursor:ew-resize;
-  pointer-events:all;border:2px solid #0d1117;box-shadow:0 1px 4px rgba(0,0,0,.6);
+  pointer-events:all;border:2px solid var(--bg);box-shadow:0 1px 4px rgba(0,0,0,.6);
   margin-top:-2px}
 .vdb-slider-wrap input[type=range]::-moz-range-thumb{
   width:18px;height:18px;background:var(--blue);border-radius:50%;
-  cursor:ew-resize;pointer-events:all;border:2px solid #0d1117;box-shadow:0 1px 4px rgba(0,0,0,.6)}
+  cursor:ew-resize;pointer-events:all;border:2px solid var(--bg);box-shadow:0 1px 4px rgba(0,0,0,.6)}
 #vdb-slider-end::-webkit-slider-thumb{background:var(--green)}
 #vdb-slider-end::-moz-range-thumb{background:var(--green)}
 .vdb-slider-ticks{display:flex;justify-content:space-between;margin-top:4px;
-  font-size:10px;color:var(--muted);font-family:monospace;padding:0 7px}
+  font-size:var(--fs-xs);color:var(--muted);font-family:var(--mono-font);font-variant-numeric:tabular-nums;padding:0 7px}
 /* Toolbar */
 .vdb-toolbar{display:flex;align-items:center;justify-content:space-between;margin-top:12px;flex-wrap:wrap;gap:8px}
-.vdb-status{font-size:12px;color:var(--muted)}
-.vdb-zoom-row{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.vdb-status{font-size:var(--fs-md);color:var(--muted)}
+.vdb-zoom-row{display:flex;align-items:center;gap:6px;font-size:var(--fs-base);color:var(--muted)}
 #vdb-zoom,.rms-zoom{width:90px;accent-color:var(--blue);cursor:pointer;vertical-align:middle}
 /* Grid */
 .vdb-chunk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
-.vdb-chunk-card{background:var(--bg);border:1px solid var(--border);border-radius:6px;
+.vdb-chunk-card{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);
   overflow:hidden;cursor:pointer;transition:border-color .15s,transform .15s;position:relative}
 .vdb-chunk-card:hover{border-color:var(--blue);transform:translateY(-2px)}
 .vdb-chunk-locked-detection{border:4px solid #e6a817}
 .vdb-chunk-locked-detection:hover{border-color:#f5c842}
-.vdb-chunk-locked-manual{border:4px solid #58a6ff}
+.vdb-chunk-locked-manual{border:4px solid var(--blue)}
 .vdb-chunk-locked-manual:hover{border-color:#79b8ff}
 .vdb-chunk-locked-detection .vdb-lock-btn,.vdb-chunk-locked-manual .vdb-lock-btn{top:3px;right:3px}
-.vdb-lock-btn{position:absolute;top:6px;right:6px;font-size:14px;z-index:2;
-  background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.15);border-radius:4px;
+.vdb-lock-btn{position:absolute;top:6px;right:6px;font-size:var(--fs-lg);z-index:2;
+  background:rgba(0,0,0,.6);border:1px solid rgba(255,255,255,.15);border-radius:var(--radius-md);
   padding:2px 6px;cursor:pointer;color:#ccc;line-height:1.5}
 .vdb-lock-btn:not(:disabled):hover{background:rgba(0,0,0,.85);color:#fff}
 .vdb-lock-btn:disabled{cursor:default}
 .vdb-lock-btn .lock-ico,.vdb-ts-badge .lock-ico{display:block}
 .vdb-lock-btn--detection{background:rgba(210,160,0,.9);border-color:#f5c842;color:#1a1200}
 .vdb-lock-btn--detection:hover{background:rgba(210,160,0,.9)}
-.vdb-lock-btn--manual{background:rgba(50,110,220,.9);border-color:#58a6ff;color:#e8f0ff}
+.vdb-lock-btn--manual{background:rgba(50,110,220,.9);border-color:var(--blue);color:#e8f0ff}
 .vdb-lock-btn--manual:not(:disabled):hover{background:rgba(60,130,255,.95);color:#fff}
-.vdb-chunk-card img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#111}
+.vdb-chunk-card img{width:100%;aspect-ratio:16/9;object-fit:contain;display:block;background:#111}
 .vdb-chunk-nostack{width:100%;aspect-ratio:16/9;background:#111;display:flex;
-  align-items:center;justify-content:center;color:var(--muted);font-size:16px}
+  align-items:center;justify-content:center;color:var(--muted);font-size:var(--fs-2xl)}
 .vdb-chunk-meta{padding:7px 10px}
-.vdb-chunk-time{color:var(--blue);font-weight:600;font-size:13px}
+.vdb-chunk-time{color:var(--blue);font-weight:600;font-size:var(--fs-base)}
 .vdb-chunk-time.vdb-time-stale{color:var(--red)}
-.vdb-chunk-size{font-size:13px;color:var(--muted);margin-top:2px}
-.det-meta{display:flex;flex-wrap:wrap;gap:4px 6px;margin-top:3px;font-size:11px;line-height:1.3}
-.det-mag{color:#f0c040;font-weight:600}
-.det-mag-fireball{color:#ff6b35}
-.det-mag-bright{color:#f0c040}
-.det-shower{color:#66ccff;font-weight:500}
-.det-spo{color:var(--muted)}
-.det-dur{color:var(--muted)}
-.det-angvel{color:var(--muted)}
-.det-modal-grid{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12px;line-height:1.6}
+.vdb-chunk-size{font-size:var(--fs-base);color:var(--muted);margin-top:2px}
+.det-modal-grid{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:var(--fs-md);line-height:1.6}
 .det-modal-label{color:var(--muted);font-weight:500;white-space:nowrap}
 .vdb-chunk-btns{display:flex;justify-content:space-between;align-items:stretch;margin-top:6px;gap:4px}
-.vdb-dl-btn{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-family:inherit;
+.vdb-dl-btn{display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-md);font-family:inherit;
   color:var(--muted);background:rgba(255,255,255,.06);border:1px solid var(--border);
-  border-radius:4px;padding:6px 10px;text-decoration:none;transition:all .15s;white-space:nowrap}
+  border-radius:var(--radius-md);padding:6px 10px;text-decoration:none;transition:color .15s,background-color .15s,border-color .15s;white-space:nowrap}
 .vdb-dl-btn:hover{color:var(--text);background:rgba(255,255,255,.12);border-color:var(--muted)}
-.vdb-process-btn{display:flex;align-items:center;font-size:12px;font-family:inherit;
+.vdb-process-btn{display:flex;align-items:center;font-size:var(--fs-md);font-family:inherit;
   color:var(--muted);background:rgba(255,255,255,.06);border:1px solid var(--border);
-  border-radius:4px;padding:6px 10px;cursor:pointer;transition:all .15s;white-space:nowrap;margin:0}
+  border-radius:var(--radius-md);padding:6px 10px;cursor:pointer;transition:color .15s,background-color .15s,border-color .15s;white-space:nowrap;margin:0}
 .vdb-process-btn:hover:not(:disabled){color:var(--text);background:rgba(255,255,255,.12);border-color:var(--muted)}
 .vdb-process-btn:disabled{opacity:.5;cursor:default}
 .vdb-process-btn--done{border-color:var(--green) !important;color:var(--green) !important;opacity:.85 !important;cursor:default}
 .modal-nav-btn{background:rgba(255,255,255,.08);border:1px solid var(--border);color:var(--text);
-  border-radius:5px;padding:4px 12px;font-size:16px;cursor:pointer;transition:background .15s}
+  border-radius:var(--radius-md);padding:4px 12px;font-size:var(--fs-2xl);cursor:pointer;transition:background .15s}
 .modal-nav-btn:hover{background:rgba(255,255,255,.18)}
 
 /* ── Live badge ── */
-.vdb-live-badge{font-size:12px;color:var(--green);margin-left:10px;vertical-align:middle}
-.dawn-running-badge{font-size:11px;font-weight:600;color:#f59e0b;background:rgba(245,158,11,.12);
-  border:1px solid rgba(245,158,11,.35);border-radius:4px;padding:2px 8px;
-  animation:dawn-pulse 1.6s ease-in-out infinite}
+.vdb-live-badge{font-size:var(--fs-md);color:var(--green);margin-left:10px;vertical-align:middle}
+
 @keyframes dawn-pulse{0%,100%{opacity:1}50%{opacity:.45}}
 
 /* ── Range slider track — both engines need transparent track so the
@@ -598,109 +622,86 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
 /* ── Archived indicator ── */
 .vdb-chunk-archived{border:2px solid var(--green)}
 .vdb-chunk-archived:hover{border-color:#5bd06a}
-.vdb-archived-badge{position:absolute;top:6px;left:6px;font-size:9px;z-index:2;
-  background:rgba(63,185,80,.85);color:#fff;border-radius:3px;padding:1px 5px;
+.vdb-archived-badge{position:absolute;top:6px;left:6px;font-size:var(--fs-2xs);z-index:2;
+  background:color-mix(in srgb,var(--green) 85%,transparent);color:#fff;border-radius:var(--radius-xs);padding:1px 5px;
   font-weight:600;letter-spacing:.3px;pointer-events:none}
 
 /* ── Expandable service blocks (settings tab) ── */
-.svc-block{border:1px solid var(--border);border-radius:7px;overflow:hidden;margin-bottom:8px}
-.svc-block .svc-row{border-bottom:none;border-radius:0}
-.svc-block .svc-row:hover{background:rgba(48,54,61,.5)}
-.svc-expand-btn{background:rgba(255,255,255,.06);border:1px solid var(--border);
-  color:var(--muted);font-family:inherit;font-size:11px;padding:4px 10px;
-  border-radius:5px;cursor:pointer;transition:all .15s;flex-shrink:0;white-space:nowrap}
-.svc-expand-btn:hover{color:var(--text);border-color:var(--blue)}
-.svc-expand-btn[aria-expanded="true"]{color:var(--blue);border-color:var(--blue);
-  background:rgba(88,166,255,.1)}
-.svc-panel{display:none;border-top:1px solid var(--border)}
-.svc-panel.open{display:block}
-.svc-panel-inner{padding:14px 16px;background:rgba(13,17,23,.6);display:flex;
-  flex-direction:column;gap:12px}
-.svc-panel-inner .settings-edit-grid{margin-bottom:0}
-.svc-panel-inner .svc-group{margin-bottom:0}
 
 /* ── Service restart button ── */
-.svc-restart-btn{background:rgba(255,255,255,.06);border:1px solid var(--border);
-  color:var(--muted);font-size:14px;padding:2px 6px;border-radius:4px;cursor:pointer;
-  line-height:1;margin-left:auto;transition:all .15s;flex-shrink:0}
-.svc-restart-btn:hover{color:var(--blue);border-color:var(--blue);background:rgba(88,166,255,.1)}
-.svc-restart-btn:disabled{opacity:.5;cursor:default}
 
 /* ── Responsive ── */
 
 /* Tablet */
 @media(max-width:768px){
-  header{padding:8px 12px;gap:8px;flex-wrap:wrap}
-  .logo{font-size:14px}
+  body > header{padding:8px 12px;gap:8px;flex-wrap:wrap}
+  .logo{font-size:var(--fs-lg)}
   .station-bar{order:3;width:100%;gap:6px}
-  .station-pill{padding:4px 10px;font-size:11px}
+  .station-pill{padding:4px 10px;font-size:var(--fs-sm)}
   .hdr-right{gap:6px}
   .sub-tabs{padding:0 8px;overflow-x:auto;-webkit-overflow-scrolling:touch}
-  .sub-tab{padding:8px 12px;font-size:11px;white-space:nowrap}
+  .sub-tab{padding:10px 12px}
   main{padding:12px}
   .card{padding:14px}
-  .cam-grid,.tl-grid{grid-template-columns:1fr}
+  .tl-grid{grid-template-columns:1fr}
   .vdb-chunk-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))!important}
-  .vitals-grid{grid-template-columns:1fr}
-  .settings-edit-grid{grid-template-columns:auto 1fr auto}
-  .rms-section-header{gap:8px}
+
   .rms-night-sel{min-width:120px}
   .vdb-filters{gap:8px}
   .cam-modal-inner{width:98%;max-width:none}
   /* Header right-side gets crowded on tablets too. Tighten its gap and
      drop the "Next RMS capture window" divider — keep its content but
      drop the heavy 30 px left padding so the row doesn't overflow. */
-  .hdr-next-capture{padding-left:10px;margin-left:6px;font-size:10px}
-  .hdr-clock-label{font-size:10px}
-  .hdr-btn{padding:5px 10px;font-size:11px}
+  .hdr-next-capture{padding-left:10px;margin-left:6px;font-size:var(--fs-xs)}
+  .hdr-clock-label{font-size:var(--fs-xs)}
+  .hdr-btn{padding:5px 10px;font-size:var(--fs-sm)}
 }
 
 /* Phone */
 @media(max-width:540px){
   /* Bump body text from 13px to 14px for readability without zoom.
      Inputs override to 16px below to prevent iOS auto-zoom on focus. */
-  body{font-size:14px}
+  body{font-size:var(--fs-lg)}
   .vdb-sticky-header{position:static}
   /* Stack the header vertically on phones. The desktop header is a single
      row with logo + station selector + clock + Refresh + auth; that
      overflows at 375 px. flex-wrap puts each block on its own line and
      the hdr-right group pushes to the right side. */
-  header{padding:6px 10px;gap:6px;flex-wrap:wrap;align-items:center}
-  .logo{font-size:13px}
+  body > header{padding:6px 10px;gap:6px;flex-wrap:wrap;align-items:center}
+  .logo{font-size:var(--fs-base)}
   .main-nav{gap:1px}
-  .nav-tab{padding:4px 8px;font-size:10px}
   /* Station selector spans the full row beneath the logo so it has room
      for the prev / dropdown / next controls. */
   .station-dropdown-wrapper{order:3;width:100%;flex-basis:100%;margin-top:2px}
   .station-dropdown{flex:1;min-width:0}
-  .station-dropdown-selected{width:100%;font-size:12px;padding:6px 10px;min-height:36px}
-  .station-nav-btn{min-width:36px;min-height:36px;padding:0;font-size:14px}
-  .hdr-right{margin-left:auto;gap:6px;font-size:10px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:1;min-width:0}
-  .hdr-clock-group{display:none}
-  .station-pill{padding:3px 8px;font-size:10px}
+  .station-dropdown-selected{width:100%;font-size:var(--fs-md);padding:6px 10px;min-height:36px}
+  .station-nav-btn{min-width:36px;min-height:36px;padding:0;font-size:var(--fs-lg)}
+  .hdr-right{margin-left:auto;gap:6px;font-size:var(--fs-xs);flex-wrap:wrap;justify-content:flex-end;flex-shrink:1;min-width:0}
+  /* Keep the UTC clock visible on phones — operators rely on it to read a
+     detection's UTC time. Only the "Current Time:" prefix label is dropped;
+     the clock badge itself stays and wraps onto its own line if needed. */
+  .hdr-clock-group{display:flex}
+  .station-pill{padding:3px 8px;font-size:var(--fs-xs)}
   .pill-label{display:none}
-  /* Drop the "Current Time:" label and the long "Next RMS capture window"
-     row on phones — the data still surfaces inside the dashboard cards. */
   .hdr-clock-label{display:none}
-  .hdr-clock{font-size:10px}
+  .hdr-clock{font-size:var(--fs-sm);padding:2px 7px}
   .hdr-next-capture{display:none!important}
   .hdr-right #ts{display:none}
-  .hdr-btn{padding:6px 10px;font-size:11px;min-height:32px}
+  .hdr-btn{padding:6px 10px;font-size:var(--fs-sm);min-height:32px}
   /* Sub-tabs are a horizontal pill row across the top; make them
      finger-friendly and scrollable on phones. */
   .sub-tabs{top:0;padding:0 4px;overflow-x:auto;-webkit-overflow-scrolling:touch;
     scrollbar-width:none;padding-bottom:2px}
   .sub-tabs::-webkit-scrollbar{display:none}
-  .sub-tab{padding:10px 12px;font-size:11px;min-height:42px;white-space:nowrap}
+  .sub-tab{padding:10px 12px;min-height:44px}
   main{padding:8px}
   .card{padding:10px 12px;margin-bottom:10px}
-  .card-title{font-size:10px;margin-bottom:10px}
-  .cam-grid,.tl-grid{grid-template-columns:1fr}
-  .svc-grid{grid-template-columns:1fr}
-  .stbl th,.stbl td{padding:5px 6px;font-size:11px}
+  .card-title{font-size:var(--fs-xs);margin-bottom:10px}
+  .tl-grid{grid-template-columns:1fr}
+
   .vdb-chunk-grid{grid-template-columns:repeat(auto-fill,minmax(120px,1fr))!important}
   .vdb-chunk-meta{padding:5px 8px}
-  .vdb-chunk-time{font-size:12px}
+  .vdb-chunk-time{font-size:var(--fs-md)}
   .cam-modal-inner{width:100%;border-radius:0}
   .vdb-filters{display:flex;flex-direction:column;gap:6px;align-items:stretch}
   .vdb-filter-group{width:100%}
@@ -715,13 +716,10 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
   .vdb-slider-ticks{font-size:8px;padding:0 4px}
   .vdb-toolbar{flex-direction:column;align-items:stretch;gap:6px}
   .vdb-zoom-row{justify-content:center}
-  .rms-section{padding:10px 12px}
-  .rms-section-header{flex-direction:column;align-items:flex-start}
+
   .rms-night-sel{width:100%;max-width:none}
-  .settings-edit-grid{grid-template-columns:1fr;gap:4px 0}
-  .settings-edit-grid label{text-align:left}
+
   .tl-grid{grid-template-columns:1fr}
-  .tl-controls{flex-direction:column;gap:6px}
 
   /* Mobile touch-target hardening for date / time / range pickers.
      Two problems we fix here at the same time:
@@ -734,7 +732,7 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
           giving their wrappers padding-inline. */
   input[type="date"], input[type="time"]{
     padding:10px 12px;
-    font-size:16px;                /* prevents iOS auto-zoom on focus */
+    font-size:var(--fs-2xl);                /* prevents iOS auto-zoom on focus */
     min-height:44px;
     box-sizing:border-box;
   }
@@ -752,13 +750,13 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
     -webkit-appearance:none;
     appearance:none;
     width:26px;height:26px;border-radius:50%;
-    background:var(--blue,#2563eb);
+    background:var(--blue);
     border:2px solid #fff;
     box-shadow:0 1px 3px rgba(0,0,0,.4);
   }
   input[type="range"]::-moz-range-thumb{
     width:26px;height:26px;border-radius:50%;
-    background:var(--blue,#2563eb);
+    background:var(--blue);
     border:2px solid #fff;
     box-shadow:0 1px 3px rgba(0,0,0,.4);
   }
@@ -774,7 +772,7 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
     box-sizing:border-box;
   }
   /* RMS calendar button — bump to 44 px tap target */
-  .rms-cal-btn{padding:10px 14px;font-size:13px;min-height:44px}
+  .rms-cal-btn{padding:10px 14px;font-size:var(--fs-base);min-height:44px}
   .ov-plot-btn{padding:6px 10px}
 
   /* P1-23: modal close + nav buttons must clear the 44 px iOS / 48 dp
@@ -783,24 +781,23 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
      floor and they are the most-tapped clip-modal controls. */
   .cam-modal-close{
     min-width:44px;min-height:44px;
-    padding:0;font-size:20px;line-height:1;
+    padding:0;font-size:var(--fs-4xl);line-height:1;
     display:inline-flex;align-items:center;justify-content:center;
   }
   .modal-nav-btn{
     min-width:44px;min-height:44px;
-    padding:0;font-size:18px;
+    padding:0;font-size:var(--fs-3xl);
     display:inline-flex;align-items:center;justify-content:center;
   }
 
   /* P1-24: RMS calendar cells default to 28×28 — bump to 36×36 so the
      night picker doesn't mis-tap adjacent days on a phone. */
   .rms-cal-dows,.rms-cal-grid{grid-template-columns:repeat(7,36px)}
-  .rms-cal-cell{width:36px;height:36px;font-size:13px}
+  .rms-cal-cell{width:36px;height:36px;font-size:var(--fs-base)}
 
   /* P1-25: settings spinner buttons default to 26×26 — bump to 36×36
      so the camera-config increment/decrement doesn't mis-fire silently
      and trigger an unwanted config change. */
-  .spinner-btn{width:44px;height:44px;font-size:16px}
 
   /* ── Modal sheet treatment (P2-1) ─────────────────────────────────
      Desktop modals are 660–1280 px centred dialogs that float over the
@@ -814,7 +811,7 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
   .cam-modal-img,.cam-modal.plot-mode .cam-modal-img{max-height:calc(100vh - 56px);
     max-height:calc(100dvh - 56px);object-fit:contain}
   .cam-modal-header{padding:8px 12px}
-  .cam-modal-title{font-size:12px;flex:1;min-width:0;overflow:hidden;
+  .cam-modal-title{font-size:var(--fs-md);flex:1;min-width:0;overflow:hidden;
     text-overflow:ellipsis;white-space:nowrap}
 
   /* App panel (about / GMN / stats / network in-modal pages) — fill the
@@ -823,7 +820,7 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
   .app-panel-inner{width:100%;max-width:none;border-radius:0;max-height:100vh;
     max-height:100dvh;height:100vh;height:100dvh;display:flex;flex-direction:column}
   .app-panel-body-inner{padding:14px}
-  .app-panel-body-inner p{font-size:13px}
+  .app-panel-body-inner p{font-size:var(--fs-base)}
 
   /* ── Forms & buttons that should be touch-sized on phone ──────────
      Default inputs on desktop are 12 px font; iOS Safari auto-zooms
@@ -832,50 +829,32 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
      touch target. */
   input[type="text"],input[type="password"],input[type="email"],
   input[type="number"],input[type="search"],input[type="tel"],
-  input[type="url"],select,textarea{font-size:16px;min-height:38px;box-sizing:border-box}
+  input[type="url"],select,textarea{font-size:var(--fs-2xl);min-height:38px;box-sizing:border-box}
   /* But the dashboard's existing compact filter selects look terrible
      full-height — keep them at 38 px but allow font 14 px so a
      "HH:MM" 5-char field doesn't overflow at the wider 16 px size.
      The auto-zoom kicks in below 16 px on TEXT-LIKE inputs, not on
      <select> menus, so a 14 px select is safe. */
-  .log-select,.cfg-select,.rms-night-sel,.tl-night-sel,
+  .rms-night-sel,
   .vdb-filter-group select,.vdb-filter-right select,
-  .rms-flt-input,.rms-flt-select{font-size:14px}
+  .rms-flt-input{font-size:var(--fs-lg)}
   /* RMS night/cam selector inputs and the small filter spinners are
      16 px to avoid auto-zoom on focus — but keep them narrow so the
      filter row still fits. */
-  .vdb-time-input{font-size:16px;min-height:36px;width:64px}
+  .vdb-time-input{font-size:var(--fs-2xl);min-height:36px;width:64px}
 
   /* Save / action buttons — full-width on mobile so they're easy to
      hit. The settings-edit-card has buttons appended via JS that
      default to inline auto-width. */
-  .settings-save-btn{min-height:40px;padding:8px 14px;font-size:13px}
-  .settings-edit-grid + .settings-save-btn,
-  .settings-edit-grid + div > .settings-save-btn{width:100%}
+  .settings-save-btn{min-height:40px;padding:8px 14px;font-size:var(--fs-base)}
 
   /* Sysadmin "Configuration" tab: stack the settings-edit-grid label
      above the input on phones so labels aren't truncated and inputs
      get full width. settings-edit-grid is `auto 1fr auto`; collapse
      to one column. */
-  .settings-edit-grid{grid-template-columns:1fr;gap:6px 0;row-gap:6px}
-  .settings-edit-grid label{text-align:left;font-size:11px;
-    text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
-  .settings-edit-grid input{max-width:none;width:100%;font-size:16px}
-  .num-spinner{width:100%;justify-content:flex-start}
-  .num-spinner input{width:90px;max-width:90px;font-size:16px}
 
   /* Vitals + storage cards on mobile: single column, larger numbers. */
-  .vitals-val{font-size:20px}
-  .stbl th,.stbl td{padding:5px 6px;font-size:11px}
-
-  /* Cameras / settings inner grids should collapse to one column. */
-  .svc-grid{grid-template-columns:1fr}
-  /* Service row close packed on desktop → relax padding so toggles
-     and restart buttons don't collide. */
-  .svc-row{padding:9px 10px;gap:8px}
-  .svc-name{font-size:12px}
-  .svc-desc{font-size:10px}
-  .svc-expand-btn,.svc-restart-btn{min-height:36px}
+  .vitals-val{font-size:var(--fs-4xl)}
 
   /* RMS plots grid — desktop minmax is 200 px. On a 375 px phone
      that lets one plot per row only, but the plot label text needs
@@ -895,42 +874,15 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
   /* App panel close should be 44×44 on mobile (already covered by
      cam-modal-close override). The app-panel auth link / list items
      inside should be tappable too. */
-  .nav-tab{padding:6px 10px;font-size:12px;min-height:36px}
-
-  /* Logs viewer: stack toolbar elements full-width. */
-  .logs-toolbar{flex-direction:column;align-items:stretch}
-  .logs-toolbar > div{flex-wrap:wrap;gap:6px}
-  .logs-output{font-size:11px;padding:8px;max-height:50vh}
-  .log-select{flex:1;min-width:0}
-
-  /* Graph grid on sysadmin: already 1fr at 600 px; reinforce here
-     so the per-core CPU rows are readable. */
-  .core-label{width:24px}
-  .top-proc-name{width:90px;font-size:10px}
-
-  /* Cron rows: stack schedule above command on phone so neither
-     truncates. */
-  .cron-row{flex-direction:column;gap:6px;padding:8px}
-  .cron-schedule-col{min-width:0}
-  .cron-cmd-col{flex-wrap:wrap}
+  .nav-tab{padding:0 10px;min-height:36px}
 
   /* Site nav (cross-page link strip). Wrap and keep tappable. */
   .site-nav{flex-wrap:wrap;gap:4px}
-  .site-nav-link{padding:8px 10px;font-size:12px;min-height:36px;
+  .site-nav-link{padding:8px 10px;font-size:var(--fs-md);min-height:36px;
     display:inline-flex;align-items:center}
 
-  /* RMS chunk grid keeps the 120 px minmax from the existing 540 rule
-     — but the chunk metadata badges need extra vertical room. */
-  .det-meta{font-size:10px;gap:2px 5px}
-  .vdb-chunk-time{font-size:11px}
+  .vdb-chunk-time{font-size:var(--fs-sm)}
 
-  /* Camera-window header layout on mobile: keep Live + Expand reachable. */
-  .cam-window-header{flex-wrap:wrap;gap:6px}
-  .cam-live-btn,.cam-expand-btn{padding:7px 12px;min-height:36px;font-size:11px}
-
-  /* Search/text inputs inside logs and elsewhere shouldn't blow up
-     the row. */
-  .log-select[type="search"]{width:auto;flex:1 1 100%}
 }
 
 /* ── In-DOM confirm dialog (askConfirm) ──
@@ -943,14 +895,14 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
   backdrop-filter:blur(4px);padding:16px}
 .ask-confirm.open{display:flex}
 .ask-confirm-card{background:var(--card);border:1px solid var(--border);
-  border-radius:10px;width:min(420px,96vw);
+  border-radius:var(--radius-xl);width:min(420px,96vw);
   box-shadow:0 8px 32px rgba(0,0,0,.55);
   display:flex;flex-direction:column;overflow:hidden}
-.ask-confirm-body{padding:18px 20px;color:var(--text);font-size:14px;line-height:1.45}
+.ask-confirm-body{padding:18px 20px;color:var(--text);font-size:var(--fs-lg);line-height:1.45}
 .ask-confirm-actions{display:flex;gap:8px;justify-content:flex-end;
   padding:12px 16px;border-top:1px solid var(--border);background:var(--bg)}
-.ask-confirm-btn{font-family:inherit;font-size:13px;padding:8px 16px;
-  border-radius:5px;cursor:pointer;min-height:40px;min-width:88px;
+.ask-confirm-btn{font-family:inherit;font-size:var(--fs-base);padding:8px 16px;
+  border-radius:var(--radius-md);cursor:pointer;min-height:40px;min-width:88px;
   transition:background .12s,border-color .12s,color .12s}
 .ask-confirm-cancel{background:transparent;color:var(--muted);
   border:1px solid var(--border)}
@@ -964,68 +916,23 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
   .ask-confirm-btn{width:100%;min-height:44px}
 }
 
-/* ── Log Viewer ─────────────────────────────────────────────────────── */
-.log-select{background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:3px 6px;font-size:12px;font-family:inherit}
-.log-select:focus{outline:none;border-color:var(--blue)}
-.logs-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;margin-bottom:10px}
-.logs-output{background:rgba(0,0,0,.35);border:1px solid var(--border);border-radius:6px;padding:12px 14px;font-family:monospace;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-all;max-height:600px;overflow-y:auto;margin:0;color:var(--text)}
-.log-error{color:#f87171}
-.log-warn{color:#fbbf24}
-.log-debug{color:var(--muted)}
-
-/* ── System Admin — graphs ──────────────────────────────────────────── */
-.graph-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
-@media(max-width:600px){.graph-grid{grid-template-columns:1fr}}
-.graph-box{display:flex;flex-direction:column;gap:4px}
-.graph-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.8px;color:var(--muted)}
-.graph-canvas{display:block;width:100%;border-radius:5px;border:1px solid var(--border)}
-.cores-bars{display:flex;flex-direction:column;gap:4px;padding-top:2px}
-.core-row{display:flex;align-items:center;gap:7px;font-size:11px}
-.core-label{font-family:monospace;color:var(--muted);width:20px;text-align:right;flex-shrink:0}
-.core-bar-track{flex:1;height:10px;background:rgba(255,255,255,.07);border-radius:3px;overflow:hidden}
-.core-bar-fill{height:100%;border-radius:3px;transition:width .4s ease}
-.core-pct{width:32px;text-align:right;color:var(--text);flex-shrink:0}
-.core-ghz{width:56px;text-align:right;color:var(--muted);flex-shrink:0}
-.top-proc-row{display:flex;align-items:center;gap:7px;font-size:11px}
-.top-proc-name{font-family:monospace;color:var(--text);width:120px;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.top-proc-cores{width:72px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums}
-
-/* ── System Admin — cron jobs list ──────────────────────────────────── */
-.cron-list{display:flex;flex-direction:column;gap:6px}
-.cron-row{display:flex;align-items:flex-start;gap:12px;padding:7px 10px;
-  background:rgba(255,255,255,.03);border-radius:6px;border:1px solid rgba(255,255,255,.06);
-  font-size:12px}
-.cron-row:hover{background:rgba(255,255,255,.055)}
-.cron-schedule-col{flex:0 0 auto;min-width:120px;display:flex;flex-direction:column;gap:3px}
-.cron-schedule-badge{display:inline-block;background:rgba(88,166,255,.15);color:var(--blue);
-  border:1px solid rgba(88,166,255,.3);border-radius:4px;padding:1px 7px;
-  font-size:11px;font-weight:600;white-space:nowrap}
-.cron-detail{font-size:10px;color:var(--muted);white-space:nowrap;padding-left:2px}
-.cron-cmd-col{flex:1 1 0;min-width:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px}
-.cron-cmd-text{font-family:monospace;font-size:11px;color:var(--text);
-  word-break:break-all;flex:1 1 0;min-width:0}
-.cron-src-badge{display:inline-block;border-radius:3px;padding:1px 6px;
-  font-size:10px;font-weight:600;white-space:nowrap;flex-shrink:0;
-  background:rgba(255,255,255,.07);color:var(--muted)}
-.cron-src-user{background:rgba(63,185,80,.15);color:#3fb950;border:1px solid rgba(63,185,80,.3)}
-
 /* ── Detection Stats Chart ──────────────────────────────────────────── */
 #det-stats-canvas{display:block;image-rendering:pixelated}
-.det-stats-tooltip{position:absolute;pointer-events:none;display:none;background:var(--card);border:1px solid var(--border);border-radius:5px;padding:4px 10px;font-size:12px;white-space:nowrap;z-index:10}
-.det-legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted)}
-.det-legend-dot{width:9px;height:9px;border-radius:2px;flex-shrink:0}
+.det-stats-tooltip{position:absolute;pointer-events:none;display:none;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-md);padding:4px 10px;font-size:var(--fs-md);white-space:nowrap;z-index:10}
+.det-legend-item{display:flex;align-items:center;gap:5px;font-size:var(--fs-sm);color:var(--muted)}
+.det-legend-dot{width:9px;height:9px;border-radius:var(--radius-2xs);flex-shrink:0}
 
 /* ── VDB All-cams view toggle + synced multi-cam modal ────────────────── */
-.vdb-view-toggle{display:inline-flex;gap:0;border-radius:6px;overflow:hidden;
+.vdb-view-toggle{display:inline-flex;gap:0;border-radius:var(--radius-md);overflow:hidden;
   border:1px solid var(--border)}
-.vdb-toggle-btn{padding:4px 10px;font-size:11px;background:var(--card);color:var(--muted);
+.vdb-toggle-btn{padding:4px 10px;font-size:var(--fs-sm);background:var(--card);color:var(--muted);
   border:none;cursor:pointer;font-family:inherit;letter-spacing:.3px;
   transition:background .15s,color .15s}
 .vdb-toggle-btn:hover{color:var(--text)}
 .vdb-toggle-btn.active{background:var(--blue);color:#fff}
 .vdb-cam-section{margin-bottom:18px}
 .vdb-cam-section:last-child{margin-bottom:0}
-.vdb-cam-header{font-size:12px;color:var(--muted);margin-bottom:6px;
+.vdb-cam-header{font-size:var(--fs-md);color:var(--muted);margin-bottom:6px;
   text-transform:uppercase;letter-spacing:.06em;padding:0 2px}
 
 /* All-cams timeline layout */
@@ -1034,47 +941,46 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
   scrollbar-width:thin;scrollbar-color:var(--border) transparent}
 .vdb-allcams-scroll::-webkit-scrollbar{width:8px}
 .vdb-allcams-scroll::-webkit-scrollbar-track{background:transparent}
-.vdb-allcams-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.vdb-allcams-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:var(--radius-md)}
 .vdb-allcams-scroll::-webkit-scrollbar-thumb:hover{background:var(--muted)}
 .vdb-allcams-timeline{display:flex;flex-direction:column;gap:4px;padding:6px}
 .vdb-ts-card{display:flex;align-items:stretch;gap:8px;padding:6px;
-  background:var(--bg);border:1px solid var(--border);border-radius:6px;
+  background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-md);
   cursor:pointer;transition:border-color .15s}
 .vdb-ts-card:hover{border-color:var(--blue)}
 .vdb-ts-cams{display:flex;gap:6px;flex:1;min-width:0;position:relative}
 .vdb-ts-cam{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
-.vdb-ts-cam-lbl{font-size:10px;color:var(--muted);text-align:center;
-  font-family:'SF Mono',Consolas,monospace;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+.vdb-ts-cam-lbl{font-size:var(--fs-xs);color:var(--muted);text-align:center;
+  font-family:var(--mono-font);font-variant-numeric:tabular-nums;font-weight:600;text-transform:uppercase;letter-spacing:.04em}
 .vdb-ts-thumb{position:relative;flex:1}
-.vdb-ts-thumb img{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;
-  border-radius:3px;background:#111}
-.vdb-ts-thumb .vdb-chunk-nostack{aspect-ratio:16/9;border-radius:3px}
-.vdb-ts-empty{aspect-ratio:16/9;background:#111;border-radius:3px;
-  display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:18px}
+.vdb-ts-thumb img{width:100%;aspect-ratio:16/9;object-fit:contain;display:block;
+  border-radius:var(--radius-xs);background:#111}
+.vdb-ts-thumb .vdb-chunk-nostack{aspect-ratio:16/9;border-radius:var(--radius-xs)}
+.vdb-ts-empty{aspect-ratio:16/9;background:#111;border-radius:var(--radius-xs);
+  display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:var(--fs-3xl)}
 .vdb-ts-meta{display:flex;flex-direction:column;justify-content:center;align-items:flex-end;gap:4px;
-  font-size:12px;font-weight:600;color:var(--blue);white-space:nowrap;min-width:54px;padding:0 2px}
-.vdb-dome-btn{position:absolute;bottom:4px;right:4px;font-size:15px;
-  background:rgba(0,0,0,.55);border:none;border-radius:4px;cursor:pointer;
+  font-size:var(--fs-md);font-weight:600;color:var(--blue);white-space:nowrap;min-width:54px;padding:0 2px}
+.vdb-dome-btn{position:absolute;bottom:4px;right:4px;font-size:var(--fs-xl);
+  background:rgba(0,0,0,.55);border:none;border-radius:var(--radius-md);cursor:pointer;
   padding:2px 4px;line-height:1;opacity:0;transition:opacity .15s;z-index:1}
-.vdb-ts-card:hover .vdb-dome-btn{opacity:1}
+.vdb-ts-card:hover .vdb-dome-btn,.vdb-dome-btn:focus-visible{opacity:1}
 .vdb-dome-btn:hover{background:rgba(0,0,0,.8)}
-.vdb-ts-badge{position:absolute;bottom:4px;right:4px;font-size:10px;line-height:1;
-  border-radius:3px;padding:1px 3px;pointer-events:none}
+.vdb-ts-badge{position:absolute;bottom:4px;right:4px;font-size:var(--fs-xs);line-height:1;
+  border-radius:var(--radius-xs);padding:1px 3px;pointer-events:none}
 .vdb-ts-badge--det{background:rgba(99,102,241,.75);color:#fff}
-.vdb-ts-badge--manual{background:rgba(88,166,255,.65);color:#fff}
+.vdb-ts-badge--manual{background:color-mix(in srgb,var(--blue) 65%,transparent);color:#fff}
 @media(max-width:768px){.vdb-allcams-card{display:none}}
-
 
 /* ── VDB Selection mode ─────────────────────────────────────────────── */
 .vdb-selection-bar{display:flex;align-items:center;
   justify-content:space-between;flex-wrap:wrap;gap:8px;
-  background:var(--card);border:1px solid var(--blue);border-radius:6px;
+  background:var(--card);border:1px solid var(--blue);border-radius:var(--radius-md);
   padding:10px 16px;margin-top:4px}
 .vdb-sel-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .vdb-chunk-card.vdb-chunk-selected{outline:2px solid var(--blue);outline-offset:-2px}
 .vdb-checkbox{position:absolute;top:6px;left:6px;width:20px;height:20px;
-  background:var(--bg);border:2px solid var(--border);border-radius:4px;
-  display:flex;align-items:center;justify-content:center;font-size:13px;
+  background:var(--bg);border:2px solid var(--border);border-radius:var(--radius-md);
+  display:flex;align-items:center;justify-content:center;font-size:var(--fs-base);
   pointer-events:none;z-index:5;color:transparent}
 .vdb-checkbox--checked{background:var(--blue);border-color:var(--blue);color:#000}
 
@@ -1090,23 +996,23 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
 
 /* ── Persistent site nav (shared across all pages) ── */
 .site-nav{display:flex;gap:2px}
-.site-nav-link{font-size:11px;color:var(--muted);text-decoration:none;padding:4px 10px;
-  border-radius:4px;transition:color .15s,background .15s;white-space:nowrap}
+.site-nav-link{font-size:var(--fs-sm);color:var(--muted);text-decoration:none;padding:4px 10px;
+  border-radius:var(--radius-md);transition:color .15s,background .15s;white-space:nowrap}
 .site-nav-link:hover{color:var(--text);background:rgba(255,255,255,.05)}
-.site-nav-link.active{color:var(--blue);background:rgba(88,166,255,.1)}
+.site-nav-link.active{color:var(--blue);background:color-mix(in srgb,var(--blue) 10%,transparent)}
 
 /* ── Overview station selector ── */
 .ov-station-sel{position:relative;margin-left:8px}
-.ov-station-sel-btn{background:none;border:1px solid var(--border);border-radius:5px;
-  color:var(--text);font-size:11px;font-family:inherit;padding:4px 10px;cursor:pointer;
+.ov-station-sel-btn{background:none;border:1px solid var(--border);border-radius:var(--radius-md);
+  color:var(--text);font-size:var(--fs-sm);font-family:inherit;padding:4px 10px;cursor:pointer;
   display:flex;align-items:center;gap:6px;white-space:nowrap}
 .ov-station-sel-btn:hover{border-color:var(--blue);color:var(--blue)}
 .ov-station-menu{position:absolute;top:calc(100% + 4px);left:0;min-width:200px;
-  background:var(--card);border:1px solid var(--border);border-radius:8px;
+  background:var(--card);border:1px solid var(--border);border-radius:var(--radius-lg);
   box-shadow:0 8px 28px rgba(0,0,0,.55);z-index:1100;max-height:60vh;overflow-y:auto;
   display:none}
 .ov-station-menu.open{display:block}
-.ov-station-opt{display:flex;align-items:center;gap:8px;padding:8px 14px;font-size:12px;
+.ov-station-opt{display:flex;align-items:center;gap:8px;padding:8px 14px;font-size:var(--fs-md);
   color:var(--text);text-decoration:none;border-bottom:1px solid var(--border);
   transition:background .1s}
 .ov-station-opt:last-child{border-bottom:none}
@@ -1115,53 +1021,53 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
 /* ── Network stats bar (overview page, above map) ── */
 .ov-net-stats{display:grid;grid-template-columns:repeat(4,auto);gap:4px 16px;align-items:center;
   padding:8px 14px;background:var(--card);border:1px solid var(--border);
-  border-radius:6px;font-size:11px;color:var(--muted);align-self:center}
+  border-radius:var(--radius-xl);font-size:var(--fs-sm);color:var(--muted);align-self:center}
 .ov-net-stats .ns-item{display:flex;flex-direction:column;align-items:center;min-width:70px}
-.ov-net-stats .ns-val{font-size:16px;font-weight:700;color:var(--text);line-height:1.2}
+.ov-net-stats .ns-val{font-size:var(--fs-2xl);font-weight:700;color:var(--text);line-height:1.2}
 .ov-net-stats .ns-val.blue{color:var(--blue)}
 .ov-net-stats .ns-val.green{color:var(--green)}
 .ov-net-stats .ns-val.yellow{color:var(--yellow)}
-.ov-net-stats .ns-lbl{font-size:10px;color:var(--muted);white-space:nowrap}
+.ov-net-stats .ns-lbl{font-size:var(--fs-xs);color:var(--muted);white-space:nowrap}
 .ov-net-stats .ns-sep{display:none}
 @media(max-width:768px){
   .ov-net-stats{gap:12px;padding:8px 12px}
-  .ov-net-stats .ns-val{font-size:13px}
+  .ov-net-stats .ns-val{font-size:var(--fs-base)}
 }
 
 /* ── Network status table (overview page) ── */
 .nw-section{margin-top:20px}
-.nw-section-title{font-size:14px;font-weight:700;color:var(--text);margin-bottom:4px}
-.nw-section-sub{font-size:11px;color:var(--muted);margin-bottom:12px}
+.nw-section-title{font-size:var(--fs-lg);font-weight:700;color:var(--text);margin-bottom:4px}
+.nw-section-sub{font-size:var(--fs-sm);color:var(--muted);margin-bottom:12px}
 .nw-summary{display:flex;gap:24px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
-.nw-summary-item{font-size:13px;color:var(--muted)}
-.nw-summary-item b{font-size:20px;font-weight:700;display:block;margin-bottom:2px}
+.nw-summary-item{font-size:var(--fs-base);color:var(--muted)}
+.nw-summary-item b{font-size:var(--fs-4xl);font-weight:700;display:block;margin-bottom:2px}
 .nw-summary-item.green b{color:var(--green)}
 .nw-summary-item.blue b{color:var(--blue)}
 .nw-summary-item.red b{color:var(--red)}
-.nw-table-wrap{overflow-x:auto;border-radius:8px;border:1px solid var(--border)}
-.nw-table{width:100%;border-collapse:collapse;font-size:12px}
+.nw-table-wrap{overflow-x:auto;border-radius:var(--radius-xl);border:1px solid var(--border)}
+.nw-table{width:100%;border-collapse:collapse;font-size:var(--fs-md)}
 .nw-table th{background:var(--card);color:var(--muted);font-weight:600;text-align:left;
   padding:10px 12px;border-bottom:2px solid var(--border);white-space:nowrap;
   cursor:pointer;user-select:none;transition:color .15s}
 .nw-table th:hover{color:var(--text)}
-.nw-table th.sort-asc::after{content:" \25B2";font-size:9px;color:var(--blue)}
-.nw-table th.sort-desc::after{content:" \25BC";font-size:9px;color:var(--blue)}
+.nw-table th.sort-asc::after{content:" \25B2";font-size:var(--fs-2xs);color:var(--blue)}
+.nw-table th.sort-desc::after{content:" \25BC";font-size:var(--fs-2xs);color:var(--blue)}
 .nw-table td{padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:middle}
 .nw-table tr:last-child td{border-bottom:none}
 .nw-table tr:hover td{background:rgba(255,255,255,.025)}
 .nw-table tr.offline td{opacity:.65}
-.nw-station-key{font-weight:700;color:var(--blue);font-family:'SF Mono',Consolas,monospace;text-decoration:none}
+.nw-station-key{font-weight:700;color:var(--blue);font-family:var(--mono-font);font-variant-numeric:tabular-nums;text-decoration:none}
 .nw-station-key:hover{text-decoration:underline}
-.nw-station-label{font-size:11px;color:var(--muted);margin-top:2px}
+.nw-station-label{font-size:var(--fs-sm);color:var(--muted);margin-top:2px}
 .nw-dot{display:inline-block;width:9px;height:9px;border-radius:50%;flex-shrink:0}
 .nw-dot.up{background:var(--green);box-shadow:0 0 5px var(--green)}
 .nw-dot.down{background:var(--red)}
-.nw-dot.comm{background:#e89b3c;box-shadow:0 0 5px #e89b3c}
+.nw-dot.comm{background:var(--orange);box-shadow:0 0 5px var(--orange)}
 .nw-online-cell{display:flex;align-items:center;gap:7px;white-space:nowrap}
 .nw-online-text.up{color:var(--green)}
 .nw-online-text.down{color:var(--red)}
-.nw-online-text.comm{color:#e89b3c}
-.nw-metric{font-family:'SF Mono',Consolas,monospace;font-size:12px}
+.nw-online-text.comm{color:var(--orange)}
+.nw-metric{font-family:var(--mono-font);font-variant-numeric:tabular-nums;font-size:var(--fs-md)}
 .nw-metric.warn{color:var(--yellow)}
 .nw-metric.crit{color:var(--red)}
 .nw-metric.ok{color:var(--green)}
@@ -1173,26 +1079,43 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
 .nw-cam-dot-circle.svc-warn{background:var(--yellow)}
 .nw-cam-dot-circle.svc-dead{background:var(--red)}
 .nw-cam-dot-circle.svc-unknown{background:var(--border)}
-.nw-cam-dot-label{font-size:9px;color:var(--muted);font-family:'SF Mono',Consolas,monospace;
+.nw-cam-dot-label{font-size:var(--fs-2xs);color:var(--muted);font-family:var(--mono-font);font-variant-numeric:tabular-nums;
   white-space:nowrap;max-width:52px;overflow:hidden;text-overflow:ellipsis}
-.nw-age{font-family:'SF Mono',Consolas,monospace;font-size:11px}
+/* Per-camera sky marker beside the capture dot (latest night's cloud share). */
+.nw-cam-dot-top{display:inline-flex;align-items:center;gap:3px;height:16px}
+.nw-cam-sky{font-size:15px;line-height:1;cursor:help}
+.nw-cam-sky.overcast{color:#a5d6ff}
+.nw-cam-sky.partly{color:#a5d6ff;opacity:.5}
+.nw-cam-sky.clear{color:var(--yellow);opacity:.8}
+/* Colour-segment cadence alarm. Lives in dashboard.css rather than
+   dashboard-network.css because the fleet table renders on the overview page
+   too, and overview.html does not load the network stylesheet. */
+.nw-seg{font-size:var(--fs-xs);font-weight:700;letter-spacing:.3px;text-transform:uppercase;
+  border-radius:var(--radius-xs);padding:2px 6px;white-space:nowrap;cursor:help}
+.nw-seg.storm{background:color-mix(in srgb,var(--red) 18%,transparent);color:var(--red);
+  border:1px solid color-mix(in srgb,var(--red) 45%,transparent)}
+.nw-seg.stalls{background:rgba(245,166,35,.18);color:#f5a623;
+  border:1px solid rgba(245,166,35,.45)}
+.nw-cam-dot.seg-alarm .nw-cam-dot-circle{box-shadow:0 0 0 2px color-mix(in srgb,var(--red) 65%,transparent)}
+.nw-cam-dot.seg-alarm .nw-cam-dot-label{color:var(--red)}
+.nw-age{font-family:var(--mono-font);font-variant-numeric:tabular-nums;font-size:var(--fs-sm)}
 .nw-age.fresh{color:var(--green)}
 .nw-age.recent{color:var(--text)}
 .nw-age.stale{color:var(--yellow)}
 .nw-age.old{color:var(--red)}
 .nw-age.na{color:var(--muted)}
-.nw-refresh-info{font-size:11px;color:var(--muted);margin-top:10px;text-align:right}
+.nw-refresh-info{font-size:var(--fs-sm);color:var(--muted);margin-top:10px;text-align:right}
 .nw-refresh-info span{color:var(--text)}
-.nw-loading{padding:32px 12px;text-align:center;color:var(--muted);font-size:12px}
-.nw-error{padding:16px 12px;color:var(--red);font-size:12px}
-.nw-card{background:var(--card);border:1px solid var(--border);border-radius:8px;
+.nw-loading{padding:32px 12px;text-align:center;color:var(--muted);font-size:var(--fs-md)}
+.nw-error{padding:16px 12px;color:var(--red);font-size:var(--fs-md)}
+.nw-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xl);
   padding:14px 16px;margin-bottom:10px}
 .nw-card.offline{opacity:.65}
 .nw-card-top{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
-.nw-card-key{font-weight:700;color:var(--blue);font-size:14px;font-family:'SF Mono',Consolas,monospace}
-.nw-card-label{font-size:11px;color:var(--muted)}
+.nw-card-key{font-weight:700;color:var(--blue);font-size:var(--fs-lg);font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+.nw-card-label{font-size:var(--fs-sm);color:var(--muted)}
 .nw-card-row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:6px}
-.nw-card-field{font-size:11px;color:var(--muted)}
+.nw-card-field{font-size:var(--fs-sm);color:var(--muted)}
 .nw-card-field b{color:var(--text);font-weight:600}
 @media(max-width:768px){
   .nw-table-wrap{display:none}
@@ -1207,17 +1130,591 @@ pre.settings-raw{background:var(--bg);border:1px solid var(--border);border-radi
 @media(max-width:540px){.ov-station-sel{display:none!important}}
 
 /* ── Burger menu (mobile nav) ── */
-.nav-burger{display:none;background:none;border:1px solid var(--border);border-radius:4px;
-  color:var(--text);cursor:pointer;font-size:18px;line-height:1;padding:3px 9px;flex-shrink:0}
+.nav-burger{display:none;background:none;border:1px solid var(--border);border-radius:var(--radius-md);
+  color:var(--text);cursor:pointer;font-size:var(--fs-3xl);line-height:1;min-width:36px;min-height:36px;
+  padding:0 9px;flex-shrink:0;transition:color .12s,border-color .12s}
 .nav-burger:hover{border-color:var(--blue);color:var(--blue)}
 
 @media(max-width:540px){
-  .nav-burger{display:block}
+  .nav-burger{display:inline-flex;align-items:center;justify-content:center}
   .main-nav{display:none;position:absolute;top:100%;left:0;right:0;
     flex-direction:column;background:var(--card);border-bottom:1px solid var(--border);
     box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:1002;padding:4px 0;gap:0}
   .main-nav.nav-open{display:flex}
-  .main-nav .nav-tab{border-radius:0;padding:11px 20px;font-size:13px;min-height:0;
+  .main-nav .nav-tab{border-radius:0;padding:11px 20px;font-size:var(--fs-lg);min-height:44px;
     width:100%;justify-content:flex-start;border-bottom:1px solid var(--border)}
+  .main-nav .nav-tab:focus-visible{outline-offset:-2px}
   .main-nav .nav-tab:last-child{border-bottom:none}
 }
+
+/* CC-BY 4.0 attribution footer (rendered by templates/_license_footer.html on
+   every page). Muted, unobtrusive, sits below page content. */
+.site-license-footer{display:flex;align-items:center;justify-content:center;
+  flex-wrap:wrap;gap:6px 12px;max-width:900px;margin:32px auto 16px;
+  padding:14px 20px;border-top:1px solid var(--border);
+  color:var(--muted);font-family:var(--ui-font);font-size:var(--fs-md);line-height:1.5;text-align:center}
+.site-license-footer .site-license-text{margin:0;max-width:640px}
+.site-license-badge{display:inline-flex;align-items:center;gap:6px;
+  color:var(--muted);text-decoration:none;flex-shrink:0}
+.site-license-badge:hover{color:var(--blue)}
+.site-license-badge .cc-by-badge{display:block}
+.site-license-badge .cc-by-label{font-weight:600;letter-spacing:.5px;
+  white-space:nowrap}
+
+/* ── Reduced header (redesign iteration 1) ──
+   Four primary sections, a "Build a station" call to action, the operator
+   tools folded into one menu, and no clock or station picker in the global
+   header (the map is the station picker; the station page keeps its own). */
+.nav-right{display:flex;align-items:center;gap:8px;margin-left:auto;font-family:var(--ui-font)}
+.nav-right ~ div,.nav-right ~ span{margin-left:0!important}
+.nav-cta{display:inline-flex;align-items:center;min-height:32px;padding:0 12px;
+  font-family:var(--ui-font);font-size:var(--fs-base);font-weight:600;color:var(--blue);text-decoration:none;
+  border:1px solid color-mix(in srgb,var(--blue) 45%,transparent);border-radius:var(--radius-md);white-space:nowrap;
+  transition:background-color .12s,border-color .12s}
+.nav-cta:hover,.nav-cta.active{background:color-mix(in srgb,var(--blue) 12%,transparent);border-color:var(--blue)}
+.nav-tools{position:relative}
+.nav-tools-btn{display:inline-flex;align-items:center;gap:4px;min-height:32px;padding:0 10px;
+  list-style:none;cursor:pointer;font-family:var(--ui-font);font-size:var(--fs-base);color:var(--muted);
+  border-radius:var(--radius-md);user-select:none;white-space:nowrap;transition:color .12s,background-color .12s}
+.nav-tools-btn::-webkit-details-marker{display:none}
+.nav-tools-btn::after{content:"\25BE";display:inline-block;font-size:var(--fs-xs);transition:transform .12s}
+.nav-tools[open] .nav-tools-btn::after{transform:rotate(180deg)}
+.nav-tools-btn:hover,.nav-tools[open] .nav-tools-btn,.nav-tools-btn.active{color:var(--text);background:rgba(255,255,255,.06)}
+.nav-tools-menu{position:absolute;right:0;top:calc(100% + 6px);min-width:180px;z-index:1003;
+  display:flex;flex-direction:column;gap:2px;background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius-xl);box-shadow:0 8px 24px rgba(0,0,0,.4);padding:4px;overscroll-behavior:contain}
+.nav-tools-menu .nav-tab{justify-content:flex-start;width:100%}
+.nav-tools-menu .nav-tab:focus-visible{outline-offset:-2px}
+.ov-header .ov-station-sel{display:none!important}
+/* UTC clock + tonight's RMS window, in the shared header on every page
+   (auth pages, which have no header, carry it top-right). */
+.auth-time{position:fixed;top:12px;right:16px;display:flex;flex-direction:column;align-items:flex-end;gap:2px}
+.nav-time{display:flex;flex-direction:column;align-items:flex-end;gap:2px;line-height:1.15;margin-right:4px}
+.nav-time .hdr-clock{font-size:var(--fs-base);padding:2px 8px}
+.nav-rms{font-family:var(--mono-font);font-variant-numeric:tabular-nums;font-size:var(--fs-sm);color:var(--muted);white-space:nowrap}
+@media(max-width:540px){
+  .nav-time .hdr-clock{font-size:var(--fs-xs);padding:1px 5px}
+  .nav-rms{font-size:var(--fs-2xs)}
+}
+.site-footer-link{color:var(--muted);text-decoration:underline;text-underline-offset:2px;
+  background:none;border:0;padding:4px 2px;font:inherit;cursor:pointer;border-radius:var(--radius-md)}
+.site-footer-link:hover{color:var(--blue)}
+
+/* ── Data typography ──
+   Body text is sans (--ui-font); these elements carry data (camera and
+   station codes, times, sizes, counters, config values, file names) and stay
+   monospace with fixed-width digits so columns and ticking values line up.
+   Mixed label+number elements only get tabular digits. Placed last so it
+   wins over the component rules above that set font-family:inherit. */
+.cam-code,.cam-ip,.rms-cam-code,.settings-cam-header,.fdp-frame-header,
+.vitals-val,.settings-val,
+.vdb-chunk-time,.vdb-chunk-size,.vdb-ts-meta,
+.ov-net-stats .ns-val,.nw-summary-item b,.nw-refresh-info span,.nw-card-field b{
+  font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+
+.rms-cal-cell,.rms-cal-count,.vdb-status,
+.rms-flt-summary,.nw-table td,.det-modal-grid{font-variant-numeric:tabular-nums}
+
+/* ── Reduced motion ──
+   Drop movement and fades for users who ask for it. Short state feedback
+   (the "saved" markers' fadeout) keeps its animation because it carries
+   information; the decorative pulses stop. */
+@media (prefers-reduced-motion: reduce){
+  html{scroll-behavior:auto}
+  *,*::before,*::after{transition-duration:0s!important;transition-delay:0s!important}
+
+  .vdb-chunk-card:hover{transform:none}
+  .app-panel-inner,.app-panel.open .app-panel-inner{transform:none}
+}
+
+/* Header: Build Guide stands out among the main tabs; "Go to station" is on
+   every page (type to filter, Enter opens the first match, "/" opens it). */
+.nav-tab-guide{color:var(--blue);border:1px solid color-mix(in srgb,var(--blue) 45%,transparent);margin-left:6px}
+.nav-tab-guide:hover,.nav-tab-guide.active{background:color-mix(in srgb,var(--blue) 14%,transparent);color:var(--blue)}
+.nav-station-jump{position:relative;margin-left:8px}
+.nav-station-btn{font-family:var(--ui-font);font-size:var(--fs-base);height:32px;padding:0 12px;border-radius:var(--radius-md);
+  border:1px solid var(--border);background:var(--bg);color:var(--text);cursor:pointer;white-space:nowrap}
+.nav-station-btn:hover,.nav-station-btn[aria-expanded="true"]{border-color:var(--blue)}
+.nav-station-menu{position:absolute;left:0;top:calc(100% + 6px);z-index:1004;width:380px;max-height:70vh;
+  display:flex;flex-direction:column;background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xl);
+  box-shadow:0 8px 24px rgba(0,0,0,.45);overflow:hidden}
+.nav-station-menu[hidden]{display:none}
+.nav-station-filter{margin:8px;padding:7px 10px;border-radius:var(--radius-md);border:1px solid var(--border);
+  background:var(--bg);color:var(--text);font-family:var(--ui-font);font-size:var(--fs-base)}
+.nav-station-list{list-style:none;margin:0;padding:0 4px 6px;overflow-y:auto;overscroll-behavior:contain}
+.nav-station-list a{display:flex;align-items:baseline;gap:8px;padding:6px 10px;border-radius:var(--radius-md);
+  color:var(--text);text-decoration:none;font-size:var(--fs-base)}
+.nav-station-list a:hover,.nav-station-list a.is-active{background:color-mix(in srgb,var(--blue) 12%,transparent)}
+.nav-station-list .ns-key{font-family:var(--mono-font);font-size:var(--fs-md);color:var(--muted);min-width:64px;white-space:nowrap;flex-shrink:0}
+.nav-station-list a > span:nth-child(2){flex:0 0 auto;white-space:nowrap}
+.nav-station-list .ns-cams{flex:1 1 auto;min-width:0;text-align:right;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono-font);font-size:var(--fs-sm);color:var(--muted);white-space:nowrap}
+.nav-station-list .ns-empty{padding:8px 10px;color:var(--muted);font-size:var(--fs-md)}
+@media(max-width:540px){
+  .nav-station-jump{margin-left:auto}
+  .nav-station-btn{height:30px;padding:0 8px;font-size:var(--fs-md)}
+  .nav-station-menu{position:fixed;left:8px;right:8px;top:56px;width:auto}
+}
+
+/* ══ Site header (templates/_nav.html) ══════════════════════════════════════
+   Row 1: wordmark, pages, station search, tools, account.
+   Row 2: the tonight strip — UTC clock, tonight's sky on a 12:00→12:00 UTC
+   axis with a marker at now, and the RMS capture window. The strip is the one
+   distinctive element; everything in row 1 is quiet and shares one control
+   style (.hc) so nothing can drift out of line. The container is whichever
+   element holds the logo, so every page gets this without its own rule. */
+/* header tokens (--hdr-*, --sky-*, --hc-*) live in the :root block at the top */
+/* sticky like every page's header always was; z-index is left to the page
+   (100 on Detections/Admin so their modals open above it, 1001 elsewhere) */
+body :is(header,div):has(> .nav-logo){
+  position:sticky;top:0;display:flex;flex-wrap:wrap;align-items:center;column-gap:6px;row-gap:0;
+  min-height:0;height:auto;padding:0 var(--hdr-px);margin:0;
+  background:var(--hdr-ink);border:0;border-bottom:1px solid var(--hdr-line);box-shadow:none}
+/* Sticky rows under the header follow its measured height (--site-hdr-h,
+   set by dashboard-common.js) instead of fixed pixel offsets, which went
+   stale every time the header changed height. Second-level rows add the tab
+   row's height (--site-tabs-h). `body` raises specificity over the page
+   stylesheets, which load after this one and still carry the old offsets;
+   only `top` is set here, so rows a page makes static on phones stay static. */
+body .sub-tabs,body .ev-tabs,body .adm-tabs{top:var(--site-hdr-h,87px)}
+body .ev-filter-bar{top:calc(var(--site-hdr-h,87px) + var(--site-tabs-h,41px))}
+.nav-logo{height:56px;display:flex;align-items:center;margin-right:18px;flex-shrink:0}
+
+/* pages: plain text, the current one in starlight with a teal rule at the row's foot */
+.main-nav{display:flex;align-items:stretch;gap:2px;height:56px;margin:0}
+.main-nav .nav-tab,.main-nav .nav-tab-guide{position:relative;display:flex;align-items:center;height:56px;
+  padding:0 12px;margin:0;border:0;border-radius:0;background:none;
+  font:500 14px/1 var(--ui-font);color:var(--hdr-muted);text-decoration:none;white-space:nowrap}
+.main-nav .nav-tab:hover{color:var(--hdr-text);background:none}
+/* "About" opens a panel, so it is a button styled as a tab */
+button.nav-about{cursor:pointer}
+button.nav-panel-link{width:100%;text-align:left;cursor:pointer}
+.main-nav .nav-tab.active{color:var(--hdr-text);background:none}
+.main-nav .nav-tab.active::after{content:"";position:absolute;left:12px;right:12px;bottom:0;height:2px;
+  border-radius:var(--radius-2xs) var(--radius-2xs) 0 0;background:var(--hdr-teal)}
+
+/* one control style */
+.hc{box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  height:var(--hc-h);min-height:var(--hc-h);padding:0 12px;margin:0;
+  font:500 13px/1 var(--ui-font);color:var(--hdr-text);text-decoration:none;white-space:nowrap;
+  background:transparent;border:1px solid var(--hdr-line);border-radius:var(--hc-r);
+  cursor:pointer;list-style:none;user-select:none;transition:background-color .15s,border-color .15s}
+.hc::-webkit-details-marker{display:none}
+.hc:hover,.hc[aria-expanded="true"],details[open] > .hc{background:color-mix(in srgb,var(--hdr-text) 6%,transparent);border-color:color-mix(in srgb,var(--hdr-text) 18%,transparent);color:var(--hdr-text)}
+.hc:focus-visible{outline:2px solid var(--hdr-teal);outline-offset:2px}
+.hc-ico{flex-shrink:0;color:var(--hdr-muted)}
+.hc-key{font:500 11px/1 var(--ui-font);color:var(--hdr-muted);padding:3px 6px;border-radius:var(--radius-sm);
+  border:1px solid var(--hdr-line);margin-left:2px}
+/* the one filled control: Log in */
+.hc-primary{background:var(--hdr-teal);border-color:var(--hdr-teal);color:var(--on-teal);font-weight:600}
+.hc-primary:hover{background:var(--hdr-teal-hover);border-color:var(--hdr-teal-hover);color:var(--on-teal)}
+
+.nav-station-jump{margin-left:auto;position:relative}
+.nav-station-btn.hc{justify-content:flex-start;min-width:200px}
+.nav-station-btn.hc .hc-key{margin-left:auto}
+.nav-right{display:flex;align-items:center;gap:6px;margin:0}
+.nav-station-jump + .nav-right{margin-left:0}
+.nav-tools-btn.hc{color:var(--hdr-text)}
+.nav-tools-btn.hc::after{content:"";width:6px;height:6px;margin:-3px 0 0 2px;border:solid var(--hdr-muted);
+  border-width:0 1.5px 1.5px 0;transform:rotate(45deg);transition:transform .15s}
+.nav-tools[open] .nav-tools-btn.hc::after{transform:rotate(-135deg);margin-top:3px}
+.nav-tools-menu,.nav-user-menu{top:calc(100% + 8px);background:var(--hdr-ink);border:1px solid var(--hdr-line);
+  border-radius:var(--radius-xl);box-shadow:0 12px 32px rgba(0,0,0,.5);padding:6px}
+.nav-tools-menu .nav-tab,.nav-user-menu .nav-tab{border:0;border-radius:var(--radius-md);color:var(--hdr-text);padding:9px 10px;font-size:var(--fs-base)}
+.nav-tools-menu .nav-tab:hover,.nav-user-menu .nav-tab:hover{background:color-mix(in srgb,var(--hdr-text) 6%,transparent)}
+
+/* account */
+.nav-auth:empty{display:none}
+.nav-user{position:relative}
+.nav-user-btn.hc{padding:0 12px 0 6px}
+.nav-avatar{width:24px;height:24px;border-radius:50%;flex-shrink:0;display:inline-grid;place-items:center;
+  background:color-mix(in srgb,var(--hdr-teal) 16%,transparent);color:var(--hdr-teal);font:600 12px/1 var(--ui-font);
+  box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--hdr-teal) 45%,transparent)}
+.nav-user-menu{position:absolute;right:0;min-width:200px;z-index:1003;display:flex;flex-direction:column}
+.nav-user-who{margin:0;padding:8px 10px 10px;font-size:var(--fs-md);color:var(--hdr-muted);border-bottom:1px solid var(--hdr-line);margin-bottom:4px}
+.nav-user-who b{display:block;margin-top:3px;font-size:var(--fs-lg);font-weight:600;color:var(--hdr-text)}
+.nav-user-who span{display:block;margin-top:2px;text-transform:capitalize}
+
+/* ── the tonight strip ── */
+.nav-tonight{flex:0 0 calc(100% + 2 * var(--hdr-px));order:99;box-sizing:border-box;
+  display:flex;align-items:center;gap:14px;height:30px;margin:0 calc(-1 * var(--hdr-px));padding:0 var(--hdr-px);
+  background:var(--hdr-ink-2);border-top:1px solid var(--hdr-line);
+  font:500 12px/1 var(--ui-font);font-variant-numeric:tabular-nums;color:var(--hdr-muted)}
+/* .nav-right ~ div (older rule above) zeroes margin-left with !important */
+.nav-right ~ .nav-tonight{margin-left:calc(-1 * var(--hdr-px))!important}
+.nav-tonight-clock{display:inline-flex;align-items:center;gap:8px;flex-shrink:0}
+.nav-tonight .hdr-clock{all:unset;font:600 12px/1 var(--ui-font);font-variant-numeric:tabular-nums;
+  color:var(--hdr-text);letter-spacing:.01em;white-space:nowrap}
+.nav-star{width:6px;height:6px;border-radius:50%;background:#fff;box-shadow:0 0 0 2px rgba(255,255,255,.12),0 0 8px 1px rgba(170,200,255,.9)}
+.nav-tonight .nav-rms{all:unset;font:500 12px/1 var(--ui-font);font-variant-numeric:tabular-nums;
+  color:var(--hdr-muted);white-space:nowrap;flex-shrink:0}
+.nav-tonight .nav-rms[hidden]{display:none}
+.nav-sky{--set:25%;--rise:66%;--now:50%;position:relative;flex:1 1 auto;min-width:60px;height:6px;border-radius:var(--radius-xs);
+  background:linear-gradient(90deg,
+    var(--sky-day) 0, var(--sky-day) calc(var(--set) - 5%),
+    var(--sky-civ) calc(var(--set) - 3.2%), var(--sky-naut) calc(var(--set) - 1.6%),
+    var(--sky-night) var(--set), var(--sky-night) var(--rise),
+    var(--sky-naut) calc(var(--rise) + 1.6%), var(--sky-civ) calc(var(--rise) + 3.2%),
+    var(--sky-day) calc(var(--rise) + 5%), var(--sky-day) 100%);
+  opacity:.9}
+.nav-sky.is-cramped{visibility:hidden}
+.nav-sky-now{position:absolute;top:50%;left:var(--now);width:2px;height:14px;margin:-7px 0 0 -1px;border-radius:1px;
+  background:#fff;box-shadow:0 0 6px rgba(255,255,255,.8)}
+
+/* ── menu button ── */
+.nav-burger.hc{display:none;width:var(--hc-h);padding:0}
+.nav-burger-ico,.nav-burger-ico::before{display:block;width:16px;height:1.5px;border-radius:1px;background:var(--hdr-text);
+  transition:transform .18s ease}
+.nav-burger-ico{position:relative;transform:translateY(-3px)}
+.nav-burger-ico::before{content:"";position:absolute;left:0;top:6px}
+.nav-burger.is-open .nav-burger-ico{transform:translateY(0) rotate(45deg)}
+.nav-burger.is-open .nav-burger-ico::before{top:0;transform:rotate(-90deg)}
+
+/* ── phone menu ── */
+.nav-panel[hidden]{display:none!important}
+.nav-panel{position:fixed;left:0;right:0;bottom:0;z-index:1005;display:flex;flex-direction:column;
+  overflow-y:auto;overscroll-behavior:contain;padding:12px 16px calc(16px + env(safe-area-inset-bottom,0px));
+  background:var(--hdr-ink)}
+.nav-panel-links{display:flex;flex-direction:column}
+.nav-panel-link,.nav-panel-link.nav-tab-guide{position:relative;display:flex;align-items:center;min-height:48px;padding:0 4px 0 22px;margin:0;
+  border:0;border-bottom:1px solid var(--hdr-line);border-radius:0;background:none;font:500 18px/1.2 var(--ui-font);color:var(--hdr-text);text-decoration:none}
+.nav-panel-link.active::before{content:"";position:absolute;left:4px;top:50%;width:6px;height:6px;margin-top:-3px;border-radius:50%;
+  background:#fff;box-shadow:0 0 8px 1px rgba(170,200,255,.9)}
+.nav-panel-link:not(.active){color:#c3ccd9}
+.nav-panel-tools{margin-top:16px;display:flex;flex-direction:column}
+.nav-panel-tools[hidden]{display:none}
+.nav-panel-heading{margin:0 0 4px 22px;font:500 13px/1.3 var(--ui-font);color:var(--hdr-muted)}
+.nav-panel-sublink{display:flex;align-items:center;min-height:36px;padding:0 4px 0 22px;
+  font:400 15px/1.2 var(--ui-font);color:#c3ccd9;text-decoration:none}
+.nav-panel-sublink.active{color:var(--hdr-text);font-weight:600}
+.nav-panel-auth{margin-top:auto;padding-top:20px}
+.nav-panel-acct{display:flex;align-items:center;gap:12px;padding-top:14px;border-top:1px solid var(--hdr-line)}
+.nav-panel-acct .nav-avatar{width:36px;height:36px;font-size:var(--fs-xl)}
+.nav-panel-who{flex:1;min-width:0;font-size:var(--fs-md);color:var(--hdr-muted)}
+.nav-panel-who b{display:block;font-size:var(--fs-xl);font-weight:600;color:var(--hdr-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.nav-panel-who span{display:block;margin-top:3px;text-transform:capitalize}
+.nav-panel-login{width:100%;height:48px;font-size:var(--fs-2xl)}
+.nav-panel-open,.nav-panel-open body{overflow:hidden}
+.nav-panel-open .fab-stack{display:none!important}
+
+/* ── below 1024 px: pages, tools and account move into the menu ── */
+@media(max-width:1024px){
+  .main-nav,.nav-right{display:none!important}
+  .nav-burger.hc{display:inline-flex}
+  .nav-station-jump{margin-left:auto}
+}
+@media(max-width:640px){
+  :root{--hdr-px:14px}
+  .nav-logo{height:52px;margin-right:0}
+  .nav-logo img{height:24px;width:auto}
+  .nav-station-btn.hc{min-width:0;width:var(--hc-h);padding:0;justify-content:center}
+  .nav-station-btn.hc .hc-lbl,.nav-station-btn.hc .hc-key{display:none}
+  .nav-station-btn.hc .hc-ico{color:var(--hdr-text)}
+  .nav-station-menu{position:fixed;left:8px;right:8px;top:60px;width:auto}
+  .nav-tonight{gap:10px;font-size:11.5px;min-width:0}
+  /* Narrow phones: the sky bar gives way first (down to nothing); the RMS
+     window ends in an ellipsis only if it still does not fit. Its longest
+     wording, "RMS recording · until HH:MM UTC" during capture, is ~60 px
+     wider than the daytime "RMS starts HH:MM UTC". */
+  .nav-sky{min-width:0}
+  .nav-tonight .nav-rms{display:block;min-width:0;overflow:hidden;text-overflow:ellipsis;flex-shrink:1}
+  .nav-tonight .hdr-clock,.nav-tonight .nav-rms{font-size:11.5px}
+}
+/* 320 px phones: the clock and RMS window must stay readable; the sky goes */
+@media(max-width:360px){.nav-sky{display:none}}
+@media (prefers-reduced-motion: reduce){
+  .nav-burger-ico,.nav-burger-ico::before,.hc{transition:none}
+}
+
+/* ── Moon phase (twilight-slider.js moonPhaseSvg): drawn disc + illumination,
+   in place of the emoji; used by the Video DB and Detections time rows. ── */
+.vdb-moon-icon,.ev-moon-icon{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-md)}
+.moon-svg{display:block;flex-shrink:0}
+.moon-pct{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+
+/* ── Video DB controls card ─────────────────────────────────────────────────
+   The card's own controls (same ids, same handlers) laid out with
+   display:contents + order:
+     phones   [camera ▾] [◐ 20 Oct · 78% ▾]
+              [16:37] → [05:05] UTC                         Whole night
+     desktop  [Camera TST001|TST002] [◐ 20 Oct · 78% ▾] [Single|All cams]   [16:37] → [05:05] UTC  Whole night
+     both     ─────────────── time slider (twilight-slider.js, unchanged) ───────────────
+              (↓ Newest first) (Manual locks only)              ● 2047 clips   [thumb size]
+   No card title or caps labels; controls use the header's control look. */
+#pane-videodb .vdb-filter-card{display:flex;flex-wrap:wrap;align-items:center;gap:12px 8px;
+  padding:14px 16px;border-radius:var(--radius-2xl)}
+#pane-videodb :is(.vdb-filters,.vdb-filter-group,.vdb-filter-right,.vdb-time-section,
+  .vdb-time-header,.vdb-toolbar){display:contents}
+#pane-videodb :is(.vdb-filter-card > .card-title,#vdb-camera-label,#vdb-time-range-label,
+  #vdb-moon-icon,#vdb-cam-pointing:empty,.vdb-sort-caret,.vdb-status-date){display:none}
+
+/* the lists these pickers open are drawn by the browser: tell it they are dark */
+#pane-videodb :is(#vdb-camera select,#vdb-night){color-scheme:dark}
+#pane-videodb :is(#vdb-camera select,#vdb-night) option{background:var(--hdr-ink);color:var(--hdr-text)}
+/* shared control look (the header's .hc): 40 px, hairline border */
+#pane-videodb :is(#vdb-camera select,#vdb-night,.vdb-time-input){
+  box-sizing:border-box;height:40px;min-height:40px;margin:0;border-radius:var(--radius-lg);
+  border:1px solid var(--hdr-line);background-color:color-mix(in srgb,var(--hdr-text) 3%,transparent);color:var(--hdr-text);
+  font:500 14px/1 var(--ui-font)}
+
+/* camera: "Camera" sits inside the picker as a muted label */
+#pane-videodb #vdb-camera{order:1;margin:0;position:relative}
+#pane-videodb #vdb-camera::before{content:"Camera";position:absolute;left:12px;top:50%;transform:translateY(-50%);
+  color:var(--hdr-muted);font:400 14px/1 var(--ui-font);pointer-events:none;z-index:1}
+#pane-videodb #vdb-camera select{width:100%;min-width:0;padding:0 28px 0 70px;font-weight:600}
+#pane-videodb #vdb-cam-pointing{order:1;font-size:var(--fs-md);color:var(--hdr-muted)}
+
+/* night: the moon drawn at the left, the picker's own text reads "20 Oct · 78%" */
+#pane-videodb .vdb-night-wrap{order:2;min-width:0;display:block;position:relative}
+#pane-videodb .vdb-night-wrap #vdb-night{width:100%;padding:0 28px 0 36px;font-weight:600;font-variant-numeric:tabular-nums}
+#pane-videodb .vdb-night-moon{display:inline-flex;align-items:center;position:absolute;
+  left:12px;top:50%;transform:translateY(-50%);pointer-events:none}
+#pane-videodb .vdb-night-moon .moon-pct{display:none}
+
+/* times, then "Whole night" as a quiet text button */
+#pane-videodb #vdb-time-label{order:4;display:flex;align-items:center;gap:8px}
+/* 16 px: iOS zooms the page when a text field under 16 px is focused */
+#pane-videodb #vdb-time-label .vdb-time-input{width:68px;padding:0;text-align:center;font-size:var(--fs-2xl);font-weight:600;
+  font-variant-numeric:tabular-nums;cursor:pointer}
+#pane-videodb #vdb-time-label :is(.vdb-time-arrow,.vdb-time-suffix){color:var(--hdr-muted);font:400 13px var(--ui-font)}
+#pane-videodb #vdb-time-reset{order:5;height:40px;padding:0 2px;border:0;background:none;
+  color:var(--hdr-teal);font:500 13px var(--ui-font);white-space:nowrap;cursor:pointer}
+#pane-videodb #vdb-time-reset:hover{text-decoration:underline;text-underline-offset:3px}
+
+/* the slider exactly as before, full width */
+#pane-videodb .vdb-slider-wrap{order:6;flex:1 1 100%}
+#pane-videodb .vdb-slider-ticks{order:7;flex:1 1 100%;margin-top:-8px}
+
+/* sort + manual-locks as chips, then the live dot and the clip count */
+#pane-videodb :is(#vdb-sort-btn,.vdb-filter-right .vdb-toggle-label){flex:0 0 auto;
+  height:32px;min-height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--hdr-line);
+  background:none;color:var(--hdr-text);font:500 13px/1 var(--ui-font);white-space:nowrap;cursor:pointer}
+/* inline text flow, so "↓ Newest first" keeps normal word spacing */
+#pane-videodb #vdb-sort-btn{order:8;display:inline-block;line-height:30px}
+#pane-videodb .vdb-filter-right .vdb-toggle-label{order:9}
+/* the checkbox stays the control (focus, screen readers); the chip shows its state */
+#pane-videodb .vdb-toggle-label input{position:absolute;opacity:0;width:1px;height:1px}
+#pane-videodb .vdb-toggle-label:has(input:checked){background:color-mix(in srgb,var(--hdr-teal) 14%,transparent);
+  border-color:color-mix(in srgb,var(--hdr-teal) 50%,transparent);color:#bff1ea}
+#pane-videodb .vdb-toggle-label:has(input:focus-visible){outline:2px solid var(--hdr-teal);outline-offset:2px}
+#pane-videodb #vdb-live-badge{order:10;margin-left:auto;font-size:0;line-height:1}
+#pane-videodb #vdb-live-badge span{display:inline-block;width:7px;height:7px;border-radius:50%;
+  background:var(--green);box-shadow:0 0 6px var(--green);font-size:0}
+#pane-videodb #vdb-status{order:11;font-size:var(--fs-base);color:var(--hdr-muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+/* not live: the count itself takes the right edge */
+#pane-videodb .vdb-toolbar:has(#vdb-live-badge[style*="none"]) #vdb-status{margin-left:auto}
+
+/* phones: two equal pickers on row 1 (their bases fill the row, so the time
+   fields start a new line), "Whole night" at the right of row 2 */
+@media(max-width:767px){
+  /* "All cams" is desktop-only (dashboard-vdb.js hides it below 768 px), so
+     the toggle would be a lone "Single cam" button */
+  #pane-videodb #vdb-view-toggle{display:none}
+}
+@media(max-width:540px){
+  #pane-videodb .vdb-filter-card{padding:12px}
+  #pane-videodb #vdb-camera{flex:1 1 calc(50% - 4px);min-width:0}
+  #pane-videodb .vdb-night-wrap{flex:1 1 calc(50% - 4px)}
+  #pane-videodb #vdb-cam-pointing{flex:1 1 100%;margin:-6px 0 0}
+  #pane-videodb #vdb-time-reset{margin-left:auto}
+  #pane-videodb .vdb-zoom-row{display:none}
+}
+
+/* tablets / narrow windows: the pickers keep row 1, the times and "Whole night"
+   move to row 2 together (a zero-height break item ends row 1 after the
+   toggles, which are order 3; the card's ::after comes after them in DOM order) */
+@media(min-width:541px) and (max-width:1100px){
+  #pane-videodb .vdb-filter-card::after{content:"";order:3;flex:1 1 100%;height:0}
+  #pane-videodb #vdb-time-label{margin-left:0!important}
+  #pane-videodb #vdb-time-reset{margin-left:auto}
+}
+
+/* desktop: one control row; camera buttons as a segmented control with the
+   "Camera" label in front; All cams toggle beside the night; times at the right */
+@media(min-width:541px){
+  #pane-videodb #vdb-camera{display:inline-flex;align-items:center;height:40px;padding:0 4px 0 70px;
+    border:1px solid var(--hdr-line);border-radius:var(--radius-lg);background:color-mix(in srgb,var(--hdr-text) 3%,transparent);gap:2px}
+  #pane-videodb #vdb-camera .cam-btn{height:30px;margin:0;padding:0 10px;border:0;border-radius:var(--radius-md);background:none;
+    color:var(--hdr-muted);font:600 13px/1 var(--ui-font);letter-spacing:.02em;cursor:pointer}
+  #pane-videodb #vdb-camera .cam-btn:hover{color:var(--hdr-text);background:color-mix(in srgb,var(--hdr-text) 6%,transparent)}
+  #pane-videodb #vdb-camera .cam-btn.active{color:#fff;background:color-mix(in srgb,var(--hdr-teal) 16%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--hdr-teal) 50%,transparent)}
+  #pane-videodb .vdb-night-wrap{flex:0 0 190px}
+  #pane-videodb :is(#vdb-view-toggle,#vdb-allcams-sort){order:3;display:inline-flex;height:40px;padding:4px;gap:2px;margin:0;
+    box-sizing:border-box;border:1px solid var(--hdr-line);border-radius:var(--radius-lg);background:color-mix(in srgb,var(--hdr-text) 3%,transparent)}
+  #pane-videodb #vdb-allcams-sort[style*="none"]{display:none}
+  #pane-videodb :is(#vdb-view-toggle,#vdb-allcams-sort) .vdb-toggle-btn{height:30px;padding:0 10px;border:0;border-radius:var(--radius-md);
+    background:none;color:var(--hdr-muted);font:500 13px/1 var(--ui-font);cursor:pointer}
+  #pane-videodb :is(#vdb-view-toggle,#vdb-allcams-sort) .vdb-toggle-btn:hover{color:var(--hdr-text);background:color-mix(in srgb,var(--hdr-text) 6%,transparent)}
+  #pane-videodb :is(#vdb-view-toggle,#vdb-allcams-sort) .vdb-toggle-btn.active{color:#fff;background:color-mix(in srgb,var(--hdr-teal) 16%,transparent);
+    box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--hdr-teal) 50%,transparent)}
+  #pane-videodb #vdb-time-label{margin-left:auto}
+  #pane-videodb .vdb-zoom-row{order:12;margin-left:16px;display:flex;align-items:center;gap:6px;color:var(--hdr-muted)}
+}
+
+/* ── Detections filter bar: the Video DB card's look (see above) ─────────────
+     phones   [◐ 20 Oct · 78% ▾]                     [compass]
+              [15:55] → [04:09] UTC                   Whole night
+              ─────────── time slider (unchanged) ───────────
+     desktop  [◐ 20 Oct · 78% ▾] [15:55] → [04:09] UTC  Whole night  ── slider ──  [compass] [card size]
+   Same ids and handlers; the groups are display:contents and the controls
+   are placed with order. `body` outranks dashboard-events.css, which loads
+   after this file. Desktop stays one row: the bar is sticky. */
+.ev-sr-only{position:absolute!important;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;
+  clip:rect(0 0 0 0);white-space:nowrap;border:0}
+body .ev-filter-bar{display:flex;flex-wrap:wrap;align-items:center;gap:12px 10px;padding:10px 20px}
+body .ev-filter-bar .ev-filter-group{display:contents}
+body .ev-filter-bar #ev-moon-icon{display:none}
+
+body .ev-filter-bar :is(#ev-date){color-scheme:dark}
+body .ev-filter-bar #ev-date option{background:var(--hdr-ink);color:var(--hdr-text)}
+body .ev-filter-bar :is(#ev-date,.ev-time-input){box-sizing:border-box;height:40px;min-height:40px;margin:0;
+  border-radius:var(--radius-lg);border:1px solid var(--hdr-line);background-color:color-mix(in srgb,var(--hdr-text) 3%,transparent);color:var(--hdr-text);
+  font:500 14px/1 var(--ui-font)}
+
+/* night: the moon drawn at the left, the text reads "20 Oct · 78%" */
+body .ev-filter-bar .ev-night-wrap{order:1;flex:0 0 190px;min-width:0;display:block;position:relative}
+body .ev-filter-bar .ev-night-wrap #ev-date{width:100%;padding:0 28px 0 36px;font-weight:600;font-variant-numeric:tabular-nums}
+body .ev-filter-bar .ev-night-moon{display:inline-flex;align-items:center;position:absolute;
+  left:12px;top:50%;transform:translateY(-50%);pointer-events:none}
+body .ev-filter-bar .ev-night-moon .moon-pct{display:none}
+
+/* times, then "Whole night" */
+body .ev-filter-bar #ev-time-label{order:3;display:flex;align-items:center;gap:8px;color:var(--hdr-text)}
+/* 16 px: iOS zooms the page when a text field under 16 px is focused */
+body .ev-filter-bar #ev-time-label .ev-time-input{width:68px;padding:0;text-align:center;font-size:var(--fs-2xl);font-weight:600;
+  font-variant-numeric:tabular-nums;cursor:pointer}
+body .ev-filter-bar #ev-time-label :is(.ev-time-arrow,.ev-time-suffix){color:var(--hdr-muted);font:400 13px var(--ui-font)}
+body .ev-filter-bar #ev-time-reset{order:4;height:40px;padding:0 2px;border:0;background:none;
+  color:var(--hdr-teal);font:500 13px var(--ui-font);white-space:nowrap;cursor:pointer}
+body .ev-filter-bar #ev-time-reset:hover{text-decoration:underline;text-underline-offset:3px}
+/* phones: read-only fields are buttons for the picker, not text */
+body .ev-filter-bar .ev-time-input[readonly]{caret-color:transparent;-webkit-user-select:none;user-select:none;
+  -webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+body .ev-filter-bar .ev-time-input[readonly]::selection{background:transparent}
+
+/* the slider exactly as before */
+body .ev-filter-bar .ev-slider-wrap{order:5;flex:1 1 260px;min-width:110px}
+
+/* pointing compass: the same filter, sized like the other controls, teal when on */
+body .ev-filter-bar .ev-compass{order:6;width:52px;height:52px;margin:-6px 0}
+body .ev-filter-bar .ev-compass-slice{fill:color-mix(in srgb,var(--hdr-text) 4%,transparent);stroke:var(--hdr-line)}
+body .ev-filter-bar .ev-compass-slice:hover{fill:color-mix(in srgb,var(--hdr-text) 10%,transparent)}
+body .ev-filter-bar .ev-compass-slice.active{fill:color-mix(in srgb,var(--hdr-teal) 35%,transparent);stroke:var(--hdr-teal)}
+body .ev-filter-bar .ev-compass-lbl{fill:var(--hdr-muted);font-size:var(--fs-lg)}
+
+body .ev-filter-bar .ev-zoom-row{order:7;margin-left:6px;color:var(--hdr-muted)}
+/* narrow desktop windows: a shorter card-size slider keeps the bar on one row */
+@media(min-width:541px) and (max-width:1000px){
+  body .ev-filter-bar .ev-zoom-row input[type=range]{width:56px}
+  body .ev-filter-bar .ev-slider-wrap{flex-basis:120px;min-width:90px}
+  body .ev-filter-bar .ev-night-wrap{flex-basis:170px}
+}
+
+@media(max-width:540px){
+  body .ev-filter-bar{flex-direction:row;align-items:center;gap:12px 8px;padding:12px}
+  /* row 1: night (rest of the row) + compass, so the times start row 2 */
+  body .ev-filter-bar .ev-night-wrap{flex:1 1 calc(100% - 60px)}
+  body .ev-filter-bar .ev-compass{order:2;margin:0}
+  body .ev-filter-bar #ev-time-reset{margin-left:auto}
+  body .ev-filter-bar .ev-slider-wrap{flex:1 1 100%;min-width:0;margin:4px 7px 0}
+  body .ev-filter-bar .ev-zoom-row{display:none}
+}
+
+/* ── Time picker (dashboard-time-picker.js): phones get a bottom sheet,
+   wider screens a ~300 px pop-up under the clicked field. ── */
+.tp-root{position:fixed;inset:0;z-index:1200;pointer-events:none;font-family:var(--ui-font)}
+.tp-is-sheet{pointer-events:auto}
+.tp-backdrop{position:absolute;inset:0;background:rgba(5,8,14,.62)}
+.tp-panel{position:absolute;pointer-events:auto;background:var(--hdr-ink);color:var(--hdr-text);
+  border:1px solid var(--hdr-line);box-shadow:0 16px 40px rgba(0,0,0,.55)}
+.tp-is-sheet .tp-panel{left:0;right:0;bottom:0;border-radius:16px 16px 0 0;border-bottom:0;
+  padding:8px 16px calc(16px + env(safe-area-inset-bottom,0px));animation:tp-up .18s ease-out}
+.tp-is-pop .tp-panel{width:300px;border-radius:var(--radius-2xl);padding:10px}
+@keyframes tp-up{from{transform:translateY(24px);opacity:.6}to{transform:none;opacity:1}}
+.tp-grab{width:36px;height:4px;border-radius:var(--radius-2xs);background:color-mix(in srgb,var(--hdr-text) 25%,transparent);margin:0 auto 12px}
+.tp-seg{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:4px;border-radius:var(--radius-2xl);
+  background:color-mix(in srgb,var(--hdr-text) 4%,transparent);border:1px solid var(--hdr-line)}
+.tp-side{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;height:52px;
+  border:0;border-radius:9px;background:none;color:var(--hdr-muted);font:500 12px var(--ui-font);cursor:pointer}
+.tp-side b{font:600 20px/1 var(--ui-font);font-variant-numeric:tabular-nums;color:var(--hdr-text)}
+.tp-side.on{background:color-mix(in srgb,var(--hdr-teal) 14%,transparent);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--hdr-teal) 50%,transparent);color:#bff1ea}
+.tp-side.on b{color:#fff}
+.tp-is-pop .tp-side{height:44px}
+.tp-is-pop .tp-side b{font-size:17px}
+
+.tp-wheels{position:relative;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;margin:12px 0 4px}
+.tp-band{position:absolute;left:0;right:0;top:50%;height:44px;margin-top:-22px;border-radius:var(--radius-xl);
+  background:color-mix(in srgb,var(--hdr-text) 6%,transparent);border:1px solid var(--hdr-line);pointer-events:none}
+/* 7 rows visible: padding = 3 rows, so the first and last value can reach the band */
+.tp-wheel{height:308px;overflow-y:auto;overscroll-behavior:contain;scroll-snap-type:y mandatory;
+  padding:132px 0;cursor:grab;box-sizing:border-box;scrollbar-width:none;outline:none;
+  -webkit-mask-image:linear-gradient(transparent,#000 22%,#000 78%,transparent);
+  mask-image:linear-gradient(transparent,#000 22%,#000 78%,transparent)}
+.tp-wheel::-webkit-scrollbar{display:none}
+.tp-wheel:focus-visible{box-shadow:inset 0 0 0 2px var(--hdr-teal);border-radius:var(--radius-xl)}
+.tp-wheel.tp-dragging{scroll-snap-type:none;cursor:grabbing}
+.tp-item{height:44px;display:flex;align-items:center;justify-content:center;gap:10px;scroll-snap-align:center;
+  font:500 22px/1 var(--ui-font);font-variant-numeric:tabular-nums;color:var(--hdr-muted);cursor:pointer;user-select:none}
+.tp-is-pop .tp-item{font-size:19px}
+.tp-item.sel{color:#fff;font-weight:600}
+.tp-colon{font:600 22px var(--ui-font);color:var(--hdr-muted);padding:0 6px;position:relative}
+/* sky colours of the time slider (twilight-slider.js); a faint ring keeps the navy night dot visible */
+.tp-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;box-shadow:0 0 0 1px color-mix(in srgb,var(--hdr-text) 18%,transparent)}
+.tp-sky-day{background:#5f8aa0}.tp-sky-civ{background:var(--sky-civ)}.tp-sky-naut{background:var(--sky-naut)}.tp-sky-night{background:var(--sky-night)}
+.tp-labels{display:flex;justify-content:space-around;color:var(--hdr-muted);font-size:var(--fs-md);margin-bottom:12px}
+.tp-actions{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.tp-actions button{height:48px;border-radius:var(--radius-xl);font:600 15px var(--ui-font);cursor:pointer}
+.tp-is-pop .tp-actions button{height:38px;font-size:var(--fs-lg)}
+.tp-cancel{background:none;border:1px solid var(--hdr-line);color:var(--hdr-text)}
+.tp-set{background:var(--hdr-teal);border:1px solid var(--hdr-teal);color:var(--on-teal)}
+.tp-set:hover{background:var(--hdr-teal-hover)}
+.tp-actions button:focus-visible,.tp-side:focus-visible{outline:2px solid var(--hdr-teal);outline-offset:2px}
+.tp-sheet-open,.tp-sheet-open body{overflow:hidden}
+/* the time fields open the picker: show they are tappable */
+/* on phones the fields are read-only and only open the picker: no text
+   selection, no long-press text menu, no grey tap flash */
+#pane-videodb .vdb-time-input[readonly]{cursor:pointer;caret-color:transparent;
+  -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+#pane-videodb .vdb-time-input[readonly]::selection{background:transparent}
+@media (prefers-reduced-motion: reduce){.tp-is-sheet .tp-panel{animation:none}}
+
+/* ── Hidden detections (dashboard-hidden.js) ─────────────────────────────
+   A detection someone hid as a false positive: small Hide / Unhide text
+   buttons on cards, a "Show hidden" toggle in each list's toolbar, a dimmed
+   card with a "Hidden by ..." note when shown, and the "Hidden. Undo" notice. */
+.hd-btn{display:inline-flex;align-items:center;height:22px;padding:0 8px;border:1px solid var(--border);
+  border-radius:var(--radius-md);background:color-mix(in srgb,var(--bg) 80%,transparent);color:var(--muted);
+  font:var(--fs-sm)/1 var(--ui-font);cursor:pointer;white-space:nowrap}
+.hd-btn:hover{border-color:var(--muted);color:var(--text-strong)}
+.hd-btn:focus-visible,.hd-toggle:focus-visible,.hd-undo-btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.hd-toggle{display:inline-flex;align-items:center;justify-content:center;height:32px;padding:0 12px;
+  border:1px solid var(--border);border-radius:var(--radius-md);background:none;color:var(--text);
+  font:var(--fs-base)/1 var(--ui-font);cursor:pointer;white-space:nowrap}
+.hd-toggle:hover{border-color:var(--muted);color:var(--text-strong)}
+.hd-toggle[aria-pressed="true"]{border-color:var(--blue);color:var(--text-strong);
+  background:color-mix(in srgb,var(--blue) 12%,transparent)}
+.hd-hidden{opacity:.55}
+.hd-hidden:hover,.hd-hidden:focus-within{opacity:.85}
+.hd-note{color:var(--yellow);font-size:var(--fs-sm)}
+.hd-undo{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);z-index:99999;display:flex;align-items:center;
+  gap:12px;padding:8px 10px 8px 16px;border:1px solid var(--border);border-radius:var(--radius-md);
+  background:var(--card);color:var(--text-strong);font:var(--fs-base)/1 var(--ui-font);
+  box-shadow:0 4px 16px rgba(0,0,0,.4)}
+.hd-undo-btn{height:26px;padding:0 10px;border:1px solid var(--blue);border-radius:var(--radius-md);background:none;
+  color:var(--blue);font:var(--fs-base)/1 var(--ui-font);cursor:pointer}
+.hd-undo-btn:hover{background:color-mix(in srgb,var(--blue) 15%,transparent)}
+/* A toolbar slot reserved for the toggle stays out of the layout until it
+   holds one (anonymous visitors, magic-link sessions, Grid "All footage"). */
+.hd-slot[hidden]{display:none!important}
+/* Events page: the toggle sits after the compass, before the card-size slider. */
+body .ev-filter-bar #ev-hidden-toggle{order:7}
+/* Hide on a Grid thumb and a Video DB card: over the picture's corner, shown
+   on hover or focus, always on a hidden one (Unhide in one click). */
+.grid-thumb .hd-btn{position:absolute;right:2px;bottom:2px;z-index:2;height:18px;padding:0 5px;
+  font-size:var(--fs-2xs);background:rgba(0,0,0,.7);opacity:0;transition:opacity .14s}
+.grid-thumb:hover .hd-btn,.grid-thumb:focus-within .hd-btn,.grid-thumb.hd-hidden .hd-btn{opacity:1}
+.vdb-chunk-size .hd-btn{float:right;height:20px;padding:0 6px}
+.arc-meta .hd-btn{margin-left:auto;height:22px}
+.arc-meta .hd-btn + .arc-dl{margin-left:0}
+.arc-card .hd-note{display:block;padding:0 12px 8px}
+.ev-event-thumb-info .hd-btn{margin-left:6px;height:20px;padding:0 6px;vertical-align:middle}
+@media (hover:none){.grid-thumb .hd-btn{opacity:1}}

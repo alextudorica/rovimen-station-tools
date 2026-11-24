@@ -1,0 +1,24 @@
+{# CC-BY 4.0 attribution footer — included on every page. The notice text and
+   licence link come from the `_inject_licence` context processor in
+   rovimen_dashboard.py, so they are defined once and never copy-pasted here. #}
+<footer class="site-license-footer">
+  <a class="site-license-badge" href="{{ license_url }}" target="_blank"
+     rel="license noopener" title="Creative Commons Attribution 4.0 International"
+     aria-label="Creative Commons Attribution 4.0 International licence (opens in a new tab)">
+    <svg viewBox="0 0 120 42" width="60" height="21" aria-hidden="true"
+         focusable="false" class="cc-by-badge">
+      <g fill="currentColor">
+        <circle cx="21" cy="21" r="19" fill="none" stroke="currentColor" stroke-width="3"/>
+        <path d="M27.3 24.6a7 7 0 1 1 0-7.2l-3 1.7a3.6 3.6 0 1 0 0 3.8z"/>
+        <circle cx="99" cy="21" r="19" fill="none" stroke="currentColor" stroke-width="3"/>
+        <circle cx="99" cy="12" r="3.4"/>
+        <path d="M94 17h10a2.2 2.2 0 0 1 2.2 2.2v7.3h-2.6v8.1h-2.3v-8.1h-1.6v8.1h-2.3v-8.1H94v-7.3A2.2 2.2 0 0 1 96.2 17z"/>
+      </g>
+    </svg>
+    <span class="cc-by-label" translate="no">CC&nbsp;BY&nbsp;4.0</span>
+  </a>
+  <p class="site-license-text">{{ license_notice }}</p>
+  {%- if not no_app_panel %}
+  <button type="button" class="site-footer-link" onclick="if (window.openAppPanel) openAppPanel('about')">About <span translate="no">ROVIMEN</span></button>
+  {%- endif %}
+</footer>

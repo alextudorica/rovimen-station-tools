@@ -16,10 +16,19 @@ let _cfg = null;
 let _configIframeLoaded = false;
 
 function switchAdmTab(name) {
-  document.querySelectorAll('.adm-tab').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.adm-tab').forEach(b => {
+    b.classList.remove('active');
+    b.setAttribute('aria-selected', 'false');
+    b.tabIndex = -1;
+  });
   document.querySelectorAll('.adm-pane').forEach(p => p.classList.remove('active'));
-  document.getElementById(`tab-btn-${name}`).classList.add('active');
-  document.getElementById(`adm-pane-${name}`).classList.add('active');
+  const btn = document.getElementById(`tab-btn-${name}`);
+  if (btn) {
+    btn.classList.add('active');
+    btn.setAttribute('aria-selected', 'true');
+    btn.tabIndex = 0;
+  }
+  document.getElementById(`adm-pane-${name}`)?.classList.add('active');
   window.location.hash = name === 'network' ? '' : name;
   if (name === 'config' && !_configIframeLoaded) {
     document.getElementById('config-iframe').src = '/config';
@@ -28,6 +37,22 @@ function switchAdmTab(name) {
   if (name === 'users') loadUsers();
   if (name === 'usage') loadUsage();
 }
+
+// Arrow / Home / End keys move between tabs (WAI-ARIA tabs pattern).
+document.querySelector('.adm-tabs')?.addEventListener('keydown', (e) => {
+  const tabs = [...document.querySelectorAll('.adm-tab')];
+  const i = tabs.indexOf(document.activeElement);
+  if (i < 0) return;
+  let j = null;
+  if (e.key === 'ArrowRight') j = (i + 1) % tabs.length;
+  else if (e.key === 'ArrowLeft') j = (i - 1 + tabs.length) % tabs.length;
+  else if (e.key === 'Home') j = 0;
+  else if (e.key === 'End') j = tabs.length - 1;
+  if (j === null) return;
+  e.preventDefault();
+  tabs[j].focus();
+  switchAdmTab(tabs[j].id.replace('tab-btn-', ''));
+});
 
 // Restore tab from URL hash on load
 (function() {
@@ -59,35 +84,6 @@ async function saveGlobalSettings() {
     }
   } catch(e) {
     statusEl.textContent = 'Error'; statusEl.className = 'nc-status err';
-  }
-}
-
-// ── Sync rotate flags to stations ─────────────────────────────────────────────
-// Pushes rotate from dashboard_config.yaml to every station's config.json.
-// Heals drift without waiting for a redeploy.
-
-async function syncRotateAll(btn) {
-  if (!confirm('Push rotate flags from dashboard_config.yaml to every station?\n\n'
-             + 'Each camera will get a PATCH /api/settings call. Offline stations '
-             + 'will be reported but not block the others.')) return;
-  const orig = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '⇅ Syncing…';
-  try {
-    const r = await fetch('/api/admin/sync-rotate-all', {method: 'POST'});
-    const d = await r.json();
-    const failures = (d.results || []).filter(x => !x.ok);
-    let msg = `Sync complete: ${d.succeeded}/${d.total} cameras updated.`;
-    if (failures.length) {
-      msg += '\n\nFailures:\n' + failures.map(f =>
-        `  ${f.host}/${f.cam}: ${f.error || 'unknown'}`).join('\n');
-    }
-    alert(msg);
-  } catch(e) {
-    alert('Sync failed: ' + e);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = orig;
   }
 }
 
@@ -142,56 +138,59 @@ function renderNetworkConfig() {
   const html = Object.entries(stations).map(([host, st]) => {
     const camRows = (st.cameras || []).map(c => `
       <div class="nc-cam-row" data-orig-code="${escHtml(c.code)}">
-        <input type="text" id="cam-code-${escHtml(host)}-${escHtml(c.code)}" value="${escHtml(c.code)}" placeholder="Camera code">
-        <input type="text" id="cam-ip-${escHtml(host)}-${escHtml(c.code)}" value="${escHtml(c.cam_ip ?? '')}" placeholder="Camera IP">
+        <input type="text" id="cam-code-${escHtml(host)}-${escHtml(c.code)}" value="${escHtml(c.code)}" placeholder="Camera code" aria-label="Camera code" autocomplete="off" spellcheck="false">
+        <input type="text" id="cam-ip-${escHtml(host)}-${escHtml(c.code)}" value="${escHtml(c.cam_ip ?? '')}" placeholder="Camera IP" aria-label="Camera IP" autocomplete="off" spellcheck="false">
+        <input type="text" id="cam-host-${escHtml(host)}-${escHtml(c.code)}" value="${escHtml(c.host ?? '')}" placeholder="Host (if not station IP)" aria-label="Camera host, if not the station IP" autocomplete="off" spellcheck="false"
+               title="Leave empty unless this camera lives on a different box than the station IP (a station split across two Pis). Camera-scoped requests go to this address.">
         <label class="nc-toggle" title="Rotate 180° for livestream display only — does not affect recordings">
           <input type="checkbox" id="cam-rot-${escHtml(host)}-${escHtml(c.code)}" ${c.rotate ? 'checked' : ''}>
           <span style="font-size:11px;color:var(--muted)">Rotate <span style="font-size:10px">(Livestream only)</span></span>
         </label>
-        <button class="danger-btn" style="padding:2px 8px;font-size:11px"
-                onclick="this.closest('.nc-cam-row').remove()">✕</button>
+        <button type="button" class="danger-btn" style="padding:2px 8px;font-size:11px"
+                aria-label="Remove camera row" onclick="this.closest('.nc-cam-row').remove()"><span aria-hidden="true">✕</span></button>
       </div>`).join('');
 
     const jumpVal = (st.jump_hosts || []).join(', ');
     return `<div class="nc-station" id="nc-st-${escHtml(host)}">
-      <div class="nc-station-hdr" onclick="ncToggle('${escHtml(host)}')">
-        <span class="nc-host">${escHtml(host)}</span>
+      <button type="button" class="nc-station-hdr" aria-expanded="false" aria-controls="nc-body-${escHtml(host)}"
+              onclick="ncToggle('${escHtml(host)}')">
+        <span class="nc-host" translate="no">${escHtml(host)}</span>
         <span class="nc-label">${escHtml(st.label)}</span>
-        <span class="nc-chevron" id="nc-chev-${escHtml(host)}">&#9660;</span>
-      </div>
+        <span class="nc-chevron" id="nc-chev-${escHtml(host)}" aria-hidden="true">&#9660;</span>
+      </button>
       <div class="nc-station-body" id="nc-body-${escHtml(host)}">
         <div class="nc-grid">
           <div class="nc-field">
-            <label>Label</label>
-            <input type="text" id="st-label-${escHtml(host)}" value="${escHtml(st.label)}">
+            <label for="st-label-${escHtml(host)}">Label</label>
+            <input autocomplete="off" spellcheck="false" type="text" id="st-label-${escHtml(host)}" value="${escHtml(st.label)}">
           </div>
           <div class="nc-field">
-            <label>Tailscale IP</label>
-            <input type="text" id="st-ip-${escHtml(host)}" value="${escHtml(st.ip)}">
+            <label for="st-ip-${escHtml(host)}">Tailscale IP</label>
+            <input autocomplete="off" spellcheck="false" type="text" id="st-ip-${escHtml(host)}" value="${escHtml(st.ip)}">
           </div>
           <div class="nc-field">
-            <label>SSH User</label>
-            <input type="text" id="st-user-${escHtml(host)}" value="${escHtml(st.ssh_user)}">
+            <label for="st-user-${escHtml(host)}">SSH User</label>
+            <input autocomplete="off" spellcheck="false" type="text" id="st-user-${escHtml(host)}" value="${escHtml(st.ssh_user)}">
           </div>
           <div class="nc-field">
-            <label>Jump Hosts (comma-separated)</label>
-            <input type="text" id="st-jump-${escHtml(host)}" value="${escHtml(jumpVal)}" placeholder="e.g. gmnro02, gmnro03">
+            <label for="st-jump-${escHtml(host)}">Jump Hosts (comma-separated)</label>
+            <input autocomplete="off" spellcheck="false" type="text" id="st-jump-${escHtml(host)}" value="${escHtml(jumpVal)}" placeholder="e.g. gmnro02, gmnro03">
           </div>
           <div class="nc-field">
-            <label>Latitude</label>
-            <input type="number" step="any" id="st-lat-${escHtml(host)}" value="${escHtml(st.lat ?? '')}" placeholder="e.g. 44.945">
+            <label for="st-lat-${escHtml(host)}">Latitude</label>
+            <input autocomplete="off" spellcheck="false" type="number" step="any" id="st-lat-${escHtml(host)}" value="${escHtml(st.lat ?? '')}" placeholder="e.g. 45.9">
           </div>
           <div class="nc-field">
-            <label>Longitude</label>
-            <input type="number" step="any" id="st-lon-${escHtml(host)}" value="${escHtml(st.lon ?? '')}" placeholder="e.g. 25.662">
+            <label for="st-lon-${escHtml(host)}">Longitude</label>
+            <input autocomplete="off" spellcheck="false" type="number" step="any" id="st-lon-${escHtml(host)}" value="${escHtml(st.lon ?? '')}" placeholder="e.g. 25.0">
           </div>
           <div class="nc-field">
-            <label>&nbsp;</label>
-            <button class="settings-save-btn secondary" style="width:100%;font-size:11px;padding:5px 8px"
+            <span class="nc-field-spacer" aria-hidden="true">&nbsp;</span>
+            <button type="button" class="settings-save-btn secondary" style="width:100%;font-size:11px;padding:5px 8px"
                     onclick="ncAutoDetectCoords('${escHtml(host)}',this)">⟳ Auto-detect from platepar</button>
           </div>
           <div class="nc-field">
-            <label>&nbsp;</label>
+            <span class="nc-field-spacer" aria-hidden="true">&nbsp;</span>
             <label class="nc-toggle" style="height:100%;align-items:center">
               <input type="checkbox" id="st-proxy-${escHtml(host)}" ${st.proxy_media ? 'checked' : ''}>
               <span>Proxy all media</span>
@@ -229,6 +228,7 @@ function ncToggle(host) {
   const chev = document.getElementById(`nc-chev-${host}`);
   const open = body.classList.toggle('open');
   chev.style.transform = open ? 'rotate(180deg)' : '';
+  chev.closest('.nc-station-hdr')?.setAttribute('aria-expanded', String(open));
 }
 
 async function ncSave(host, btn) {
@@ -275,6 +275,8 @@ async function ncSave(host, btn) {
       const codeEl = document.getElementById(`cam-code-${host}-${origCode}`);
       const ipEl   = document.getElementById(`cam-ip-${host}-${origCode}`);
       const rotEl  = document.getElementById(`cam-rot-${host}-${origCode}`);
+      const hostEl = document.getElementById(`cam-host-${host}-${origCode}`);
+      const camHost = hostEl ? hostEl.value.trim() : '';
       if (!ipEl) continue;
       const isNew = origCode.startsWith('new_');
       const newCode = codeEl?.value.trim() || origCode;
@@ -282,11 +284,11 @@ async function ncSave(host, btn) {
         if (!newCode) continue;
         const cr = await fetch(`/api/admin/network-config/station/${host}/camera`, {
           method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ code: newCode, cam_ip: ipEl.value.trim(), rotate: rotEl.checked }),
+          body: JSON.stringify({ code: newCode, cam_ip: ipEl.value.trim(), rotate: rotEl.checked, host: camHost }),
         });
         if (!cr.ok) throw new Error(`Camera ${newCode}: HTTP ${cr.status}`);
       } else {
-        const camPatch = { cam_ip: ipEl.value.trim(), rotate: rotEl.checked, code: newCode };
+        const camPatch = { cam_ip: ipEl.value.trim(), rotate: rotEl.checked, code: newCode, host: camHost };
         const cr = await fetch(`/api/admin/network-config/station/${host}/camera/${origCode}`, {
           method: 'PATCH', headers: {'Content-Type':'application/json'},
           body: JSON.stringify(camPatch),
@@ -372,23 +374,28 @@ async function ncAutoDetectCams(host, btn) {
     });
 
     detected.forEach(cam => {
-      const existing = container.querySelector(`[data-orig-code="${cam.code}"]`);
+      // Match by dataset comparison rather than a built selector: a code
+      // containing a quote or CSS metachar would otherwise throw and abort.
+      const existing = Array.from(container.querySelectorAll('.nc-cam-row'))
+        .find(row => row.dataset.origCode === cam.code);
       if (existing) {
-        const ipEl = existing.querySelector(`#cam-ip-${host}-${cam.code}`);
+        const ipEl = existing.querySelector(`#cam-ip-${CSS.escape(host)}-${CSS.escape(cam.code)}`);
         if (ipEl) ipEl.value = cam.cam_ip;
       } else {
         const row = document.createElement('div');
         row.className = 'nc-cam-row';
         row.dataset.origCode = cam.code;
         row.innerHTML = `
-          <input type="text" id="cam-code-${escHtml(host)}-${escHtml(cam.code)}" value="${escHtml(cam.code)}" placeholder="Camera code">
-          <input type="text" id="cam-ip-${escHtml(host)}-${escHtml(cam.code)}" value="${escHtml(cam.cam_ip)}" placeholder="Camera IP">
+          <input type="text" id="cam-code-${escHtml(host)}-${escHtml(cam.code)}" value="${escHtml(cam.code)}" placeholder="Camera code" aria-label="Camera code" autocomplete="off" spellcheck="false">
+          <input type="text" id="cam-ip-${escHtml(host)}-${escHtml(cam.code)}" value="${escHtml(cam.cam_ip)}" placeholder="Camera IP" aria-label="Camera IP" autocomplete="off" spellcheck="false">
+          <input type="text" id="cam-host-${escHtml(host)}-${escHtml(cam.code)}" value="" placeholder="Host (if not station IP)" aria-label="Camera host, if not the station IP" autocomplete="off" spellcheck="false"
+                 title="Leave empty unless this camera lives on a different box than the station IP.">
           <label class="nc-toggle" title="Rotate 180° for livestream display only">
             <input type="checkbox" id="cam-rot-${escHtml(host)}-${escHtml(cam.code)}">
             <span style="font-size:11px;color:var(--muted)">Rotate <span style="font-size:10px">(Livestream only)</span></span>
           </label>
           <button class="danger-btn" style="padding:2px 8px;font-size:11px"
-                  onclick="this.closest('.nc-cam-row').remove()">✕</button>`;
+                  aria-label="Remove camera row" onclick="this.closest('.nc-cam-row').remove()"><span aria-hidden="true">✕</span></button>`;
         camHdr.after(row);
       }
     });
@@ -408,14 +415,14 @@ function ncAddCamRow(host, btn) {
   row.className = 'nc-cam-row';
   row.dataset.origCode = uid;
   row.innerHTML = `
-    <input type="text" id="cam-code-${escHtml(host)}-${escHtml(uid)}" value="" placeholder="e.g. RO000X">
-    <input type="text" id="cam-ip-${escHtml(host)}-${escHtml(uid)}" value="" placeholder="Camera IP">
+    <input type="text" id="cam-code-${escHtml(host)}-${escHtml(uid)}" value="" placeholder="e.g. RO000X" aria-label="Camera code" autocomplete="off" spellcheck="false">
+    <input type="text" id="cam-ip-${escHtml(host)}-${escHtml(uid)}" value="" placeholder="Camera IP" aria-label="Camera IP" autocomplete="off" spellcheck="false">
     <label class="nc-toggle" title="Rotate 180° for livestream display only">
       <input type="checkbox" id="cam-rot-${escHtml(host)}-${escHtml(uid)}">
       <span style="font-size:11px;color:var(--muted)">Rotate <span style="font-size:10px">(Livestream only)</span></span>
     </label>
     <button class="danger-btn" style="padding:2px 8px;font-size:11px"
-            onclick="this.closest('.nc-cam-row').remove()">✕</button>`;
+            aria-label="Remove camera row" onclick="this.closest('.nc-cam-row').remove()"><span aria-hidden="true">✕</span></button>`;
   // Append after last cam row, or after header if none
   const allRows = container.querySelectorAll('.nc-cam-row');
   const insertAfter = allRows.length ? allRows[allRows.length - 1] : camHdr;
@@ -450,21 +457,22 @@ function addCamRow(code, camIp, rotate, az, alt) {
   const container = document.getElementById('add-cameras');
   const row = document.createElement('div');
   row.className = 'add-cam-row';
-  const inp = (cls, val, ph, type='text') =>
-    `<input type="${type}" value="${escHtml(String(val??''))}" placeholder="${ph}"
-      style="background:var(--bg);border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:'SF Mono',monospace;font-size:12px;padding:5px 7px;width:100%"
+  const inp = (cls, val, ph, label, type='text') =>
+    `<input type="${type}" value="${escHtml(String(val??''))}" placeholder="${ph}" aria-label="${label}"
+      autocomplete="off" spellcheck="false"${type === 'number' ? ' step="any"' : ''}
+      style="background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono-font,'SF Mono',monospace);font-size:12px;padding:5px 7px;width:100%"
       class="${cls}">`;
   row.innerHTML = `
-    ${inp('add-cam-code', code||'', 'RO000X')}
-    ${inp('add-cam-ip', camIp||'', '192.168.1.x')}
-    ${inp('add-cam-az', az??'', 'Az°', 'number')}
-    ${inp('add-cam-alt', alt??'', 'Alt°', 'number')}
+    ${inp('add-cam-code', code||'', 'RO000X', 'Camera code')}
+    ${inp('add-cam-ip', camIp||'', '192.168.1.x', 'Camera IP')}
+    ${inp('add-cam-az', az??'', 'Az°', 'Azimuth (degrees)', 'number')}
+    ${inp('add-cam-alt', alt??'', 'Alt°', 'Altitude (degrees)', 'number')}
     <label class="nc-toggle">
       <input type="checkbox" class="add-cam-rotate" ${rotate ? 'checked' : ''}>
       <span style="font-size:12px">Rotate</span>
     </label>
-    <button onclick="this.closest('.add-cam-row').remove()"
-      style="background:none;border:none;color:var(--red);font-size:16px;cursor:pointer;padding:0;line-height:1">✕</button>`;
+    <button type="button" aria-label="Remove camera row" onclick="this.closest('.add-cam-row').remove()"
+      style="background:none;border:none;color:var(--red);font-size:16px;cursor:pointer;padding:0;line-height:1"><span aria-hidden="true">✕</span></button>`;
   container.appendChild(row);
 }
 
@@ -543,6 +551,7 @@ async function saveAddStation(btn) {
   } catch(e) {
     statusEl.textContent = '✗ ' + e.message;
     statusEl.className = 'nc-status err';
+  } finally {
     btn.disabled = false;
   }
 }
@@ -550,7 +559,6 @@ async function saveAddStation(btn) {
 // ── Software Version Overview ─────────────────────────────────────────────────
 
 let _svHosts = [];
-let _svPolling = {};
 let _svBatch = { active: false, total: 0, done: 0, label: '' };
 
 function svUpdateProgress() {
@@ -583,15 +591,7 @@ function renderVersionTable() {
       </div>
       <div class="sv-card-row">
         <span class="sv-card-key">Channel</span>
-        <select id="sv-ch-${hE}" class="sv-channel-sel"
-          onchange="saveChannel('${hE}',this)"
-          style="background:var(--bg);border:1px solid var(--border);border-radius:4px;
-            color:var(--text);font-family:'SF Mono',monospace;font-size:12px;
-            padding:4px 8px;cursor:pointer;opacity:.5;min-height:28px">
-          <option value="main">main</option>
-          <option value="dev">dev</option>
-        </select>
-        <span id="sv-ch-status-${hE}" style="font-size:10px;margin-left:4px"></span>
+        <span class="sv-ver none" id="sv-ch-${hE}">—</span>
       </div>
       <div class="sv-card-row">
         <span class="sv-card-key">Local</span>
@@ -601,17 +601,11 @@ function renderVersionTable() {
         <span class="sv-card-key">Remote</span>
         <span class="sv-ver none" id="sv-remote-${hE}"><span class="sv-spinner"></span></span>
       </div>
-      <div class="sv-card-actions">
-        <button class="settings-save-btn secondary"
-          id="sv-check-btn-${hE}" onclick="checkOneVersion('${hE}',this)">Check</button>
-        <button class="settings-save-btn"
-          id="sv-upd-btn-${hE}" onclick="updateOneStation('${hE}',this)">Update</button>
-      </div>
-      <div class="sv-log-box" id="sv-log-${hE}"></div>
     </div>`;
   }).join('');
   document.getElementById('sv-area').innerHTML = `
-    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${_svHosts.length} stations</div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:8px">${_svHosts.length} stations
+      &middot; updates ship automatically as signed bundles; channel changes and forced updates are SSH-only</div>
     <div class="sv-cards">${cards}</div>`;
 }
 
@@ -627,19 +621,19 @@ async function fetchVersionStatus(host) {
 }
 
 function setVersionRow(host, d, forceStatus) {
-  const chSel = document.getElementById(`sv-ch-${host}`);
+  const chEl  = document.getElementById(`sv-ch-${host}`);
   const locEl = document.getElementById(`sv-local-${host}`);
   const remEl = document.getElementById(`sv-remote-${host}`);
   const stEl  = document.getElementById(`sv-status-${host}`);
-  if (!chSel) return;
+  if (!chEl) return;
   if (!d) {
-    chSel.style.opacity = '.3';
+    chEl.textContent = '—'; chEl.className = 'sv-ver none';
     locEl.textContent = '—'; locEl.className = 'sv-ver none';
     remEl.textContent = '—'; remEl.className = 'sv-ver none';
     stEl.innerHTML = `<span class="sv-badge err">${forceStatus === 'offline' ? 'Offline' : 'Error'}</span>`;
     return;
   }
-  if (d.channel) { chSel.value = d.channel; chSel.dataset.prevChannel = d.channel; chSel.style.opacity = '1'; }
+  if (d.channel) { chEl.textContent = d.channel; chEl.className = 'sv-ver'; }
   locEl.textContent = d.local || '—';
   locEl.className = d.local ? 'sv-ver' : 'sv-ver none';
   remEl.textContent = d.remote || '—';
@@ -655,136 +649,18 @@ function setVersionRow(host, d, forceStatus) {
   }
 }
 
-async function saveChannel(host, sel) {
-  const channel = sel.value;
-  const prev = sel.dataset.prevChannel || channel;
-  if (prev === channel) return;
-  const st = (_cfg.stations || {})[host] || {};
-  const label = st.label || host;
-  if (!confirm(`Switch ${host} (${label}) from "${prev}" to "${channel}"?`)) {
-    sel.value = prev;
-    return;
-  }
-  const statusEl = document.getElementById(`sv-ch-status-${host}`);
-  sel.disabled = true;
-  statusEl.textContent = '…'; statusEl.style.color = 'var(--muted)';
-  try {
-    const r = await fetch(`/api/settings/${host}`, {
-      method: 'PATCH',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({update_channel: channel}),
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    sel.dataset.prevChannel = channel;
-    statusEl.textContent = '✓'; statusEl.style.color = 'var(--green)';
-    setTimeout(() => { statusEl.textContent = ''; }, 2000);
-  } catch(e) {
-    sel.value = prev;
-    statusEl.textContent = '✗'; statusEl.style.color = 'var(--red)';
-    setTimeout(() => { statusEl.textContent = ''; }, 3000);
-  } finally {
-    sel.disabled = false;
-  }
-}
-
-async function checkOneVersion(host, btn) {
-  const orig = btn.textContent;
-  btn.disabled = true; btn.textContent = '…';
-  const stEl = document.getElementById(`sv-status-${host}`);
-  if (stEl) stEl.innerHTML = `<span class="sv-badge busy">Checking…</span>`;
-  try {
-    const r = await fetch(`/api/updater/check/${host}`, {method:'POST'});
-    const d = await r.json();
-    setVersionRow(host, r.ok ? d : null, r.ok ? null : 'error');
-  } catch(e) {
-    setVersionRow(host, null, 'offline');
-  } finally {
-    btn.disabled = false; btn.textContent = orig;
-  }
-}
-
 async function refreshAllVersions(btn) {
   btn.disabled = true; btn.textContent = '…';
   _svBatch = { active: true, total: _svHosts.length, done: 0, label: 'Refreshing' };
   svUpdateProgress();
   await Promise.all(_svHosts.map(async h => {
-    await checkOneVersion(h, document.getElementById(`sv-check-btn-${h}`) || {disabled:false, textContent:'Check'});
+    await fetchVersionStatus(h);
     _svBatch.done++;
     svUpdateProgress();
   }));
   _svBatch.active = false;
   svUpdateProgress();
   btn.disabled = false; btn.textContent = '⟳ Refresh All';
-}
-
-async function updateOneStation(host, btn, skipConfirm) {
-  if (!skipConfirm) {
-    const st = (_cfg.stations || {})[host] || {};
-    const label = st.label || host;
-    const chSel = document.getElementById(`sv-ch-${host}`);
-    const channel = chSel ? chSel.value : 'unknown';
-    if (!confirm(`Update ${host} (${label})?\n\nThis will pull and install the latest "${channel}" bundle.`)) return;
-  }
-  const orig = btn.textContent;
-  btn.disabled = true; btn.textContent = '…';
-  const stEl = document.getElementById(`sv-status-${host}`);
-  const logEl = document.getElementById(`sv-log-${host}`);
-  if (stEl) stEl.innerHTML = `<span class="sv-badge busy">Updating…</span>`;
-  if (logEl) { logEl.textContent = ''; logEl.classList.add('visible'); }
-
-  if (_svPolling[host]) { clearInterval(_svPolling[host]); delete _svPolling[host]; }
-
-  try {
-    const r = await fetch(`/api/updater/run/${host}`, {method:'POST'});
-    if (!r.ok) {
-      const e = await r.json().catch(()=>({}));
-      if (stEl) stEl.innerHTML = `<span class="sv-badge err">Failed</span>`;
-      if (logEl) logEl.textContent = e.error || `HTTP ${r.status}`;
-      btn.disabled = false; btn.textContent = orig;
-      return;
-    }
-  } catch(e) {
-    if (stEl) stEl.innerHTML = `<span class="sv-badge err">Offline</span>`;
-    if (logEl) logEl.textContent = String(e);
-    btn.disabled = false; btn.textContent = orig;
-    return;
-  }
-
-  return new Promise(resolve => {
-    const done = () => {
-      clearInterval(_svPolling[host]); delete _svPolling[host];
-      btn.disabled = false; btn.textContent = orig;
-      resolve();
-      if (logEl) setTimeout(() => { logEl.classList.remove('visible'); logEl.textContent = ''; }, 5000);
-    };
-    const timeout = setTimeout(done, 5 * 60 * 1000);
-    _svPolling[host] = setInterval(async () => {
-      try {
-        const r2 = await fetch(`/api/updater/log/${host}`);
-        const d2 = await r2.json();
-        if (logEl) logEl.textContent = (d2.lines || []).join('\n');
-        if (logEl) logEl.scrollTop = logEl.scrollHeight;
-        if (!d2.running) { clearTimeout(timeout); await fetchVersionStatus(host); done(); }
-      } catch(e2) { clearTimeout(timeout); done(); }
-    }, 2000);
-  });
-}
-
-async function updateAllStations(btn) {
-  if (!confirm(`Update ALL ${_svHosts.length} stations?\n\nThis will push the latest software bundles to every station in the fleet.`)) return;
-  btn.disabled = true; btn.textContent = '⬆ Updating…';
-  _svBatch = { active: true, total: _svHosts.length, done: 0, label: 'Updating' };
-  svUpdateProgress();
-  await Promise.all(_svHosts.map(async h => {
-    const updBtn = document.getElementById(`sv-upd-btn-${h}`);
-    await updateOneStation(h, updBtn || {disabled: false, textContent: 'Update'}, true);
-    _svBatch.done++;
-    svUpdateProgress();
-  }));
-  _svBatch.active = false;
-  svUpdateProgress();
-  btn.disabled = false; btn.textContent = '⬆ Update All';
-  await Promise.all(_svHosts.map(h => fetchVersionStatus(h)));
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -803,6 +679,7 @@ async function loadUsers() {
       fetch('/api/admin/users'),
       fetch('/api/admin/users/activity').catch(() => null),
     ]);
+    if (!ru.ok) throw new Error(`HTTP ${ru.status}`);
     _usersData = await ru.json();
     _usersActivity = (ra && ra.ok) ? await ra.json() : {};
     renderUsersTable();
@@ -821,6 +698,11 @@ function _expiresCell(iso) {
 
 function renderUsersTable() {
   const area = document.getElementById('users-area');
+  if (!Array.isArray(_usersData)) {
+    _usersData = [];
+    area.innerHTML = '<div class="offline">Failed to load users</div>';
+    return;
+  }
   if (!_usersData.length) {
     area.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:16px">No users yet.</div>';
     return;
@@ -833,10 +715,10 @@ function renderUsersTable() {
       `<button class="usr-magic-btn users-magic-btn" data-username="${escHtml(u.username)}">Magic Link</button>`;
     return `
     <tr>
-      <td style="font-family:'SF Mono',monospace;font-weight:600">${escHtml(u.username)}${linkBadge}</td>
+      <td style="font-family:var(--mono-font,'SF Mono',monospace);font-weight:600">${escHtml(u.username)}${linkBadge}</td>
       <td>${escHtml(u.display_name || '—')}</td>
       <td><span class="usr-role ${escHtml(u.role)}">${escHtml(u.role)}</span></td>
-      <td style="font-family:'SF Mono',monospace;font-size:11px;color:var(--muted)">${escHtml((u.stations||[]).join(', ') || '—')}</td>
+      <td style="font-family:var(--mono-font,'SF Mono',monospace);font-size:11px;color:var(--muted)">${escHtml((u.stations||[]).join(', ') || '—')}</td>
       <td style="font-size:11px;color:var(--muted)" title="${escHtml(act.last_login || '')}">${escHtml(fmtRelTime(act.last_login))}</td>
       <td style="font-size:11px;color:var(--muted)">${escHtml(fmtDuration(act.active_seconds))}</td>
       <td>${_expiresCell(u.expires_at)}</td>
@@ -889,7 +771,19 @@ function usersOpenEdit(username) {
   document.getElementById('user-username').value = username;
   document.getElementById('user-username').disabled = true;
   document.getElementById('user-displayname').value = u.display_name || '';
-  document.getElementById('user-role').value = u.role;
+  const roleSel = document.getElementById('user-role');
+  // Guard against a role the <select> doesn't offer: injecting a temporary
+  // option makes the current value round-trip unchanged so save can never
+  // silently downgrade an unknown role to the first option (host).
+  roleSel.querySelectorAll('option[data-injected]').forEach(o => o.remove());
+  if (!Array.from(roleSel.options).some(o => o.value === u.role)) {
+    const opt = document.createElement('option');
+    opt.value = u.role;
+    opt.textContent = u.role;
+    opt.dataset.injected = '1';
+    roleSel.appendChild(opt);
+  }
+  roleSel.value = u.role;
   usersPopulateStationChecks(u.stations || []);
   document.getElementById('user-expires').value = _isoToLocal(u.expires_at);
   document.getElementById('user-password').value = '';
@@ -950,7 +844,9 @@ async function usersSave() {
   const expiresAt = _localToIso(document.getElementById('user-expires').value);
   const errEl = document.getElementById('user-modal-err');
   errEl.textContent = '';
+  const saveBtn = document.querySelector('#user-modal .settings-save-btn:not(.secondary)');
 
+  if (saveBtn) saveBtn.disabled = true;
   try {
     if (mode === 'create') {
       if (!username) { errEl.textContent = 'Username required'; return; }
@@ -977,6 +873,8 @@ async function usersSave() {
     loadUsers();
   } catch(e) {
     errEl.textContent = 'Network error saving user';
+  } finally {
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 
@@ -1060,6 +958,8 @@ async function magicGenerate(btn) {
     document.getElementById('magic-revoke-btn').style.display = '';
     document.getElementById('magic-copy-msg').textContent = '';
     loadUsers();
+  } catch(e) {
+    errEl.textContent = 'Network error generating link';
   } finally {
     btn.disabled = false;
   }
@@ -1077,6 +977,8 @@ async function magicRevoke(btn) {
     document.getElementById('magic-copy-msg').textContent = 'Link revoked ✓';
     document.getElementById('magic-copy-msg').style.color = 'var(--muted)';
     loadUsers();
+  } catch(e) {
+    document.getElementById('magic-err').textContent = 'Network error revoking link';
   } finally {
     btn.disabled = false;
   }
@@ -1098,6 +1000,7 @@ async function loadUsage() {
   const userEl = document.getElementById('usage-users');
   const dailyEl = document.getElementById('usage-daily');
   featEl.innerHTML = '<div class="loading">Loading…</div>';
+  loadTraffic(days);  // independent fetch — renders its own section
   try {
     const r = await fetch(`/api/admin/usage-stats?days=${encodeURIComponent(days)}`);
     if (!r.ok) throw new Error('http');
@@ -1106,9 +1009,15 @@ async function loadUsage() {
     renderUsageDaily(d, dailyEl);
     renderUsageFeatures(d, featEl);
     renderUsageUsers(d, userEl);
+    renderUsageFailures(d, document.getElementById('usage-failures'));
+    renderUsageTabs(d, document.getElementById('usage-tabs'));
   } catch(e) {
     featEl.innerHTML = '<div class="offline">Failed to load usage statistics</div>';
     dailyEl.innerHTML = ''; userEl.innerHTML = '';
+    for (const id of ['usage-failures', 'usage-tabs']) {
+      const x = document.getElementById(id);
+      if (x) x.innerHTML = '';
+    }
   }
 }
 
@@ -1148,9 +1057,66 @@ function renderUsageFeatures(d, el) {
   el.innerHTML = feats.map(f => {
     const w = Math.round((f.hits / max) * 100);
     return `<div class="usage-bar-row">
-      <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(f.feature)}</div>
+      <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHtml(f.feature)}">${escHtml(f.feature)}</div>
       <div class="usage-bar-track"><div class="usage-bar-fill" style="width:${w}%"></div></div>
       <div class="usage-bar-meta">${escHtml(f.hits.toLocaleString())} · ${escHtml(String(f.users))} ${f.users===1?'user':'users'}</div>
+    </div>`;
+  }).join('');
+}
+
+// Failures the browser reported (client_events.py): grouped by endpoint
+// family with the outcome mix, plus who hit them and the latest few.
+function renderUsageFailures(d, el) {
+  if (!el) return;
+  const f = d.client_failures || {};
+  const fams = f.families || [];
+  if (!f.total) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No failures reported in this window.</div>';
+    return;
+  }
+  const outcomes = o => Object.entries(o || {}).map(([k, n]) => `${escHtml(k)} ×${escHtml(String(n))}`).join(', ');
+  const users = (f.by_user || []).map(u => `${escHtml(u.user)} (${escHtml(String(u.count))})`).join(', ');
+  const rows = fams.map(x => `<tr>
+      <td style="font-family:var(--mono-font,monospace)">${escHtml(x.family)}</td>
+      <td class="num">${escHtml(x.count.toLocaleString())}</td>
+      <td class="num">${escHtml(String(x.users))}</td>
+      <td>${outcomes(x.outcomes)}</td>
+      <td class="num" style="color:var(--muted);text-align:left">${escHtml((x.last || '').replace('T', ' ').slice(0, 16))}</td>
+    </tr>`).join('');
+  const recent = (f.recent || []).map(r => `<tr>
+      <td class="num" style="color:var(--muted);text-align:left">${escHtml((r.ts || '').replace('T', ' ').slice(0, 16))}</td>
+      <td>${escHtml(r.user || '')}</td>
+      <td style="font-family:var(--mono-font,monospace);word-break:break-all">${escHtml(r.path || '')}</td>
+      <td>${escHtml(r.status ? String(r.status) : (r.reason || ''))}</td>
+      <td style="color:var(--muted)">${escHtml(r.page || '')}</td>
+    </tr>`).join('');
+  el.innerHTML = `
+    <div style="font-size:12px;margin-bottom:8px">${escHtml(f.total.toLocaleString())} failures · ${escHtml(String(f.users))} ${f.users === 1 ? 'user' : 'users'}${users ? ` — ${users}` : ''}</div>
+    <table class="usr-table">
+      <thead><tr><th>Endpoint</th><th class="num">Failures</th><th class="num">Users</th><th>Outcome</th><th>Last</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div style="font-size:11px;color:var(--muted);margin:12px 0 4px">Latest</div>
+    <table class="usr-table" style="font-size:11px">
+      <thead><tr><th>When (UTC)</th><th>User</th><th>Path</th><th>Status</th><th>Page</th></tr></thead>
+      <tbody>${recent}</tbody>
+    </table>`;
+}
+
+function renderUsageTabs(d, el) {
+  if (!el) return;
+  const tabs = d.tab_views || [];
+  if (!tabs.length) {
+    el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No tab views reported in this window.</div>';
+    return;
+  }
+  const max = Math.max(1, ...tabs.map(t => t.views));
+  el.innerHTML = tabs.map(t => {
+    const w = Math.round((t.views / max) * 100);
+    return `<div class="usage-bar-row">
+      <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escHtml(t.page)} · ${escHtml(t.tab)}">${escHtml(t.page)} · ${escHtml(t.tab)}</div>
+      <div class="usage-bar-track"><div class="usage-bar-fill" style="width:${w}%"></div></div>
+      <div class="usage-bar-meta">${escHtml(t.views.toLocaleString())} · ${escHtml(String(t.users))} ${t.users === 1 ? 'user' : 'users'}</div>
     </div>`;
   }).join('');
 }
@@ -1184,25 +1150,27 @@ function _renderUsageUsersTable() {
     if (va > vb) return dir;
     return 0;
   });
-  const arrow = (c) => c === col ? (dir === 1 ? ' ▲' : ' ▼') : '';
-  const thStyle = 'cursor:pointer;user-select:none';
+  const arrow = (c) => c === col ? `<span aria-hidden="true">${dir === 1 ? ' ▲' : ' ▼'}</span>` : '';
+  const sortAttr = (c) => c === col ? ` aria-sort="${dir === 1 ? 'ascending' : 'descending'}"` : '';
+  const th = (c, label, num) =>
+    `<th${sortAttr(c)}${num ? ' class="num"' : ''}><button type="button" class="usr-sort-btn" onclick="_usageUsersSort('${c}')">${label}${arrow(c)}</button></th>`;
   const rows = sorted.map(u => `
     <tr>
-      <td style="font-family:'SF Mono',monospace;font-weight:600">${escHtml(u.user)}</td>
+      <td style="font-family:var(--mono-font,'SF Mono',monospace);font-weight:600">${escHtml(u.user)}</td>
       <td style="font-size:11px;color:var(--muted)" title="${escHtml(u.last_login||'')}">${escHtml(fmtRelTime(u.last_login))}</td>
       <td style="font-size:11px;color:var(--muted)" title="${escHtml(u.last_seen||'')}">${escHtml(fmtRelTime(u.last_seen))}</td>
-      <td>${escHtml((u.requests||0).toLocaleString())}</td>
-      <td>${escHtml(String(u.sessions||0))}</td>
-      <td style="font-size:11px;color:var(--muted)">${escHtml(fmtDuration(u.active_seconds))}</td>
+      <td class="num">${escHtml((u.requests||0).toLocaleString())}</td>
+      <td class="num">${escHtml(String(u.sessions||0))}</td>
+      <td class="num" style="font-size:11px;color:var(--muted)">${escHtml(fmtDuration(u.active_seconds))}</td>
     </tr>`).join('');
   el.innerHTML = `<table class="usr-table">
     <thead><tr>
-      <th style="${thStyle}" onclick="_usageUsersSort('user')">User${arrow('user')}</th>
-      <th style="${thStyle}" onclick="_usageUsersSort('last_login')">Last Login${arrow('last_login')}</th>
-      <th style="${thStyle}" onclick="_usageUsersSort('last_seen')">Last Seen${arrow('last_seen')}</th>
-      <th style="${thStyle}" onclick="_usageUsersSort('requests')">Requests${arrow('requests')}</th>
-      <th style="${thStyle}" onclick="_usageUsersSort('sessions')">Sessions${arrow('sessions')}</th>
-      <th style="${thStyle}" onclick="_usageUsersSort('active_seconds')">Active Time${arrow('active_seconds')}</th>
+      ${th('user', 'User')}
+      ${th('last_login', 'Last Login')}
+      ${th('last_seen', 'Last Seen')}
+      ${th('requests', 'Requests', true)}
+      ${th('sessions', 'Sessions', true)}
+      ${th('active_seconds', 'Active Time', true)}
     </tr></thead>
     <tbody>${rows}</tbody></table>`;
 }
@@ -1211,6 +1179,158 @@ function renderUsageUsers(d, el) {
   _usageUsersData = d.users || [];
   if (!_usageUsersData.length) { el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No user activity recorded.</div>'; return; }
   _renderUsageUsersTable();
+}
+
+// ── Traffic (anonymous + authenticated page views) ────────────────────────────
+
+// Pure: stacked-bar layout for the daily auth/anon/bot series. Heights are
+// percentages of the tallest day; label thinning mirrors renderUsageDaily.
+export function _trafficDailyLayout(daily) {
+  const days = Array.isArray(daily) ? daily : [];
+  const max = Math.max(1, ...days.map(d => (d.auth || 0) + (d.anon || 0) + (d.bot || 0)));
+  const step = days.length > 31 ? 7 : (days.length > 14 ? 2 : 1);
+  const cols = days.map((d, i) => {
+    const auth = d.auth || 0, anon = d.anon || 0, bot = d.bot || 0;
+    return {
+      date: d.date || '',
+      auth, anon, bot,
+      total: auth + anon + bot,
+      hAuth: Math.round((auth / max) * 100),
+      hAnon: Math.round((anon / max) * 100),
+      hBot: Math.round((bot / max) * 100),
+      label: i % step === 0 ? String(d.date || '').slice(5) : '',
+    };
+  });
+  return { max, step, cols };
+}
+
+// Pure: "RO — Romania" style label for a 2-letter country code. "??" marks
+// records without the Cloudflare header (tailnet-direct traffic).
+export function _countryLabel(code) {
+  if (!code || code === '??') return 'Unknown (direct)';
+  try {
+    const name = new Intl.DisplayNames(['en'], { type: 'region' }).of(code);
+    return name && name !== code ? `${code} — ${name}` : code;
+  } catch (e) {
+    return code;
+  }
+}
+
+async function loadTraffic(days) {
+  const ids = ['traffic-cards', 'traffic-daily', 'traffic-countries',
+               'traffic-devices', 'traffic-pages', 'traffic-referrers'];
+  const els = {};
+  for (const id of ids) els[id] = document.getElementById(id);
+  if (!els['traffic-cards']) return;
+  try {
+    const r = await fetch(`/api/admin/traffic?days=${encodeURIComponent(days)}`);
+    if (!r.ok) throw new Error('http');
+    const d = await r.json();
+    renderTrafficCards(d, els['traffic-cards']);
+    renderTrafficDaily(d, els['traffic-daily']);
+    renderTrafficCountries(d, els['traffic-countries']);
+    renderTrafficDevices(d, els['traffic-devices']);
+    renderTrafficPages(d, els['traffic-pages']);
+    renderTrafficReferrers(d, els['traffic-referrers']);
+  } catch (e) {
+    if (els['traffic-cards']) els['traffic-cards'].innerHTML = '<div class="offline">Failed to load traffic report</div>';
+    for (const id of ids.slice(1)) { if (els[id]) els[id].innerHTML = ''; }
+  }
+}
+
+function renderTrafficCards(d, el) {
+  if (!el) return;
+  const t = d.totals || {};
+  const cards = [
+    {v: (t.visits || 0).toLocaleString(), l: 'Visits'},
+    {v: (t.unique_visitors || 0).toLocaleString(), l: 'Unique visitors'},
+    {v: t.countries || 0, l: 'Countries'},
+    {v: (t.bot_visits || 0).toLocaleString(), l: 'Bot visits'},
+  ];
+  el.innerHTML = cards.map(c =>
+    `<div class="usage-card"><div class="uc-val">${escHtml(String(c.v))}</div><div class="uc-lbl">${escHtml(c.l)}</div></div>`
+  ).join('');
+}
+
+function renderTrafficDaily(d, el) {
+  if (!el) return;
+  const { cols } = _trafficDailyLayout(d.daily);
+  if (!cols.length) { el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No visits in this window.</div>'; return; }
+  el.innerHTML = `<div class="usage-day-chart">` + cols.map(c => {
+    const seg = (cls, h, v) =>
+      `<div class="traffic-day-seg ${cls}" style="height:${h}%${v ? ';min-height:2px' : ''}"></div>`;
+    return `<div class="usage-day-col" title="${escHtml(c.date)}: ${escHtml(String(c.auth))} authenticated · ${escHtml(String(c.anon))} anonymous · ${escHtml(String(c.bot))} bots">
+      <div class="traffic-day-stack" style="height:100%">
+        ${seg('auth', c.hAuth, c.auth)}${seg('anon', c.hAnon, c.anon)}${seg('bot', c.hBot, c.bot)}
+      </div>
+      <div class="usage-day-lbl">${escHtml(c.label)}</div>
+    </div>`;
+  }).join('') + `</div>`;
+}
+
+function renderTrafficCountries(d, el) {
+  if (!el) return;
+  const rows = d.countries || [];
+  if (!rows.length) { el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No visitor countries recorded yet.</div>'; return; }
+  const max = Math.max(1, ...rows.map(c => c.visits || 0));
+  el.innerHTML = rows.map(c => {
+    const w = Math.round(((c.visits || 0) / max) * 100);
+    const meta = `${(c.visits || 0).toLocaleString()} · ${c.unique_ips || 0} ${c.unique_ips === 1 ? 'IP' : 'IPs'}`;
+    return `<div class="usage-bar-row" title="${escHtml(String(c.auth || 0))} authenticated · ${escHtml(String(c.anon || 0))} anonymous">
+      <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escHtml(_countryLabel(c.country))}</div>
+      <div class="usage-bar-track"><div class="usage-bar-fill" style="width:${w}%"></div></div>
+      <div class="usage-bar-meta">${escHtml(meta)}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderTrafficDevices(d, el) {
+  if (!el) return;
+  const dev = d.devices || {};
+  const rows = [
+    ['Desktop', dev.desktop || 0],
+    ['Mobile', dev.mobile || 0],
+    ['Bots', dev.bot || 0],
+    ['Unknown', dev.unknown || 0],
+  ].filter(([, n], i) => n > 0 || i < 3);
+  const max = Math.max(1, ...rows.map(([, n]) => n));
+  el.innerHTML = rows.map(([label, n]) => {
+    const w = Math.round((n / max) * 100);
+    return `<div class="usage-bar-row">
+      <div>${escHtml(label)}</div>
+      <div class="usage-bar-track"><div class="usage-bar-fill" style="width:${w}%"></div></div>
+      <div class="usage-bar-meta">${escHtml(n.toLocaleString())}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderTrafficPages(d, el) {
+  if (!el) return;
+  const rows = d.pages || [];
+  if (!rows.length) { el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No page views recorded yet.</div>'; return; }
+  const body = rows.map(p => `
+    <tr>
+      <td style="font-family:var(--mono-font,monospace);word-break:break-all">${escHtml(p.page || '')}</td>
+      <td class="num">${escHtml((p.visits || 0).toLocaleString())}</td>
+      <td class="num" style="color:var(--muted)">${escHtml(String(p.unique_ips || 0))}</td>
+    </tr>`).join('');
+  el.innerHTML = `<table class="usr-table">
+    <thead><tr><th>Page</th><th class="num">Visits</th><th class="num">Unique IPs</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
+}
+
+function renderTrafficReferrers(d, el) {
+  if (!el) return;
+  const rows = d.referrers || [];
+  if (!rows.length) { el.innerHTML = '<div style="color:var(--muted);font-size:12px;padding:12px">No external referrers in this window.</div>'; return; }
+  const body = rows.map(r => `
+    <tr>
+      <td style="font-family:var(--mono-font,'SF Mono',monospace)">${escHtml(r.domain || '')}</td>
+      <td class="num">${escHtml((r.visits || 0).toLocaleString())}</td>
+    </tr>`).join('');
+  el.innerHTML = `<table class="usr-table">
+    <thead><tr><th>Domain</th><th class="num">Visits</th></tr></thead>
+    <tbody>${body}</tbody></table>`;
 }
 
 // ── Formatters ──────────────────────────────────────────────────────────────
@@ -1279,12 +1399,7 @@ window.ncRemove = ncRemove;
 window.ncAutoDetectCams = ncAutoDetectCams;
 window.ncAutoDetectCoords = ncAutoDetectCoords;
 window.ncAddCamRow = ncAddCamRow;
-window.checkOneVersion = checkOneVersion;
 window.refreshAllVersions = refreshAllVersions;
-window.updateOneStation = updateOneStation;
-window.updateAllStations = updateAllStations;
-window.saveChannel = saveChannel;
-window.syncRotateAll = syncRotateAll;
 window.usersSave = usersSave;
 window.usersOpenCreate = usersOpenCreate;
 window.usersCloseModal = usersCloseModal;

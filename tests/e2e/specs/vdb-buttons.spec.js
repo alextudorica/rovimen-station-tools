@@ -152,8 +152,7 @@ test.describe('VDB button interactivity', () => {
     const exports = [
       'rmsCalClearSelection', 'rmsCalGo', 'rmsCalNav', 'rmsCalToggle',
       'rmsClearFilter', 'rmsOpenModal', 'rmsPlotExpand',
-      'rmsSelectCamera', 'rmsSelectShower', 'skyDomeOpenModal',
-      'rmsApplyFilter',
+      'rmsSelectCamera', 'rmsSelectShower', 'rmsApplyFilter',
     ];
 
     for (const fn of exports) {
@@ -239,6 +238,28 @@ test.describe('VDB button interactivity', () => {
       await lockBtn.click();
       await page.waitForTimeout(300);
     }
+
+    const realErrors = errors.filter(e => !e.includes('fetch') && !e.includes('NetworkError'));
+    expect(realErrors).toEqual([]);
+  });
+
+  test('video modal exposes a Lock button for operators', async ({ page }) => {
+    const errors = [];
+    page.on('pageerror', e => errors.push(e.message));
+
+    await navigateToVDB(page);
+
+    // Open an unlocked .mkv clip in the shared modal — this is the wiring that
+    // lets an operator lock a clip from any section that shows a video.
+    await page.evaluate(() => window.vdbOpenModal(
+      'test_station_1', 'TST001', '20260601',
+      'TST001_20260601_220000_color.mkv', '22:00:00', 10.2,
+    ));
+    await page.waitForTimeout(300);
+
+    const lockBtn = page.locator('.vm-lock-btn:visible');
+    await expect(lockBtn).toBeVisible({ timeout: 2000 });
+    await expect(lockBtn).toContainText('Lock clip');  // unlocked → clickable
 
     const realErrors = errors.filter(e => !e.includes('fetch') && !e.includes('NetworkError'));
     expect(realErrors).toEqual([]);
@@ -418,11 +439,11 @@ test.describe('VDB button interactivity', () => {
   });
 });
 
-// The clip lock toggle must be clickable for everyone the backend authorises
-// (admin fleet-wide + the host that owns the station) and hidden for read-only
-// roles, matching `@require_station` in auth.py. Regression guard for the bug
-// where the toggle was gated on IS_ADMIN, so station owners couldn't lock their
-// own clips even though the server would accept the request.
+// The clip lock toggle must be clickable for everyone the backend authorises,
+// matching `@require_station_lock` in auth.py: locking is fleet-wide for every
+// signed-in account, on stations they own and stations they don't. Regression
+// guard for two bugs where the UI was stricter than the server and clips went
+// unlockable — the toggle gated on IS_ADMIN, then on station ownership.
 test.describe('VDB lock toggle permissions by role', () => {
   async function loginAs(page, username) {
     await page.goto('/login');
@@ -447,12 +468,17 @@ test.describe('VDB lock toggle permissions by role', () => {
     await expect(clickable.first()).toHaveClass(/vdb-lock-trigger/);
   });
 
-  test('read-only visitor gets no clickable lock toggle', async ({ page }) => {
+  test('visitor with no station assignments still gets a clickable lock toggle', async ({ page }) => {
     await loginAs(page, 'visitor_test');
     await navigateToVDB(page);
 
-    // Cards still render for read-only roles; the lock toggle must not.
+    // visitor_test owns no stations, so this asserts the fleet-wide grant
+    // rather than ownership. Locking only pins a clip against the retention
+    // janitor; unlocking is server-side admin/owner-only and the UI never
+    // offers it, so a read-only account can save a clip but never drop one.
     await expect(page.locator('.vdb-chunk-card').first()).toBeVisible();
-    expect(await page.locator('.vdb-lock-btn:not([disabled])').count()).toBe(0);
+    const clickable = page.locator('.vdb-lock-btn:not([disabled])');
+    await expect(clickable.first()).toBeVisible();
+    await expect(clickable.first()).toHaveClass(/vdb-lock-trigger/);
   });
 });

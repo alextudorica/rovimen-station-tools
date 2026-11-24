@@ -11,7 +11,6 @@ and this module share the same cache instances.
 
 from __future__ import annotations
 
-import copy
 import logging
 import threading
 import time
@@ -20,8 +19,9 @@ from typing import Any, Callable
 
 from flask import Flask, abort, jsonify, request
 
-import command_dispatch
-from auth import require_station, station_is_public_for_request
+import pushed_calibration
+import upload_state
+from auth import is_anonymous, require_station, station_is_public_for_request
 from http_caching import _json_cached
 from route_helpers import (
     lookup_station,
@@ -67,18 +67,24 @@ def register_station_proxy_routes(
     _proxy_error_response_impl = proxy_error_response
     _proxy_get_impl = proxy_get
 
-    # ── Timelapses (SWR-cached, archive-merged) ─────────────────────────
+    # ── Timelapses (SWR-cached, archive-only) ───────────────────────────
 
     def _walk_archive_timelapses(cam_code: str) -> list[dict]:
         out: list[dict] = []
         for date in archive_idx.nights(cam_code):
-            ni = archive_idx.night_files(cam_code, date)
-            if ni is None:
-                continue
-            mp4s = sorted(f for f in ni.timelapse_files if f.endswith(".mp4"))
+            # The index remembers every listed night's timelapse files, so a
+            # walk over a camera's whole history stays in RAM; only a night
+            # never listed before costs an on-demand sshfs scan (once).
+            timelapse_files = archive_idx.timelapse_files_known(cam_code, date)
+            if timelapse_files is None:
+                ni = archive_idx.night_files(cam_code, date)
+                if ni is None:
+                    continue
+                timelapse_files = ni.timelapse_files
+            mp4s = sorted(f for f in timelapse_files if f.endswith(".mp4"))
             if not mp4s:
                 continue
-            webp_names = {f for f in ni.timelapse_files if f.endswith(".webp")}
+            webp_names = {f for f in timelapse_files if f.endswith(".webp")}
             mp4 = mp4s[0]
             stack_name = mp4.replace("_timelapse.mp4", "_night_stack.webp")
             out.append({
@@ -90,30 +96,20 @@ def register_station_proxy_routes(
         return out
 
     def _compute_timelapses_payload(host_key: str) -> dict[str, Any]:
-        status = cache.get_status(host_key)
-        online = (status is None) or bool((status or {}).get("online", False))
-        try:
-            if online:
-                data = station_get_raw(config, tunnels, host_key, "/api/timelapses")
-                if not isinstance(data, dict):
-                    data = {}
-            else:
-                data = {}
-        except Exception:
-            data = {}
-        # Deep-copy before we mutate. Even though station_get_raw returns a
-        # fresh dict from resp.json(), the very next caller (_refresh_timelapses
-        # / _get_timelapses_swr) stores this object in timelapses_swr_cache,
-        # and _json_cached caches the serialized body by id(payload). Mutating
-        # the dict in place would let a subsequent request hit the stale
-        # serialized body under the same id — same ETag, wrong content. A
-        # fresh dict here keeps the in-place mutations local to this call.
-        data = copy.deepcopy(data)
+        """Per-camera timelapse listing for a station, from the archive only.
+
+        The station's own ``/api/timelapses`` used to be asked first and the
+        archive merged in behind it. Everything it listed is uploaded by
+        archive_upload, the entries have the same shape, and the public API
+        already built every URL from the Storage Box -- so a station-only entry
+        was a dead link there anyway. A night appears once its timelapse is
+        uploaded.
+        """
         station_obj = config.stations.get(host_key)
         cam_codes = [c.code for c in station_obj.cameras] if station_obj else []
         # Walks for different cameras hit independent SSHFS subtrees and
         # are otherwise independent, so fan them out in parallel. A 5-cam
-        # station (Raul) used to take up to 5 × 30 s of serial SSHFS
+        # station used to take up to 5 × 30 s of serial SSHFS
         # walking on a cold mount; now bounded by the slowest single walk.
         archive_results: dict[str, list[dict]] = {}
         if cam_codes:
@@ -134,19 +130,11 @@ def register_station_proxy_routes(
                     if cam_code not in archive_results:
                         fut.cancel()
                         archive_results[cam_code] = []
-        for cam_code in cam_codes:
-            entries = data.get(cam_code, [])
-            for e in entries:
-                e.setdefault("source", "station")
-            station_dates = {e["date"] for e in entries}
-            for ae in archive_results.get(cam_code, []):
-                if ae["date"] not in station_dates:
-                    entries.append(ae)
-            if entries:
-                data[cam_code] = entries
-        if cam_codes:
-            data = {k: v for k, v in data.items() if k in cam_codes}
-        return data
+        return {
+            cam_code: archive_results[cam_code]
+            for cam_code in cam_codes
+            if archive_results.get(cam_code)
+        }
 
     def _refresh_timelapses(host_key: str) -> None:
         # Coalesced background refresh. On failure (exception OR empty
@@ -200,14 +188,18 @@ def register_station_proxy_routes(
     @app.route("/api/timelapses/<host_key>")
     @require_station
     def api_timelapses(host_key: str):
-        """SWR + offline-tolerant. See ``_get_timelapses_swr``.
-
-        Merges archive timelapses for any date the station doesn't have,
-        so the response stays useful even when the station is offline."""
+        """SWR-cached archive listing (see ``_get_timelapses_swr`` and
+        ``_compute_timelapses_payload``); never contacts the station."""
         _require_station_impl(config, host_key)
         return _json_cached(_get_timelapses_swr(host_key), max_age=60)
 
     # ── Settings / hardware / platepar ───────────────────────────────────
+
+    def _known_online(host_key: str) -> bool:
+        """True only when the status cache positively reports the station online."""
+        status = cache.get_status(host_key)
+        return bool((status or {}).get("online", False))
+
 
     @app.route("/api/settings/<host_key>")
     @require_station
@@ -215,35 +207,20 @@ def register_station_proxy_routes(
         _require_station_impl(config, host_key)
         return _proxy_get_impl(config, tunnels, host_key, "/api/settings", proxy_cache=proxy_cache, proxy_cache_lock=proxy_cache_lock, json_cached=_json_cached, cache_ttl=10)
 
-    @app.route("/api/settings/<host_key>", methods=["PATCH"])
-    @require_station
-    def api_settings_patch(host_key: str):
-        _require_station_impl(config, host_key)
-        if command_dispatch.should_push(config, host_key):
-            patch = request.get_json(silent=True) or {}
-            try:
-                cmd_id = command_dispatch.enqueue_signed_command(
-                    host_key=host_key, type="patch_settings",
-                    args={"settings": patch},
-                )
-            except command_dispatch.SigningUnavailable:
-                return command_dispatch.signing_unavailable_response()
-            return command_dispatch.queued_response(host_key, "patch_settings", cmd_id)
-        try:
-            url = station_url(config, tunnels, host_key, "/api/settings")
-            resp = _session_for_url(url).patch(
-                url, json=request.get_json(silent=True), timeout=10,
-            )
-            resp.raise_for_status()
-            _invalidate_proxy_cache_impl(proxy_cache, proxy_cache_lock, host_key, "/api/settings")
-            return jsonify(resp.json())
-        except Exception as exc:
-            return _proxy_error_response_impl(host_key, exc)
+    # The settings PATCH proxy was removed 2026-07 with the read-only station
+    # rollout — station config changes are SSH-only / signed-bundle-only.
 
     @app.route("/api/hardware/<host_key>")
     @require_station
     def api_hardware(host_key: str):
         _require_station_impl(config, host_key)
+        # Pushed by the station with its calibration state (#1248); the live
+        # proxy is only for a station whose pusher has not delivered one yet.
+        pushed = pushed_calibration.get_hardware(host_key)
+        if pushed is not None:
+            return _json_cached(pushed, max_age=60)
+        if not _known_online(host_key):
+            return jsonify({"__missing": True, "error": "no hardware profile pushed yet"}), 404
         return _proxy_get_impl(config, tunnels, host_key, "/api/hardware", proxy_cache=proxy_cache, proxy_cache_lock=proxy_cache_lock, json_cached=_json_cached, cache_ttl=60)
 
     @app.route("/api/platepar/<host_key>")
@@ -266,10 +243,26 @@ def register_station_proxy_routes(
         never touches this route. Anonymous callers may only read platepars for
         ``public: true`` stations: a private/commissioning station 404s before
         any station round-trip, matching ``station_is_public_for_request``'s
-        unknown-key fail-closed rule. Logged-in operators keep the full fleet."""
-        _require_station_impl(config, host_key)
+        unknown-key fail-closed rule. Logged-in operators keep the full fleet.
+
+        A public page never reaches a station: an anonymous request gets the
+        pushed copy (#1248) or a 404 "not uploaded yet". Only a logged-in
+        operator falls back to the live call, for a station whose pusher has
+        not delivered one yet (the same rule as /api/hardware)."""
+        station = _require_station_impl(config, host_key)
         if not station_is_public_for_request(config, host_key):
             abort(404)
+        # The station pushes its platepars on change (#1248): serve that copy
+        # and never contact the station when it exists.
+        pushed = pushed_calibration.get_platepar(host_key)
+        if pushed is not None:
+            return _json_cached(pushed, max_age=5)
+        if is_anonymous():
+            return jsonify({
+                "error": upload_state.NOT_UPLOADED,
+                "kind": "platepar",
+                "detail": "platepar not uploaded yet",
+            }), 404
         cached = platepar_cache.get(host_key)
         now_mono = time.monotonic()
         status = cache.get_status(host_key)
@@ -277,8 +270,9 @@ def register_station_proxy_routes(
         # Serve fresh cache hit
         if cached and now_mono < cached[0]:
             return _json_cached(cached[1], max_age=5)
-        # Try live fetch when online; fall back to stale on failure.
-        if online:
+        # Try live fetch when online; fall back to stale on failure. A
+        # commissioning station is never contacted (Station.should_contact).
+        if online and station.should_contact:
             try:
                 payload = station_get_raw(config, tunnels, host_key, "/api/platepar")
                 platepar_cache[host_key] = (now_mono + platepar_ttl, payload)
@@ -289,6 +283,8 @@ def register_station_proxy_routes(
         # Offline or live fetch failed — serve stale if we have any.
         if cached:
             return _json_cached(cached[1], max_age=5)
+        if not station.should_contact:
+            return jsonify({"error": "commissioning station, no platepar"}), 404
         return jsonify({"error": "station unreachable, no cached platepar"}), 503
 
     return _get_timelapses_swr

@@ -1,4 +1,4 @@
-"""Tests for dashboard/station_state.py — durable push mirror + seq/media."""
+"""Tests for dashboard/station_state.py — push seq guard + media pointers."""
 
 from __future__ import annotations
 
@@ -40,25 +40,6 @@ class TestSeqIdempotency:
     def test_seq_is_per_station(self, db_path: Path):
         ss.advance_seq("gmn0002", 10, path=db_path)
         assert ss.get_last_seq("gmnro10", path=db_path) == 0
-
-
-class TestRecordStatusVitals:
-    def test_record_status_persists_and_advances(self, db_path: Path):
-        ss.record_status("gmn0002", 3, {"online": True}, "2026-07-01T22:00:00Z", path=db_path)
-        state = ss.get_state("gmn0002", path=db_path)
-        assert state is not None
-        assert state["last_seq"] == 3
-        assert state["last_status"] == {"online": True}
-        assert state["last_seen_at"] == "2026-07-01T22:00:00Z"
-
-    def test_record_vitals_persists(self, db_path: Path):
-        ss.record_vitals("gmn0002", 4, {"cpu_pct": 33.0}, path=db_path)
-        state = ss.get_state("gmn0002", path=db_path)
-        assert state["last_vitals"] == {"cpu_pct": 33.0}
-        assert state["last_seq"] == 4
-
-    def test_get_state_missing(self, db_path: Path):
-        assert ss.get_state("nope", path=db_path) is None
 
 
 class TestMediaPointers:

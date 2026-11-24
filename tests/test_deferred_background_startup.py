@@ -118,6 +118,12 @@ def test_deferred_hook_runs_once_and_is_idempotent(monkeypatch):
     monkeypatch.setattr(rd, "start_polling", lambda *a, **k: calls.append("polling"))
     monkeypatch.setattr(rd, "_start_gmn_poller", lambda *a, **k: calls.append("gmn"))
     monkeypatch.setattr(rd, "_disk_cache_load_into", lambda *a, **k: 0)
+    # Win the render-leader election so the leader-gated daemons (dome scheduler
+    # + thumb prefetch) start in this worker; test_render_leader_gate_* covers
+    # the non-leader path where they are skipped.
+    monkeypatch.setattr(rd, "_try_become_render_leader", lambda: True)
+    # Never touch the real /opt/rovimen lock dir from a test.
+    monkeypatch.setattr(rd, "_try_become_duty_leader", lambda duty: False)
 
     class _FakeThread:
         def __init__(self, *a, **k):
@@ -170,11 +176,69 @@ def test_deferred_hook_runs_once_and_is_idempotent(monkeypatch):
     app._start_background_workers()
     first = list(calls)
     assert "polling" in first and "gmn" in first and "mdc" in first and "dome" in first
+    # Scheduled compilations are fired from here, not by an external cron.
+    assert "thread:compilation-tick" in first
 
     # Second trigger (the other of timer / post_worker_init) is a no-op.
     calls.clear()
     app._start_background_workers()
     assert calls == [], f"deferred hook ran twice: {calls}"
+
+
+def test_render_leader_gate_confines_dome_to_one_worker(monkeypatch):
+    """The sky-dome scheduler + thumbnail prefetch are leader-gated so exactly
+    one worker runs them. A worker that LOSES the flock election must skip both,
+    while the per-worker / Redis-shared daemons (pollers, GMN, MDC) still start
+    so it serves from the shared caches. This is the Nx-render fix: without the
+    gate every worker ran the ~0.7 GB-per-render dome scheduler."""
+    monkeypatch.setenv("ROVIMEN_DISABLE_BACKGROUND", "0")
+
+    import rovimen_dashboard as rd
+
+    calls: list[str] = []
+    monkeypatch.setattr(rd, "start_polling", lambda *a, **k: calls.append("polling"))
+    monkeypatch.setattr(rd, "_start_gmn_poller", lambda *a, **k: calls.append("gmn"))
+    monkeypatch.setattr(rd, "_disk_cache_load_into", lambda *a, **k: 0)
+    # This worker LOSES the election → must not start the dome/prefetch daemons.
+    monkeypatch.setattr(rd, "_try_become_render_leader", lambda: False)
+    monkeypatch.setattr(rd, "_try_become_duty_leader", lambda duty: False)
+
+    class _FakeThread:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    class _FakeTimer:
+        def __init__(self, *a, **k):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(rd.threading, "Thread", _FakeThread)
+    monkeypatch.setattr(rd.threading, "Timer", _FakeTimer)
+    import routes.sky_dome as sky_dome
+    monkeypatch.setattr(sky_dome, "start_dome_scheduler", lambda *a, **k: calls.append("dome"))
+    import mdc_poller
+    monkeypatch.setattr(mdc_poller, "start_mdc_poller", lambda *a, **k: calls.append("mdc"))
+    import tunnels as tunnels_mod
+    monkeypatch.setattr(
+        tunnels_mod.TunnelManager, "start_watchdog", lambda self: calls.append("watchdog")
+    )
+    monkeypatch.setattr(
+        tunnels_mod.TunnelManager, "start_all", lambda self: calls.append("start_all")
+    )
+
+    app = _build_app()
+    calls.clear()
+    app._start_background_workers()
+
+    assert "dome" not in calls, "dome scheduler must NOT run on a non-leader worker"
+    assert "polling" in calls and "gmn" in calls and "mdc" in calls, (
+        "per-worker / shared daemons must still start on a non-leader worker"
+    )
 
 
 def test_disabled_gate_skips_deferred_hook(monkeypatch):
@@ -191,3 +255,133 @@ def test_disabled_gate_skips_deferred_hook(monkeypatch):
     app = _build_app()
     app._start_background_workers()
     assert calls == [], "background work ran despite ROVIMEN_DISABLE_BACKGROUND=1"
+
+
+# ── per-host duties ──────────────────────────────────────────────────────────
+#
+# Jobs whose output is host-wide (the thumb cache and its cold tier, the temp
+# dir, the network-stats disk seed and GMN month cache) run in the one worker
+# holding a named duty lock, not in every worker.
+
+
+class _RecordingThread:
+    """threading.Thread stand-in that records what would have started."""
+
+    started: list[tuple[object, tuple, str | None]] = []
+
+    def __init__(self, *a, target=None, args=(), name=None, **k):
+        self._rec = (target, tuple(args), name)
+
+    def start(self):
+        _RecordingThread.started.append(self._rec)
+
+
+def _stub_background(monkeypatch, rd, calls: list[str]) -> None:
+    monkeypatch.setattr(rd, "start_polling", lambda *a, **k: calls.append("polling"))
+    monkeypatch.setattr(rd, "_start_gmn_poller", lambda *a, **k: calls.append("gmn"))
+    monkeypatch.setattr(rd, "_disk_cache_load_into", lambda *a, **k: 0)
+    monkeypatch.setattr(rd, "_try_become_render_leader", lambda: False)
+    monkeypatch.setattr(rd, "_try_become_duty_leader", lambda duty: False)
+    _RecordingThread.started = []
+    monkeypatch.setattr(rd.threading, "Thread", _RecordingThread)
+    monkeypatch.setattr(rd.threading, "Timer", _RecordingThread)
+    import routes.sky_dome as sky_dome
+    monkeypatch.setattr(sky_dome, "start_dome_scheduler", lambda *a, **k: calls.append("dome"))
+    import mdc_poller
+    monkeypatch.setattr(mdc_poller, "start_mdc_poller", lambda *a, **k: calls.append("mdc"))
+    import tunnels as tunnels_mod
+    monkeypatch.setattr(tunnels_mod.TunnelManager, "start_watchdog", lambda self: None)
+    monkeypatch.setattr(tunnels_mod.TunnelManager, "start_all", lambda self: None)
+    import network_stats
+    monkeypatch.setattr(network_stats, "register_precompute",
+                        lambda *a, **k: calls.append("network_precompute"))
+
+
+def _thread_names() -> list[str | None]:
+    return [name for _t, _a, name in _RecordingThread.started]
+
+
+def test_network_precompute_is_not_started_by_create_app(monkeypatch):
+    """create_app() ran the coverage precompute and the GMN orbit-count warmup
+    in every worker, even under ROVIMEN_DISABLE_BACKGROUND=1 (tests, E2E)."""
+    assert os.environ.get("ROVIMEN_DISABLE_BACKGROUND") == "1"
+    import rovimen_dashboard as rd
+
+    calls: list[str] = []
+    _stub_background(monkeypatch, rd, calls)
+    app = _build_app()
+    app._start_background_workers()
+
+    assert "network_precompute" not in calls
+    assert "orbit-warmup" not in _thread_names()
+
+
+def test_network_precompute_runs_in_the_duty_leader_only(monkeypatch):
+    monkeypatch.setenv("ROVIMEN_DISABLE_BACKGROUND", "0")
+    import rovimen_dashboard as rd
+
+    for leader in (True, False):
+        calls: list[str] = []
+        _stub_background(monkeypatch, rd, calls)
+        duties: list[str] = []
+        monkeypatch.setattr(
+            rd, "_try_become_duty_leader",
+            lambda duty, leader=leader: duties.append(duty) or leader,
+        )
+        app = _build_app()
+        calls.clear()
+        _RecordingThread.started = []
+        app._start_background_workers()
+
+        assert "network_precompute" in duties
+        assert ("network_precompute" in calls) is leader
+        assert ("orbit-warmup" in _thread_names()) is leader
+        # Per-worker daemons start either way.
+        assert "polling" in calls and "gmn" in calls
+
+
+def test_host_wide_sweeps_are_gated_on_a_duty(monkeypatch, tmp_path):
+    """The thumb-cache prune and the temp reaper start in every worker; each
+    pass must check a duty lock so only one worker sweeps the host."""
+    import rovimen_dashboard as rd
+
+    calls: list[str] = []
+    _stub_background(monkeypatch, rd, calls)
+    monkeypatch.setattr(rd, "THUMB_CACHE_DIR", tmp_path / "thumb_cache")
+    monkeypatch.setattr(rd, "create_app", lambda config, config_path: "app")
+    duties: list[str] = []
+    monkeypatch.setattr(rd, "_try_become_duty_leader", lambda duty: duties.append(duty) or False)
+
+    assert rd._init_and_create_app(_minimal_app_env()) == "app"
+
+    gates = {t: a for t, a, _n in _RecordingThread.started
+             if t in (rd._prune_thumb_cache, rd._reap_stale_tmp)}
+    assert set(gates) == {rd._prune_thumb_cache, rd._reap_stale_tmp}
+    assert gates[rd._prune_thumb_cache][0]() is False
+    assert gates[rd._reap_stale_tmp][0]() is False
+    assert duties == ["thumb_prune", "tmp_reap"]
+
+
+def test_cache_cleanup_starts_with_the_background_workers_under_a_duty(monkeypatch):
+    """Registering the archive routes started the hourly cache cleanup in every
+    worker, outside the deferred hook. It starts from the hook now, and each
+    pass checks the "cache_cleanup" duty: every worker shares CACHE_PATH."""
+    monkeypatch.setenv("ROVIMEN_DISABLE_BACKGROUND", "0")
+    import rovimen_dashboard as rd
+    import routes.archive as archive
+
+    calls: list[str] = []
+    _stub_background(monkeypatch, rd, calls)
+    duties: list[str] = []
+    monkeypatch.setattr(rd, "_try_become_duty_leader",
+                        lambda duty: duties.append(duty) or False)
+
+    app = _build_app()
+    at_boot = [getattr(t, "__name__", None) for t, _a, _n in _RecordingThread.started]
+    assert "_cache_cleanup" not in at_boot and "cache_cleanup_loop" not in at_boot
+
+    _RecordingThread.started = []
+    app._start_background_workers()
+    (args,) = [a for t, a, _n in _RecordingThread.started if t is archive.cache_cleanup_loop]
+    assert args[0]() is False
+    assert duties[-1] == "cache_cleanup"

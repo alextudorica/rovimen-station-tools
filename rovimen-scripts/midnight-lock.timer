@@ -1,0 +1,16 @@
+[Unit]
+Description=Run the ROVIMEN mid-night additive lock pass hourly
+
+[Timer]
+# Hourly, all day. Outside capture the pass finds no in-progress session and
+# returns immediately, so running around the clock costs nothing but keeps the
+# unlocked-clip window under ~1h through the whole observing night (it used to
+# be ~10h, until the dawn EON pass). Persistent so a booted-late RTC-less host
+# still runs a catch-up pass instead of skipping the missed slot.
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+AccuracySec=60
+
+[Install]
+WantedBy=timers.target

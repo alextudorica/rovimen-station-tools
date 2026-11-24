@@ -26,7 +26,6 @@ import hashlib
 import logging
 import os
 import re
-import subprocess
 import tempfile
 import threading
 from datetime import date, datetime, timedelta, timezone
@@ -36,11 +35,16 @@ from typing import Any, Callable
 from flask import Flask, Response, abort, g, jsonify, request, send_file, stream_with_context
 
 import api_keys
+import cache_store
+import clip_cache
 import coverage as coverage_mod
 import detection_db
+import faststart_sibling
 import gmn_data
+import hidden_detections
 import platepar_store
 import rovimen_dashboard as rd
+from station_client import _with_sshfs_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -108,8 +112,12 @@ _MP4_MAX_CONCURRENT = max(
 )
 _mp4_remux_sem = threading.BoundedSemaphore(_MP4_MAX_CONCURRENT)
 # How long a cache miss waits for a free remux slot before giving up with 503.
+# A Multi-Station Events modal opens 4-6 tiles at once, each an aged clip
+# that needs a remux; with a 2 s wait most tiles 503'd and read
+# "Unavailable". A remux takes 1-2 s, so 15 s lets a modal's tiles queue
+# while staying well under nginx's 30 s; the tiles also retry on 503.
 _MP4_REMUX_ACQUIRE_TIMEOUT = float(
-    os.environ.get("ROVIMEN_MP4_REMUX_ACQUIRE_TIMEOUT", "2.0")
+    os.environ.get("ROVIMEN_MP4_REMUX_ACQUIRE_TIMEOUT", "15.0")
 )
 
 
@@ -173,35 +181,9 @@ def _evict_mp4_cache(incoming_bytes: int = 0, max_bytes: int | None = None) -> N
 
 
 def _remux_mkv_to_mp4(source: Path, dest: Path) -> None:
-    """Remux MKV → seekable MP4 (H.264 copy, faststart). Raises on error."""
-    proc: subprocess.Popen | None = None
-    try:
-        proc = subprocess.Popen(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-i", str(source),
-                "-c:v", "copy", "-c:a", "copy",
-                "-movflags", "+faststart",
-                "-f", "mp4", "-y", str(dest),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-        )
-        _, stderr = proc.communicate(timeout=30)
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg exited {proc.returncode}: "
-                f"{stderr.decode(errors='replace')[:200]}"
-            )
-    except subprocess.TimeoutExpired:
-        if proc is not None:
-            proc.kill()
-            proc.wait(timeout=5)
-        _silent_unlink(dest)
-        raise
-    except Exception:
-        _silent_unlink(dest)
-        raise
+    """Remux MKV → seekable MP4 (H.264 copy, faststart) into ``dest`` (the
+    caller's own temp), 30 s cap. Raises on error, with ``dest`` removed."""
+    faststart_sibling.remux(source, dest, timeout=30, tmp=dest)
 
 
 def _serve_as_mp4(source: Path, original_name: str) -> Response:
@@ -461,12 +443,40 @@ def _media_stack_url(cam: str, date_iso: str, filename: str) -> str:
     return f"{_public_base_url()}/media/v1/stack/{cam}/{date_iso}/{filename}"
 
 
+_CLIP_STACK_SUFFIXES = ("_color.mkv", "_color.mp4", ".mkv", ".mp4")
+
+
+def _derive_stack_name(filename: str) -> str | None:
+    """The archived stack webp for a clip, e.g.
+    ``RO000V_20260730_214442_color.mkv`` -> ``RO000V_20260730_214442_stack.webp``.
+
+    A clip and its stack share the base name, so the thumbnail is derivable
+    even when a featured entry was saved without a ``stack`` field (e.g. clips
+    featured from the multi-station event view, which doesn't carry the stack
+    URL). Returns ``None`` for an unrecognised extension. Shared by both
+    hall-of-fame serialisers (the dashboard route and this public API).
+    """
+    for suffix in _CLIP_STACK_SUFFIXES:
+        if filename.endswith(suffix):
+            return f"{filename[: -len(suffix)]}_stack.webp"
+    return None
+
+
 def _media_timelapse_url(cam: str, date_iso: str, filename: str) -> str:
     return f"{_public_base_url()}/media/v1/timelapse/{cam}/{date_iso}/{filename}"
 
 
 def _media_nightstack_url(cam: str, date_iso: str, filename: str) -> str:
     return f"{_public_base_url()}/media/v1/nightstack/{cam}/{date_iso}/{filename}"
+
+
+# The single/multi-station provenance labels and the join itself live in
+# ``gmn_data`` so the internal dashboard's detail panel and this public schema
+# describe a triangulated meteor identically. Re-exported under their original
+# private names for the callers below.
+_SINGLE_STATION_PROVENANCE = gmn_data.SINGLE_STATION_PROVENANCE
+_MULTI_STATION_PROVENANCE = gmn_data.MULTI_STATION_PROVENANCE
+_attach_trajectory = gmn_data.attach_trajectory
 
 
 def _detection_to_public(
@@ -499,18 +509,27 @@ def _detection_to_public(
     stack_name = det.get("stack")
     stack_url = _media_stack_url(cam, date_iso, stack_name) if stack_name else None
 
-    return {
+    time_utc = det.get("meteor_time")
+    out = {
         "id": _detection_id(date_iso, host_key, cam, filename),
         "station_id": host_key,
         "station_label": det.get("station_label"),
         "camera": cam,
         "date": date_iso,
-        "time_utc": det.get("meteor_time"),
+        "time_utc": time_utc,
         "shower": rms.get("shower"),
         "peak_magnitude": peak_mag,
         "absolute_magnitude": rms.get("mag_absolute"),
         "duration_s": rms.get("duration_s"),
         "angular_velocity_deg_s": rms.get("angular_velocity"),
+        "ra_begin_deg": rms.get("ra_beg"),
+        "dec_begin_deg": rms.get("dec_beg"),
+        "ra_end_deg": rms.get("ra_end"),
+        "dec_end_deg": rms.get("dec_end"),
+        "azimuth_begin_deg": rms.get("azim_beg"),
+        "elevation_begin_deg": rms.get("elev_beg"),
+        "azimuth_end_deg": rms.get("azim_end"),
+        "elevation_end_deg": rms.get("elev_end"),
         "ra_radiant_deg": rms.get("ra_radiant"),
         "dec_radiant_deg": rms.get("dec_radiant"),
         "radiant_elevation_deg": rms.get("radiant_elev"),
@@ -522,6 +541,43 @@ def _detection_to_public(
         "stack_url": stack_url,
         "thumbnail_url": stack_url,  # alias for consumers expecting `thumbnail_url`
     }
+    _attach_trajectory(out, cam, time_utc)
+    return out
+
+
+def _archived_meteor_names(cam: str, compact: str) -> frozenset[str]:
+    """Filenames actually present under ``<archive>/<cam>/<compact>/meteors``.
+
+    Empty when the night is unknown or the storage box is unreachable, which
+    makes every caller degrade to "no clip_url" rather than to a broken one.
+    """
+    try:
+        ni = rd._archive_idx.night_files(cam, compact)
+    except Exception:
+        return frozenset()
+    return frozenset(ni.meteor_files) if ni else frozenset()
+
+
+def _public_clip_filename(
+    chunk_file: str | None, time_utc: str | None, archived: frozenset[str] | None
+) -> str | None:
+    """The archived filename a public clip_url may point at, or None.
+
+    ``archived`` None means "presence unchecked" and the recorded name is
+    trusted as-is. Otherwise the name must actually be in the archive: a
+    detection whose clip never uploaded, or one whose raw chunk was superseded
+    by a boundary splice under a different name, would otherwise be published
+    with a clip_url that 404s. The splice is resolved with the dashboard's own
+    span matcher so both surfaces agree on which file backs a detection.
+    """
+    if not chunk_file:
+        return None
+    if archived is None:
+        return chunk_file
+    if chunk_file in archived:
+        return chunk_file
+    from routes.detections import _resolve_stitched_chunk
+    return _resolve_stitched_chunk(time_utc, archived)
 
 
 def _detection_from_index_row(
@@ -529,6 +585,7 @@ def _detection_from_index_row(
     date_iso: str,
     cam_to_host: dict[str, str],
     public_stations: dict[str, Any],
+    archived: frozenset[str] | None = None,
 ) -> dict[str, Any] | None:
     """Project a detection_db index row onto the public schema.
 
@@ -536,6 +593,11 @@ def _detection_from_index_row(
     use the MKV chunk filename (same as the slow path). When chunk_file is
     absent (older rows not yet re-indexed), the FF filename is used for the ID
     and clip_url is None.
+
+    ``archived`` is the camera-night's archived meteor filenames; pass it so
+    clip_url is emitted only for a clip a consumer can actually fetch. The
+    detection ID stays keyed on the recorded chunk name either way, so a clip
+    that uploads later keeps the ID it already published under.
     """
     cam = row.get("cam")
     host_key = cam_to_host.get(cam or "")
@@ -545,19 +607,29 @@ def _detection_from_index_row(
     mag = row.get("mag_apparent") if row.get("mag_apparent") is not None else row.get("mag_absolute")
     chunk_file = row.get("chunk_file")
     id_filename = chunk_file or (row.get("ff_file") or "")
-    clip_url = _media_clip_url(cam, date_iso, chunk_file) if chunk_file else None
-    return {
+    time_utc = row.get("time_utc")
+    clip_name = _public_clip_filename(chunk_file, time_utc, archived)
+    clip_url = _media_clip_url(cam, date_iso, clip_name) if clip_name else None
+    out = {
         "id": _detection_id(date_iso, host_key, cam, id_filename),
         "station_id": host_key,
         "station_label": st.label if st else None,
         "camera": cam,
         "date": date_iso,
-        "time_utc": row.get("time_utc"),
+        "time_utc": time_utc,
         "shower": row.get("shower"),
         "peak_magnitude": mag,
         "absolute_magnitude": row.get("mag_absolute"),
         "duration_s": row.get("duration_s"),
         "angular_velocity_deg_s": row.get("angular_velocity"),
+        "ra_begin_deg": row.get("ra_beg"),
+        "dec_begin_deg": row.get("dec_beg"),
+        "ra_end_deg": row.get("ra_end"),
+        "dec_end_deg": row.get("dec_end"),
+        "azimuth_begin_deg": row.get("azim_beg"),
+        "elevation_begin_deg": row.get("elev_beg"),
+        "azimuth_end_deg": row.get("azim_end"),
+        "elevation_end_deg": row.get("elev_end"),
         "ra_radiant_deg": row.get("ra_radiant"),
         "dec_radiant_deg": row.get("dec_radiant"),
         "radiant_elevation_deg": row.get("radiant_elev"),
@@ -569,6 +641,8 @@ def _detection_from_index_row(
         "stack_url": None,
         "thumbnail_url": None,
     }
+    _attach_trajectory(out, cam, time_utc)
+    return out
 
 
 def _filter_detection(
@@ -601,7 +675,7 @@ def _event_to_public(
 ) -> dict[str, Any]:
     """Project an internal multi-station event onto the public schema.
 
-    Multi-station events come from ``_compute_detections_payload`` and have
+    Multi-station events come from ``compute_detections_payload`` and have
     ``witnesses`` already grouped per (host_key, cam). We attach playable
     clip URLs for public witnesses and drop non-public witnesses to a
     coordinate-only marker.
@@ -799,24 +873,83 @@ def _resolve_media_path(camera: str, date_iso: str, filename: str,
         return None
     compact = date_iso.replace("-", "")
     path = rd.ARCHIVE_PATH / camera / compact / subdir / filename
-    # Resolve to absolute and check it stays under ARCHIVE_PATH — defence
-    # against any future regex hole that lets ".." slip through. We use
-    # Path.is_relative_to (Py 3.9+) rather than a string-prefix compare to
-    # avoid a sibling-directory collision (e.g. /srv/rovimen/archive vs
-    # /srv/rovimen/archive-evil would both pass startswith).
-    try:
-        resolved = path.resolve()
-        archive_root = rd.ARCHIVE_PATH.resolve()
-    except (OSError, RuntimeError):
-        return None
-    try:
-        if not resolved.is_relative_to(archive_root):
+
+    def _resolve_and_check() -> Path | None:
+        # Resolve to absolute and check it stays under ARCHIVE_PATH — defence
+        # against any future regex hole that lets ".." slip through. We use
+        # Path.is_relative_to (Py 3.9+) rather than a string-prefix compare to
+        # avoid a sibling-directory collision (e.g. /srv/rovimen/archive vs
+        # /srv/rovimen/archive-evil would both pass startswith).
+        try:
+            resolved = path.resolve()
+            archive_root = rd.ARCHIVE_PATH.resolve()
+        except (OSError, RuntimeError):
             return None
-    except ValueError:
+        try:
+            if not resolved.is_relative_to(archive_root):
+                return None
+        except ValueError:
+            return None
+        return resolved if resolved.is_file() else None
+
+    # resolve() and is_file() stat the Storage Box over sshfs, and a stalled
+    # mount (the dawn upload window) pinned the request thread on them.
+    # Bounded here; when the mount stalls, the archive index's night listing
+    # decides, the same trust the operator routes give it.
+    stalled = object()
+    got = _with_sshfs_timeout(_resolve_and_check, timeout=5.0, default=stalled)
+    if got is not stalled:
+        return got
+    idx = getattr(rd, "_archive_idx", None)
+    try:
+        ni = idx.night_files(camera, compact) if idx is not None else None
+    except Exception:
+        ni = None
+    if ni is None:
         return None
-    if not resolved.is_file():
+    listed = ni.meteor_files if subdir == "meteors" else (
+        ni.stack_files if subdir == "stacks" else ni.timelapse_files)
+    return path if filename in listed else None
+
+
+def _resolve_stack_fallback(camera: str, date_iso: str, filename: str,
+                            host_key: str | None) -> tuple[Path, int] | None:
+    """Thumbnail for a ``*_stack.webp`` the archive night does not hold.
+
+    Mirrors tiers 2 and 4 of the operator thumbnail route (routes/media.py):
+    the cold thumb archive keeps stack thumbnails after the night's
+    ``stacks/`` has been pruned, and ``ffthumbs/<chunk_stem>.webp`` is the
+    station's BW FF thumbnail, the only image a station without the colour
+    stacker (gmnro16 Bacău) ever uploads. Returns ``(path, max_age_s)``:
+    the cold tier is a finished stack, an ffthumb is replaced the moment a
+    colour stack lands, so it gets a short TTL.
+    """
+    if not (filename.endswith("_stack.webp") and _CAMERA_RE.match(camera)
+            and _DATE_ISO_RE.match(date_iso) and _FILENAME_RE.match(filename)):
         return None
-    return resolved
+    compact = date_iso.replace("-", "")
+    candidates: list[tuple[Path, Path, int]] = []
+    thumb_root = cache_store.THUMB_ARCHIVE_DIR
+    if host_key and thumb_root is not None:
+        candidates.append((thumb_root, thumb_root / host_key / camera / compact / filename, 86400))
+    ff_name = filename[: -len("_stack.webp")] + ".webp"
+    candidates.append((rd.ARCHIVE_PATH,
+                       rd.ARCHIVE_PATH / camera / compact / "ffthumbs" / ff_name, 300))
+
+    def _check(root: Path, path: Path) -> Path | None:
+        try:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(root.resolve()):
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return resolved if resolved.is_file() else None
+
+    for root, path, max_age in candidates:
+        got = _with_sshfs_timeout(lambda r=root, p=path: _check(r, p), timeout=5.0, default=None)
+        if got is not None:
+            return got, max_age
+    return None
 
 
 # ── Cache header helpers ───────────────────────────────────────────────
@@ -857,7 +990,7 @@ def register_public_routes(
     Args:
         app: The Flask application to attach routes to.
         config: Loaded DashboardConfig; ``station.public`` decides exposure.
-        compute_detections_payload: Closure over ``create_app`` that returns
+        compute_detections_payload: ``routes.detections.compute_detections_payload``,
             the cached per-night detections payload (date arg is YYYYMMDD).
         get_timelapses_payload: SWR-cached accessor returning the per-host
             timelapses payload — passing the cache-aware version (not the
@@ -1031,7 +1164,7 @@ def register_public_routes(
     def _public_preflight(_):  # noqa: ANN001 — path var unused
         return ("", 204)
 
-    def _safe_detections(compact: str) -> dict[str, Any]:
+    def _safe_detections(compact: str, mark_hidden: bool = False) -> dict[str, Any]:
         """Call the detections-payload closure, returning an empty shell on
         any internal error rather than letting a 500 HTML page leak to a
         third-party consumer. The closure can raise (SSH tunnel timeouts,
@@ -1039,7 +1172,12 @@ def register_public_routes(
         back ``{"detections": [], "events": []}`` so the consumer can keep
         rendering its UI without an error state."""
         try:
-            return compute_detections_payload(compact) or {}
+            # Detections a user hid as false positives never reach the
+            # public API, and there is no parameter to ask for them.
+            # ``mark_hidden`` keeps them marked, for the statistics only.
+            return hidden_detections.apply_payload(
+                compute_detections_payload(compact) or {},
+                hidden_detections.snapshot(), mark_hidden)
         except Exception:
             logger.exception("public_api: compute_detections_payload failed for %s", compact)
             return {"detections": [], "events": []}
@@ -1111,6 +1249,11 @@ def register_public_routes(
                 "service": "rovimen-public-api",
                 "schema_version": SCHEMA_VERSION,
                 "documentation_url": "https://github.com/alextudorica/rovimen-station-tools/blob/main/docs/public_api.md",
+                "license": {
+                    "name": rd.LICENSE_NAME,
+                    "url": rd.LICENSE_URL,
+                    "notice": rd.LICENSE_NOTICE,
+                },
                 "endpoints": {
                     "stations":      "/api/public/v1/stations",
                     "station":       "/api/public/v1/stations/<id>",
@@ -1123,6 +1266,7 @@ def register_public_routes(
                     "stats":         "/api/public/v1/stats",
                     "fov":           "/api/public/v1/fov",
                     "orbits":        "/api/public/v1/orbits",
+                    "hall_of_fame":  "/api/public/v1/hall_of_fame",
                 },
                 "media": {
                     "clip":         "/media/v1/clip/<camera>/<date>/<filename>",
@@ -1136,8 +1280,14 @@ def register_public_routes(
         )
 
     # ── Stations ──────────────────────────────────────────────────────
+    # Keyless on purpose: the station list is the marker layer for
+    # browser-embedded maps (astromania.org and other operator sites),
+    # and a browser can't safely carry a secret X-API-Key in client JS —
+    # the same reason /media/v1/* is keyless. The payload is public-safe
+    # (public: true stations only; id/label/location/lat-lon/online/cameras,
+    # no IPs or SSH users) and is the identical data the anonymous
+    # dashboard map already exposes. Rate-limiting still applies.
     @app.route("/api/public/v1/stations")
-    @_require_api_key
     @_rate_limited(_DEFAULT_RATE)
     def public_stations():
         out = [
@@ -1150,8 +1300,9 @@ def register_public_routes(
             "count": len(out),
         }, max_age=300)
 
+    # Keyless for the same reason as the station list above (per-marker
+    # detail a browser map fetches on click).
     @app.route("/api/public/v1/stations/<station_id>")
-    @_require_api_key
     @_rate_limited(_DEFAULT_RATE)
     def public_station_detail(station_id: str):
         if not _STATION_RE.match(station_id):
@@ -1212,8 +1363,18 @@ def register_public_routes(
                     min_mag=min_mag,
                     shower=showers[0] if showers and len(showers) == 1 else None,
                 )
+                night_names: dict[str, frozenset[str]] = {}
+                hidden_snap = hidden_detections.snapshot()
                 for row in rows:
-                    p = _detection_from_index_row(row, date_iso, cam_to_host, public_stations_map)
+                    if hidden_snap.match(row) is not None:
+                        continue
+                    rcam = row.get("cam") or ""
+                    if rcam not in night_names:
+                        night_names[rcam] = _archived_meteor_names(rcam, compact)
+                    p = _detection_from_index_row(
+                        row, date_iso, cam_to_host, public_stations_map,
+                        archived=night_names[rcam],
+                    )
                     if p is None:
                         continue
                     if not _filter_detection(
@@ -1342,9 +1503,20 @@ def register_public_routes(
                     cam_filter=public_cams,
                 )
                 local_detections = []
+                night_names: dict[tuple[str, str], frozenset[str]] = {}
+                hidden_snap = hidden_detections.snapshot()
                 for row in index_rows:
-                    d_iso = date_iso if row.get("date") == compact else prev_date_iso
-                    p = _detection_from_index_row(row, d_iso, cam_to_host, public_stations)
+                    if hidden_snap.match(row) is not None:
+                        continue
+                    d_compact = row.get("date") or compact
+                    d_iso = date_iso if d_compact == compact else prev_date_iso
+                    nkey = (row.get("cam") or "", d_compact)
+                    if nkey not in night_names:
+                        night_names[nkey] = _archived_meteor_names(*nkey)
+                    p = _detection_from_index_row(
+                        row, d_iso, cam_to_host, public_stations,
+                        archived=night_names[nkey],
+                    )
                     if p is not None:
                         local_detections.append(p)
             except Exception:
@@ -1668,7 +1840,9 @@ def register_public_routes(
         if use_fast:
             # Fast path: single SQL aggregation over the index
             try:
-                stats = detection_db.aggregate_stats(compact_dates, cam_filter=public_cams)
+                stats = detection_db.aggregate_stats(
+                    compact_dates, cam_filter=public_cams,
+                    skip=hidden_detections.snapshot().match)
                 total_detections = stats["total"]
                 per_shower = dict(stats["per_shower"])
                 # Per-station breakdown, folded from per-camera counts.
@@ -1708,7 +1882,9 @@ def register_public_routes(
             brightest = None
             for d_iso in dates:
                 compact = d_iso.replace("-", "")
-                payload = _safe_detections(compact)
+                # Counts are statistics and include hidden detections; the
+                # brightest pick skips them (as the fast path's ``skip``).
+                payload = _safe_detections(compact, mark_hidden=True)
                 for det in payload.get("detections") or []:
                     if det.get("host_key") not in public_host_keys:
                         continue
@@ -1722,7 +1898,8 @@ def register_public_routes(
                     pm = rms.get("mag_apparent")
                     if pm is None:
                         pm = rms.get("mag_absolute")
-                    if pm is not None and (brightest is None or pm < brightest["peak_magnitude"]):
+                    if pm is not None and not det.get("hidden") and (
+                            brightest is None or pm < brightest["peak_magnitude"]):
                         brightest = {
                             "detection_id": _detection_id(
                                 d_iso, hk, det.get("cam") or "", det.get("filename") or "",
@@ -1848,7 +2025,10 @@ def register_public_routes(
             }, max_age=300)
 
         orbits: list[dict[str, Any]] = []
-        for ev in gmn_data.parse_traj_summary(path):
+        # The per-month index already holds every orbit one of our cameras
+        # took part in; walking the raw 110 MB file here cost a full parse per
+        # request.
+        for ev in gmn_data.events_for_month(year, month):
             stations_upper = [s.upper() for s in (ev.get("stations") or [])]
             our_witnesses = [s for s in stations_upper if s in our_cam_codes]
             if not our_witnesses:
@@ -1972,6 +2152,56 @@ def register_public_routes(
             "last_day_total":  last_day_total,
         }, max_age=3600)
 
+    # ── Hall of fame ───────────────────────────────────────────────────
+    @app.route("/api/public/v1/hall_of_fame")
+    @_require_api_key
+    @_rate_limited(_DEFAULT_RATE)
+    def public_hall_of_fame():
+        """Admin-curated featured meteors ("meteor of the week/month").
+
+        Same entries the dashboard landing page shows, projected with
+        absolute media URLs so third-party sites can embed the clips
+        directly. Only public-station cameras can ever be featured (the
+        write path enforces it), but the filter is re-applied here so a
+        station flipped ``public: false`` after being featured drops off
+        this surface immediately.
+        """
+        import fireball_reports
+        import hall_of_fame_store as hof_store
+
+        entries = []
+        for e in hof_store.load_all():
+            cam = e.get("camera", "")
+            date_iso = e.get("date", "")
+            filename = e.get("filename", "")
+            if not _camera_is_public_media(cam):
+                continue
+            clip_url = _media_clip_url(cam, date_iso, filename)
+            stack = e.get("stack") or _derive_stack_name(filename)
+            report = fireball_reports.report_for_clip(cam, filename)
+            entries.append({
+                "id":                 e.get("id"),
+                "camera":             cam,
+                "date":               date_iso,
+                "caption":            e.get("caption") or "",
+                "period":             e.get("period") or "",
+                "shower":             e.get("shower"),
+                "peak_magnitude":     e.get("peak_magnitude"),
+                "duration_s":         e.get("duration_s"),
+                "time_utc":           e.get("time_utc"),
+                "station_label":      e.get("station_label"),
+                "detection_offset_s": e.get("detection_offset_s"),
+                "clip_url":           clip_url,
+                "clip_mp4_url":       clip_url + "?format=mp4"
+                                      if filename.lower().endswith(".mkv") else clip_url,
+                "stack_url":          _media_stack_url(cam, date_iso, stack)
+                                      if stack else None,
+                "report_url":         f"{_public_base_url()}{report.url}" if report else None,
+                "report_title":       report.title if report else None,
+            })
+        return _public_json({"count": len(entries), "entries": entries},
+                            max_age=300)
+
     # ── Media: clip / stack / timelapse / nightstack ──────────────────
     def _serve_media(camera: str, date_iso: str, filename: str, subdir: str,
                       *, mime: str | None = None) -> Response:
@@ -2003,6 +2233,23 @@ def register_public_routes(
         if want_mp4 and filename.endswith(".mkv"):
             if not _camera_is_public_media(camera):
                 abort(404)
+            # NVMe hot cache first (pre-remuxed by clip_cache_warmer): a hit
+            # skips the SSHFS stat and the ffmpeg spawn entirely. The public
+            # gate above stays first — a hot file must not disclose clips of
+            # a public:false station.
+            if _DATE_ISO_RE.match(date):
+                hot = clip_cache.serve_hot_mp4(
+                    camera, date.replace("-", ""), filename
+                )
+                if hot is not None:
+                    return hot
+            # Station-side faststart sibling: if the station already uploaded a
+            # seekable .mp4 next to the .mkv, serve it directly — no per-request
+            # ffmpeg, no worker thread pinned, no remux over the shared box.
+            mp4_name = filename[:-4] + ".mp4"
+            if _resolve_media_path(camera, date, mp4_name, "meteors") is not None:
+                return _serve_media(camera, date, mp4_name, "meteors",
+                                    mime="video/mp4")
             path = _resolve_media_path(camera, date, filename, "meteors")
             if path is None:
                 abort(404)
@@ -2034,6 +2281,14 @@ def register_public_routes(
                 resp = send_file(path, mimetype=mime, conditional=True)
                 resp.headers["Cache-Control"] = "public, max-age=86400, immutable"
                 return resp
+        host_key = next((key for key, st in config.stations.items()
+                         if any(c.code.upper() == camera.upper() for c in st.cameras)), None)
+        fallback = _resolve_stack_fallback(camera, date, filename, host_key)
+        if fallback is not None:
+            path, max_age = fallback
+            resp = send_file(path, mimetype="image/webp", conditional=True)
+            resp.headers["Cache-Control"] = f"public, max-age={max_age}"
+            return resp
         abort(404)
 
     @app.route("/media/v1/timelapse/<camera>/<date>/<filename>")

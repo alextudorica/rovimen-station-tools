@@ -9,6 +9,8 @@ import pytest
 
 import config_migrate
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 # -- Fixtures ----------------------------------------------------------------
 
@@ -221,3 +223,122 @@ class TestMigrate:
         for k in config_migrate.REMOVED_KEYS[:3]:
             assert k not in result
         assert result["good"] is True
+
+    def test_purges_the_stale_overlay_logo_geometry(self, config_env):
+        """The overlay logo size must come from overlay.py, never from a config.
+
+        Every station carried ``overlay.bar_logo_height_frac`` = 0.62 (merged in
+        from config_defaults.json on 2026-08-05), which silently outranked four
+        fleet-wide shrinks of the constant. Migration has to strip it, and must
+        leave the rest of the overlay block alone.
+        """
+        config_env.write_config({
+            "overlay": {
+                "style": "cinema",
+                "bar_logo_height_frac": 0.62,
+                "bar_logo_width_frac": 0.28,
+                "bar_logo_opacity": 0.9,
+            },
+        })
+        config_env.write_defaults({"overlay": {"style": "cinema"}})
+        config_migrate.migrate(dry_run=False)
+        overlay = config_env.read_config()["overlay"]
+        assert "bar_logo_height_frac" not in overlay
+        assert "bar_logo_width_frac" not in overlay
+        assert overlay["bar_logo_opacity"] == 0.9
+        assert overlay["style"] == "cinema"
+
+    def test_defaults_never_reintroduce_the_logo_geometry(self):
+        """The shipped defaults must not carry a key the migration purges.
+
+        A key in both places would be purged and re-merged on every update, so
+        the override would come back and shadow the constant again.
+        """
+        defaults = json.loads(
+            (REPO_ROOT / "rovimen-scripts" / "config_defaults.json").read_text()
+        )
+        overlay_defaults = defaults.get("overlay", {})
+        for key in config_migrate.REMOVED_NESTED_KEYS["overlay"]:
+            assert key not in overlay_defaults
+
+    def test_per_station_configs_never_carry_code_owned_geometry(self):
+        """Nor may a checked-in station config, which the installer copies out."""
+        for cfg_path in sorted((REPO_ROOT / "station_configs").glob("*/config.json")):
+            overlay = json.loads(cfg_path.read_text()).get("overlay", {})
+            offenders = sorted(
+                set(overlay) & set(config_migrate.REMOVED_NESTED_KEYS["overlay"])
+            )
+            assert not offenders, f"{cfg_path.parent.name} carries {offenders}"
+
+    def test_purge_list_tracks_overlay_module(self):
+        """The purge list is derived from overlay.py, and the fallbacks match it.
+
+        Adding a geometry constant to CODE_OWNED_OVERLAY_KEYS -- or retiring a key
+        into INERT_OVERLAY_KEYS -- must purge it fleet-wide without a second edit
+        here; the literal fallbacks exist only for a station whose overlay.py
+        cannot be imported.
+        """
+        import overlay
+
+        expected = set(overlay.CODE_OWNED_OVERLAY_KEYS) | set(overlay.INERT_OVERLAY_KEYS)
+        assert set(config_migrate.REMOVED_NESTED_KEYS["overlay"]) == expected
+        assert set(config_migrate._CODE_OWNED_OVERLAY_FALLBACK) == \
+            set(overlay.CODE_OWNED_OVERLAY_KEYS)
+        assert set(config_migrate._INERT_OVERLAY_FALLBACK) == \
+            set(overlay.INERT_OVERLAY_KEYS)
+
+    def test_dead_logo_controls_are_purged_fleet_wide(self):
+        """The keys the dashboard used to offer as live spinners.
+
+        logo_size sat in every station config and in the overlay editor as
+        "px (0 = auto)"; the 2026-08-25 audit found it set to 0, 16 and 25 across
+        the fleet with no rendered difference. Purging it is the only way an
+        operator can tell the control was never wired.
+        """
+        for key in ("logo_size", "logo_opacity"):
+            assert key in config_migrate.REMOVED_NESTED_KEYS["overlay"]
+
+
+class TestLockedAtomicWrite:
+    """config_migrate shares the config.json writer lock and never uses the
+    fixed ``config.json.tmp`` that station_api's PATCH also wrote."""
+
+    def test_takes_the_shared_config_lock(self, config_env, monkeypatch):
+        import contextlib
+
+        config_env.write_config({"a": 1})
+        config_env.write_defaults({"a": 0, "b": 2})
+        seen: list[Path] = []
+
+        @contextlib.contextmanager
+        def spy_lock(path):
+            seen.append(Path(path))
+            yield
+
+        monkeypatch.setattr(config_migrate, "_shared_config_lock", spy_lock)
+        assert config_migrate.migrate() == 1
+        assert seen == [config_env.cfg]
+        assert json.loads(config_env.cfg.read_text()) == {"a": 1, "b": 2}
+
+    def test_leaves_no_temp_file_and_keeps_the_mode(self, config_env):
+        config_env.write_config({"a": 1})
+        config_env.cfg.chmod(0o600)
+        config_env.write_defaults({"b": 2})
+        config_migrate.migrate()
+        assert (config_env.cfg.stat().st_mode & 0o777) == 0o600
+        leftovers = [p.name for p in config_env.cfg.parent.iterdir()
+                     if p.name not in ("config.json", "config_defaults.json", ".config.lock")]
+        assert leftovers == []
+
+    def test_still_writes_atomically_without_rovimen_config(self, config_env, monkeypatch):
+        """A half-synced bundle without rovimen_config must not stop the migration."""
+        monkeypatch.setattr(config_migrate, "_shared_config_lock", None)
+        monkeypatch.setattr(config_migrate, "_shared_atomic_write", None)
+        config_env.write_config({"a": 1})
+        config_env.cfg.chmod(0o640)
+        config_env.write_defaults({"b": 2})
+        assert config_migrate.migrate() == 1
+        assert json.loads(config_env.cfg.read_text()) == {"a": 1, "b": 2}
+        assert (config_env.cfg.stat().st_mode & 0o777) == 0o640
+        assert sorted(p.name for p in config_env.cfg.parent.iterdir()) == [
+            "config.json", "config_defaults.json"]

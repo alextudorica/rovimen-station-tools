@@ -92,6 +92,13 @@ _COLUMNS = [
 
 
 class TestBuildDetectionGrid:
+    def test_reencoded_flag_reaches_the_cell(self):
+        """Drives the modal's "Processed" marker for an archived detection."""
+        done = dict(_det("gmnro01", "RO000A", "2026-04-01T21:32:00"), reencoded=True)
+        raw = _det("gmnro01", "RO000A", "2026-04-01T21:33:00", filename="g.mkv")
+        cells = _build_detection_grid([done, raw], [], _COLUMNS, 5, None, None)[0]["cells"]["RO000A"]
+        assert {c["filename"]: c["reencoded"] for c in cells} == {"f.mkv": True, "g.mkv": False}
+
     def test_buckets_by_time_and_camera(self):
         dets = [
             _det("gmnro01", "RO000A", "2026-04-01T21:32:00"),
@@ -176,3 +183,34 @@ class TestBuildDetectionGrid:
 
     def test_empty_input(self):
         assert _build_detection_grid([], [], _COLUMNS, 5, None, None) == []
+
+    def test_pending_detection_carried_into_cell(self):
+        # Clip still in transit to the archive: no filename, but the cell must
+        # exist (that's the whole point of the "detected, clip pending" UX).
+        det = _det("gmnro01", "RO000A", "2026-04-01T21:32:00", filename=None, stack=None)
+        det["pending"] = True
+        rows = _build_detection_grid([det], [], _COLUMNS, 5, None, None)
+        cell = rows[0]["cells"]["RO000A"][0]
+        assert cell["pending"] is True
+        assert cell["filename"] is None
+        assert rows[0]["total"] == 1
+
+    def test_pending_multi_keys_on_meteor_time_not_none(self):
+        # Two pending detections of the same camera share filename=None; only
+        # the one whose meteor_time is in a 2+ station event may be multi.
+        d1 = _det("gmnro01", "RO000A", "2026-04-01T21:32:00", filename=None, stack=None)
+        d1["pending"] = True
+        d2 = _det("gmnro01", "RO000A", "2026-04-01T21:32:40", filename=None, stack=None)
+        d2["pending"] = True
+        events = [{
+            "witness_count": 2,
+            "witnesses": [
+                {"filename": None, "meteor_time": "2026-04-01T21:32:00", "cam": "RO000A"},
+                {"filename": "m.mkv", "meteor_time": "2026-04-01T21:32:01", "cam": "RO000M"},
+            ],
+        }]
+        rows = _build_detection_grid([d1, d2], events, _COLUMNS, 5, None, None)
+        cells = rows[0]["cells"]["RO000A"]
+        by_time = {c["meteor_time"]: c["multi"] for c in cells}
+        assert by_time["2026-04-01T21:32:00"] is True
+        assert by_time["2026-04-01T21:32:40"] is False

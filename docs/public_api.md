@@ -1,6 +1,6 @@
 # ROVIMEN Public API
 
-Versioned, read-only, anonymous JSON + media surface served by
+Versioned, read-only JSON (API key) + keyless media surface served by
 `rovimen_dashboard.py`. Designed for third-party consumers — the
 [astromania.org](https://astromania.org) live-meteor page is the
 reference consumer, but any camera operator can wire this into their
@@ -14,19 +14,19 @@ https://<DASHBOARD_HOST>/media/v1/...
 ```
 
 `<DASHBOARD_HOST>` is the public hostname the dashboard is reachable
-on — the ops team has the current value (Cloudflare Tunnel / ROVIMEN
-VPS DNS). The Tailscale-net hostname is for internal admin use only
+on: `dashboard.rovimen.org` (Cloudflare Tunnel to the ROVIMEN VPS).
+The Tailscale-net hostname is for internal admin use only
 and won't resolve from astromania.org or end-user browsers; swap in
 the real public host before pasting these URLs into a third-party site.
 
-For **internal dev testing over the GMN tailnet**, the dev instance
-is at:
+For **internal testing over the GMN tailnet**, the same production
+instance is at:
 
 ```
-https://dashboard.example.net:8443/api/public/v1
+https://dashboard.example.net/api/public/v1
 ```
 
-(Port 8443 routes to `/opt/rovimen-dev/`; bare `:443` goes to prod.)
+(The dev instance on `:8443` / `/opt/rovimen-dev/` was retired on 2026-09-26.)
 
 > **Operator note** — set `ROVIMEN_PUBLIC_BASE_URL=https://<host>` on
 > the dashboard service so generated `clip_url`/`stack_url`/etc fields
@@ -38,11 +38,16 @@ https://dashboard.example.net:8443/api/public/v1
 ## Authentication
 
 JSON endpoints under `/api/public/v1/*` require an API key on every
-request. The discovery index (`GET /api/public/v1`) is keyless so
-consumers can sanity-check the host before wiring up auth. Media files
-under `/media/v1/*` stay keyless — once a consumer has fetched a JSON
-response with `clip_url` / `stack_url` URLs, browsers and `<video>`
-tags fetch them directly without being able to attach headers.
+request, with two keyless exceptions: the discovery index
+(`GET /api/public/v1`), so consumers can sanity-check the host before
+wiring up auth, and the station list (`GET /api/public/v1/stations`
+plus `/stations/<id>`), whose public-safe marker data (label,
+location, lat/lon, online state, cameras — for `public: true` stations
+only) feeds browser-embedded maps that can't carry a secret key in
+client JS. Media files under `/media/v1/*` stay keyless for the same
+reason — once a consumer has a JSON response with `clip_url` /
+`stack_url` URLs, browsers and `<video>` tags fetch them directly
+without being able to attach headers.
 
 Supply your key via either of:
 
@@ -60,7 +65,7 @@ Missing or invalid key returns `HTTP 401` with a JSON body:
 ```
 
 Keys are minted manually by ops (`tools/mint_api_key.py`). Email
-[Alex](mailto:your-network@example.org) for one — include a short label for
+the network maintainers (contact details on the dashboard's About page) for one — include a short label for
 what you're building so it shows up in the audit log.
 
 CORS stays open (`Access-Control-Allow-Origin: *`) so a key holder can
@@ -111,8 +116,8 @@ Response shape:
       "id": "gmnro05",
       "label": "Bistrița",
       "location_name": "Bistrița, Bistrița-Năsăud",
-      "latitude": 47.08,
-      "longitude": 24.39,
+      "latitude": 47.51,
+      "longitude": 24.23,
       "country": "RO",
       "online": true,
       "last_seen_utc": "2026-05-24T08:42:44+00:00",
@@ -182,11 +187,53 @@ Response shape (truncated):
       "detection_offset_s": 11.87,
       "clip_url":      "https://.../media/v1/clip/RO000J/2026-05-23/RO000J_20260524_000426_color.mkv",
       "stack_url":     "https://.../media/v1/stack/RO000J/2026-05-23/RO000J_20260524_000426_stack.webp",
-      "thumbnail_url": "https://.../media/v1/stack/RO000J/2026-05-23/RO000J_20260524_000426_stack.webp"
+      "thumbnail_url": "https://.../media/v1/stack/RO000J/2026-05-23/RO000J_20260524_000426_stack.webp",
+      "provenance": "single_station",
+      "trajectory": null
     }
   ]
 }
 ```
+
+`provenance` says which kind of measurement the row carries. Every
+detection has single-station astrometry from our own RMS files; a
+detection that also fed a triangulated GMN trajectory reports
+`"multi_station"` and carries the solution under `trajectory`:
+
+```json
+"provenance": "multi_station",
+"trajectory": {
+  "trajectory_id": "20260523120000_abc12",
+  "shower": "PER",
+  "ra_geo_deg": 45.1, "dec_geo_deg": 58.0,
+  "velocity_geo_km_s": 59.2,
+  "velocity_init_km_s": 60.4,
+  "velocity_avg_km_s": 58.1,
+  "velocity_hel_km_s": 41.3,
+  "altitude_begin_km": 102.0,
+  "altitude_peak_km": 96.3,
+  "altitude_end_km": 88.0,
+  "peak_absolute_magnitude": -2.1,
+  "mass_kg": 9.3e-05,
+  "f_param": 0.51,
+  "convergence_angle_deg": 31.2,
+  "duration_s": 0.42,
+  "orbit_a_au": 2.346, "orbit_e": 0.803, "orbit_i_deg": 11.72,
+  "orbit_peri_deg": 282.47, "orbit_node_deg": 158.24,
+  "orbit_q_au": 0.463, "orbit_q_aph_au": 4.23,
+  "tisserand": 3.0,
+  "stations": ["RO000J", "RO000M", "MD0001"],
+  "station_count": 3
+}
+```
+
+`trajectory` is `null` for most recent detections regardless of how many
+cameras saw the meteor: GMN publishes a night 4-15 days after it happened,
+so a night younger than that has no solutions yet. Poll again once the night
+is published rather than treating `null` as "single-station forever".
+`mass_kg` is photometric (assumed luminous efficiency), and
+`convergence_angle_deg` below ~15° means shallow intersecting-planes
+geometry and a correspondingly soft orbit.
 
 Cache: `max-age=60` when `date` is today UTC (still being locked);
 `max-age=3600` for any past night (sealed). The default — yesterday
@@ -225,6 +272,7 @@ Query params:
 | `has_trajectory` | boolean | false         | When `true`/`1`/`yes`, return only GMN events with a resolved orbit. |
 | `limit`          | integer | 200           | Max 500 |
 | `offset`         | integer | 0             |       |
+| `order`          | string  | `time`        | One of `time`, `time_desc`, `mag`, `duration` |
 
 Response shape (one GMN event):
 
@@ -242,7 +290,7 @@ Response shape (one GMN event):
       "rms_code": "RO000J",
       "camera": "RO000J",
       "latitude": 44.8,
-      "longitude": 26.68,
+      "longitude": 26.41,
       "country": "RO",
       "time_utc": "2026-05-23T12:00:00.123",
       "clip_url":  "https://.../media/v1/clip/RO000J/2026-05-23/...mkv",
@@ -336,6 +384,35 @@ Response shape:
 }
 ```
 
+### `GET /api/public/v1/hall_of_fame`
+
+The admin-curated featured meteors shown on the dashboard landing page:
+`{"count", "entries": [...]}`, each entry with `camera`, `date`,
+`caption`, `period`, `shower`, `peak_magnitude`, `duration_s`,
+`time_utc`, `station_label`, `clip_url`, `clip_mp4_url`, `stack_url`
+and, when a fireball report lists the clip, `report_url` and
+`report_title`. Only public-station cameras appear. Cache: `max-age=300`.
+
+### `GET /api/public/v1/fov`
+
+Camera field-of-view footprints of public stations as a GeoJSON
+`FeatureCollection`. `alt` picks the projection altitude: `75` km
+(meteors, default) or `40` km (fireballs). Cache: `max-age=3600`.
+
+### `GET /api/public/v1/orbits`
+
+GMN heliocentric orbits for one month in which at least one public
+camera was a witness, with radiant, trajectory end points and orbital
+elements. Query params: `month` (`YYYY-MM`, default current UTC month),
+`shower` (repeatable), `limit` (default 500, max 500), `offset`.
+Cache: `max-age=3600`.
+
+### `GET /api/public/v1/orbit_stats`
+
+Orbit counts for the current calendar year (`month_total`,
+`year_total`, `last_orbit_date`, `last_day_total`), counting only
+orbits with a public-camera witness. Cache: `max-age=3600`.
+
 ## Media files
 
 ```
@@ -353,9 +430,11 @@ GET /media/v1/nightstack/<camera>/<date>/<filename>.webp
 
 **Container format note.** Color clips are uploaded as H.264-in-MKV
 (`video/x-matroska`) — Chrome and Firefox play them in a `<video>` tag
-without transcoding. If you need universal `<video>` compatibility
-(older Safari, embedded WebViews), transcode to MP4 in your own
-pipeline.
+without transcoding. For Safari, iOS and embedded WebViews, append
+`?format=mp4` to a clip URL: the server serves a seekable MP4 of the
+same H.264 stream (a remux, no re-encode; cached after the first
+request). When too many remuxes run at once it answers `503` with
+`Retry-After`.
 
 ## Consumer examples
 
@@ -450,13 +529,14 @@ stations:
   gmnro05:
     label: Bistrița
     location_name: Bistrița, Bistrița-Năsăud
-    lat: 47.08
-    lon: 24.39
+    lat: 47.51
+    lon: 24.23
     public: true
     # ... existing fields ...
 ```
 
-Defaults to `false` so a new station never accidentally exposes media.
+Defaults to `true` (`StationConfig.public` in `dashboard/models.py`);
+set `public: false` explicitly to keep a station off the public surface.
 The `location_name` field is what shows up on the public surface — it
 falls back to `label` when empty.
 
@@ -515,19 +595,20 @@ Every JSON response carries a strong ETag — clients should send
 
 ## Rate limits
 
-Every endpoint is rate-limited (Flask-Limiter, fixed window, in-memory
-storage on the dashboard host). Hitting a limit returns `HTTP 429 Too
+Every endpoint is rate-limited (Flask-Limiter, fixed window, counters
+in Redis on the dashboard host via `ROVIMEN_REDIS_URL`, per-worker
+memory if Redis is unreachable). Hitting a limit returns `HTTP 429 Too
 Many Requests` with a JSON body and `Retry-After` header.
 
 The limiter bucket is keyed by **API key id** for authenticated JSON
 calls (so a legitimate consumer's traffic is independent of where it
-originates) and by **client IP** for keyless paths (`/media/v1/*` and
-the discovery index).
+originates) and by **client IP** for keyless paths (`/media/v1/*`,
+the discovery index and the station list).
 
 | Endpoint group                                            | Default budget          |
 |-----------------------------------------------------------|-------------------------|
-| Index, stations, detections, event detail                 | 60 / min, 1000 / hour   |
-| Events, timelapses, nightstacks, stats (heavier compute)  | 20 / min, 200 / hour    |
+| Index, stations, detections, event detail, fov, orbit_stats, hall_of_fame | 60 / min, 1000 / hour   |
+| Events, timelapses, nightstacks, stats, orbits (heavier compute)  | 20 / min, 200 / hour    |
 | `/media/v1/*` (each `<video>` play adds one hit)          | 300 / min, 5000 / hour  |
 
 Per-key overrides are possible — when ops mints your key they can
@@ -552,11 +633,13 @@ sits well inside every bucket.
 ## For operators — minting a key
 
 ```
-# On the VPS, as the user that owns api_keys.yaml (typically rovimen):
-sudo -u rovimen python3 /opt/rovimen-dev/tools/mint_api_key.py \
+# On the VPS, as the user that owns api_keys.yaml (rovimen). The deploy
+# copies tools/mint_api_key.py next to the dashboard modules:
+sudo -u rovimen /opt/rovimen/venv/bin/python /opt/rovimen/mint_api_key.py \
     --id astromania-prod \
-    --label "astromania.org WordPress plugin" \
-    --path /opt/rovimen-dev/api_keys.yaml
+    --label "astromania.org WordPress plugin"
+# --path defaults to /opt/rovimen/api_keys.yaml; --rate-limit sets the
+# per-key override, e.g. "240/minute;5000/hour".
 ```
 
 The script prints the freshly-minted secret to stdout exactly once —
@@ -564,10 +647,11 @@ copy it from there. The yaml is mode 0600. Use `--list` to see
 existing keys (redacted) and `--disable <id>` to revoke without losing
 the audit trail.
 
-Required env on the dashboard service:
+Env on the dashboard service (both optional; defaults shown, and
+production sets neither):
 
 ```
-ROVIMEN_API_KEYS_PATH=/opt/rovimen-dev/api_keys.yaml
+ROVIMEN_API_KEYS_PATH=/opt/rovimen/api_keys.yaml
 ROVIMEN_API_KEYS_REQUIRED=1      # set to 0 for local dev only
 ```
 
@@ -589,8 +673,7 @@ When v2 ships, both versions will be served in parallel for at least
 - **WebSocket / SSE push.** Poll `/detections?date=<tonight>` every
   60 s instead.
 - **Webhooks** to push new detections to a consumer URL.
-- **On-demand transcoded MP4** of color clips. Color clips are
-  H.264-in-MKV; consumers that need pure MP4 should transcode on
-  their side.
+- **Re-encoded MP4** of color clips. `?format=mp4` only remuxes the
+  H.264-in-MKV clip into an MP4 container (see "Media files").
 - **Multi-camera stitched / composite videos** for an event. Each
   witness clip is linked separately; lay them out client-side.

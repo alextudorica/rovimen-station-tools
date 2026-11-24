@@ -51,7 +51,7 @@ REDIS_URL_ENV = "ROVIMEN_REDIS_URL"
 
 # Redis key prefix + TTL for pushed telemetry. A generous TTL lets a station
 # that has gone quiet age out of the shared store rather than pinning stale
-# state forever; reads still fall back to the durable station_state mirror.
+# state forever.
 _REDIS_PREFIX = os.environ.get("ROVIMEN_REDIS_PREFIX", "rovimen")
 # 0 => no expiry. Telemetry is refreshed every 30-60 s per station, so an
 # hour of TTL comfortably survives transient gaps while bounding staleness.
@@ -86,7 +86,9 @@ class StationStateBackend(Protocol):
         ``seq``), and ``False`` when ``seq <= stored`` (a replay/older seq — the
         caller must drop). The check and the advance MUST be atomic so two
         concurrent pushes with the same seq can never both be accepted, and a
-        stale seq can never regress a newer one.
+        stale seq can never regress a newer one. When the store itself fails,
+        return ``True`` (accept unguarded): a dropped push is answered 200 and
+        never re-sent, while every ingest write behind the guard is idempotent.
         """
         ...
 
@@ -288,11 +290,16 @@ class RedisStationStateBackend:
                         # Someone advanced the field mid-transaction; re-read.
                         continue
         except Exception:
-            # A Redis blip must not double-apply a push. Fail closed: report a
-            # replay (drop) so we never mirror state twice. Pushers are
-            # seq-idempotent and retry, so a dropped-on-error push is re-sent.
-            logger.exception("redis seq_bump failed for %s/%s", host_key, kind)
-            return False
+            # Fail open: accept the push unguarded. Ingest answers a drop with
+            # 200, which the pusher counts as delivered, so dropping here lost
+            # every push made during a Redis blip (chunk listings are re-sent
+            # only on change). Every write behind the guard is a last-value
+            # replace or a keyed upsert, so a duplicate applied now is harmless.
+            logger.exception(
+                "redis seq_bump failed for %s/%s; accepting the push without "
+                "the replay check", host_key, kind,
+            )
+            return True
 
     def _get(self, hash_key: str, host_key: str) -> dict[str, Any] | None:
         try:
@@ -405,10 +412,50 @@ class RedisStationStateBackend:
 def _redis_client_from_url(url: str) -> Any:
     """Build a redis client with decoded (str) responses. Imported lazily so
     the dashboard runs fine without the ``redis`` package installed when no
-    ``ROVIMEN_REDIS_URL`` is configured."""
+    ``ROVIMEN_REDIS_URL`` is configured.
+
+    Socket timeouts bound every call: the stores are kept even when Redis is
+    down (see :func:`connect_redis`), so a wedged server must cost a request
+    two seconds, not a gthread. No caller issues a blocking command."""
     import redis  # local import: optional dependency
 
-    return redis.Redis.from_url(url, decode_responses=True)
+    return redis.Redis.from_url(
+        url, decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+    )
+
+
+def connect_redis(url: str, purpose: str) -> Any | None:
+    """Build the Redis client a factory hands to its store, or ``None``.
+
+    ``None`` only when the client cannot be constructed at all (malformed URL,
+    ``redis`` not installed): that is a config error no retry will fix. A
+    server that fails the startup PING still gets its client back, because
+    every store already swallows per-call Redis errors and recovers on the next
+    call once Redis does. Latching a worker onto a fallback at boot is worse
+    than a blip: the fallback lasts the worker's whole life. On 2026-09-22 a
+    worker recycled while the full root disk had Redis refusing commands with
+    MISCONF (Redis rejects PING too). It kept a per-process station cache for
+    10 h and marked healthy push stations offline 137 times. The PING stays as
+    a boot-time diagnostic only.
+    """
+    try:
+        client = _redis_client_from_url(url)
+    except Exception:
+        logger.exception(
+            "%s=%s cannot build a Redis client; %s runs without Redis",
+            REDIS_URL_ENV, url, purpose,
+        )
+        return None
+    try:
+        client.ping()
+        logger.info("%s using shared Redis backend: %s", purpose, url)
+    except Exception as exc:
+        logger.warning(
+            "%s: Redis at %s failed the startup PING (%s); keeping the shared "
+            "backend, calls degrade per-request until Redis recovers",
+            purpose, url, exc,
+        )
+    return client
 
 
 def make_station_state_backend(
@@ -418,31 +465,17 @@ def make_station_state_backend(
 
     When ``redis_url`` (default: the ``ROVIMEN_REDIS_URL`` env var) is set, a
     :class:`RedisStationStateBackend` is returned so all gunicorn workers share
-    one store. Otherwise the per-process :class:`InMemoryStationStateBackend`
-    is returned, preserving the historical single-worker behaviour exactly.
-
-    A misconfigured or unreachable Redis at startup falls back to the in-memory
-    backend with a WARNING rather than crashing the worker — the dashboard must
-    still boot. (Individual runtime Redis errors are handled per-call inside the
-    Redis backend.)
+    one store, even when Redis is down at boot (see :func:`connect_redis`).
+    Otherwise the per-process :class:`InMemoryStationStateBackend` is returned,
+    preserving the historical single-worker behaviour exactly.
     """
     url = redis_url if redis_url is not None else os.environ.get(REDIS_URL_ENV)
     if not url:
         return InMemoryStationStateBackend()
-    try:
-        client = _redis_client_from_url(url)
-        # Fail fast at startup if Redis is unreachable so we log a clear reason
-        # and fall back, instead of discovering it on the first read.
-        client.ping()
-        logger.info("StationCache using shared Redis backend: %s", url)
-        return RedisStationStateBackend(client)
-    except Exception:
-        logger.exception(
-            "%s is set but Redis is unreachable; falling back to per-process "
-            "in-memory station cache (multi-worker reads will be inconsistent)",
-            REDIS_URL_ENV,
-        )
+    client = connect_redis(url, "StationCache")
+    if client is None:
         return InMemoryStationStateBackend()
+    return RedisStationStateBackend(client)
 
 
 def make_seq_backend(
@@ -452,9 +485,11 @@ def make_seq_backend(
 
     ``station_state`` moves the hot per-push seq check-and-bump off the
     single-writer SQLite DB and onto Redis when ``ROVIMEN_REDIS_URL`` is set.
-    Returning ``None`` when it is unset (or Redis is unreachable) tells
-    ``station_state`` to keep the historical SQLite seq path exactly as today —
-    zero behaviour change for single-worker dev + tests.
+    Returning ``None`` when it is unset tells ``station_state`` to keep the
+    historical SQLite seq path exactly as today — zero behaviour change for
+    single-worker dev + tests. A Redis that is down at boot still gets the
+    Redis backend (see :func:`connect_redis`): one worker on SQLite seq and the
+    rest on Redis seq would each accept the same push.
 
     Unlike :func:`make_station_state_backend`, this never returns an in-memory
     backend: an in-memory seq store would be per-worker and thus *wrong* for
@@ -465,15 +500,7 @@ def make_seq_backend(
     url = redis_url if redis_url is not None else os.environ.get(REDIS_URL_ENV)
     if not url:
         return None
-    try:
-        client = _redis_client_from_url(url)
-        client.ping()
-        logger.info("station_state seq guard using shared Redis backend: %s", url)
-        return RedisStationStateBackend(client)
-    except Exception:
-        logger.exception(
-            "%s is set but Redis is unreachable; keeping the SQLite seq guard "
-            "(single-writer contention remains until Redis is reachable)",
-            REDIS_URL_ENV,
-        )
+    client = connect_redis(url, "station_state seq guard")
+    if client is None:
         return None
+    return RedisStationStateBackend(client)

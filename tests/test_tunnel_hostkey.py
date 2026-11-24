@@ -38,7 +38,7 @@ class _FakeProc:
 @pytest.fixture
 def tunnel_config() -> DashboardConfig:
     station = StationConfig(
-        ip="100.64.0.2", label="Dragsina", ssh_user="alex",
+        ip="100.64.0.2", label="Dragsina", ssh_user="operator",
         jump_hosts=["gmn0000"],
     )
     jump = StationConfig(ip="100.64.0.3", label="Berlin", ssh_user="gmn")
@@ -179,7 +179,7 @@ def _run_ensure(monkeypatch, tmp_path, pins: list[str], scan_fp: str):
     monkeypatch.setattr(rd.subprocess, "run", _make_run_stub(scan_fp))
 
     station = StationConfig(
-        ip="100.64.0.2", label="Dragsina", ssh_user="alex",
+        ip="100.64.0.2", label="Dragsina", ssh_user="operator",
         ssh_host_key_fingerprints=pins,
     )
     cfg = DashboardConfig(stations={"dragsina": station})

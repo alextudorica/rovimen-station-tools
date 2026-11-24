@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#161b22">
+<title>ROVIMEN — {{ report.title }}</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
+<meta name="description" content="{{ report.summary[0] }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-fireball-report.css', v=build_version) }}">
+<script type="importmap">
+{
+  "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
+    "/static/dashboard-video-modal.js": "{{ url_for('static', filename='dashboard-video-modal.js', v=build_version) }}",
+    "/static/dashboard-common.js": "{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"
+  }
+}
+</script>
+<script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
+<script type="module" src="{{ url_for('static', filename='dashboard-fireball-report.js', v=build_version) }}"></script>
+</head>
+<body>
+
+<div class="ov-header">
+  {% set nav_active = 'overview' %}{% include "_nav.html" %}
+</div>
+
+<main class="fr-page">
+
+  <a class="fr-back" href="/"><span aria-hidden="true">&larr;</span> Hall of Fame</a>
+
+  <header class="fr-head">
+    <h1 class="fr-title">{{ report.title }}</h1>
+    <p class="fr-when">
+      <span class="fr-time">{{ report.time_utc }}</span>{% if report.local_time %} <span class="fr-local">({{ report.local_time }})</span>{% endif %}
+    </p>
+    <div class="fr-byline">
+      <span>{{ report.authors }}</span>
+      <span class="fr-analysed" id="fr-analysed">
+        Analysed {{ report.analysed.isoformat() }}{% if days_after == 1 %}, the day after the event{% elif days_after > 1 %}, {{ days_after }} days after the event{% endif %}{% if report.updated %}; updated {{ report.updated.isoformat() }}{% endif %}
+      </span>
+      {% if report.status == 'preliminary' %}<span class="fr-status">Preliminary</span>{% endif %}
+    </div>
+  </header>
+
+  <section class="fr-summary">
+    {% for p in report.summary %}<p>{{ p }}</p>{% endfor %}
+  </section>
+
+  <div class="fr-grid">
+    <section class="fr-facts">
+      <h2>Key numbers</h2>
+      <dl>
+        {% for f in report.facts %}<dt>{{ f.label }}</dt><dd>{{ f.value }}</dd>{% endfor %}
+      </dl>
+    </section>
+    <section class="fr-cameras">
+      <h2>Cameras</h2>
+      <ul>
+        {% for c in cameras %}<li><b class="fr-code" translate="no">{{ c.code }}</b>{% if c.place %} {{ c.place }}{% endif %}</li>{% endfor %}
+      </ul>
+    </section>
+  </div>
+
+  {% if clips %}
+  <section class="fr-clips"{% if event_epoch %} data-event="{{ event_epoch }}"{% endif %}>
+    <div class="fr-clips-head">
+      <h2>Video</h2>
+      {% if event_epoch and (clips | selectattr('start') | list | length) > 1 %}
+      <button type="button" class="fr-play-all">Play all {{ clips | selectattr('start') | list | length }} cameras in sync</button>
+      {% endif %}
+    </div>
+    <div class="fr-clip-grid">
+      {% for c in clips %}
+      <figure class="fr-clip">
+        <video controls preload="none" playsinline src="{{ c.src }}"{% if c.poster %} poster="{{ c.poster }}"{% endif %}{% if c.start %} data-start="{{ c.start }}"{% endif %}></video>
+        <figcaption><span class="fr-code" translate="no">{{ c.camera }}</span>{% if c.place %} {{ c.place }}{% endif %}</figcaption>
+      </figure>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  {% for s in report.sections %}
+  <section class="fr-section">
+    <h2>{{ s.heading }}</h2>
+    {% for p in s.paragraphs %}<p>{{ p }}</p>{% endfor %}
+    {% for fig in s.figures %}
+    <figure class="fr-figure fr-figure--{{ fig.size }}">
+      {% if fig.is_video %}
+      <video src="{{ report.figure_url(fig.file) }}"{% if fig.poster %} poster="{{ report.figure_url(fig.poster) }}"{% endif %} controls muted loop playsinline preload="metadata"></video>
+      {% else %}
+      <a href="{{ report.figure_url(fig.file) }}" target="_blank" rel="noopener">
+        <img src="{{ report.figure_url(fig.file) }}" alt="{{ fig.caption }}" loading="lazy">
+      </a>
+      {% endif %}
+      <figcaption>{{ fig.caption }}</figcaption>
+    </figure>
+    {% endfor %}
+  </section>
+  {% endfor %}
+
+  {% if report.notes %}
+  <section class="fr-notes" id="fr-notes">
+    <h2>Revisions</h2>
+    {% for n in report.notes %}<p>{{ n }}</p>{% endfor %}
+  </section>
+  {% endif %}
+
+  {% if report.credits %}
+  <section class="fr-credits">
+    <h2>Credits</h2>
+    <ul>{% for c in report.credits %}<li>{{ c }}</li>{% endfor %}</ul>
+  </section>
+  {% endif %}
+
+</main>
+
+{% include "_license_footer.html" %}
+</body>
+</html>

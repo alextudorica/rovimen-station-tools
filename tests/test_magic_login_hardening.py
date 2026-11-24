@@ -61,7 +61,7 @@ def test_host_magic_link_downgrades_to_read_only(client, monkeypatch):
     """A host account redeeming a magic link gets a read-only session, marked
     magic, with a future absolute expiry and a non-permanent cookie."""
     token = "tok_host_readonly"
-    _seed_users(monkeypatch, andrei=UserConfig(
+    _seed_users(monkeypatch, hostuser=UserConfig(
         role="host", stations=["gmnro13"],
         magic_token=generate_password_hash(token)))
 
@@ -69,7 +69,7 @@ def test_host_magic_link_downgrades_to_read_only(client, monkeypatch):
     assert resp.status_code == 302  # redirected into the app after login
 
     with client.session_transaction() as sess:
-        assert sess["user"] == "andrei"
+        assert sess["user"] == "hostuser"
         assert sess["role"] == _MAGIC_SESSION_ROLE   # downgraded from host
         assert sess["role"] != "host"
         assert sess["admin"] is None
@@ -99,7 +99,7 @@ def test_admin_magic_link_still_refused(client, monkeypatch):
 def test_expired_magic_session_is_cleared_on_api(client):
     """A magic session past its absolute expiry is cleared and 401s on API."""
     with client.session_transaction() as sess:
-        sess["user"] = "andrei"
+        sess["user"] = "hostuser"
         sess["role"] = _MAGIC_SESSION_ROLE
         sess["magic"] = True
         sess["magic_exp"] = (
@@ -113,7 +113,7 @@ def test_expired_magic_session_is_cleared_on_api(client):
 
 def test_expired_magic_session_redirects_pages_to_login(client):
     with client.session_transaction() as sess:
-        sess["user"] = "andrei"
+        sess["user"] = "hostuser"
         sess["role"] = _MAGIC_SESSION_ROLE
         sess["magic"] = True
         sess["magic_exp"] = (
@@ -127,7 +127,7 @@ def test_expired_magic_session_redirects_pages_to_login(client):
 def test_malformed_magic_exp_fails_closed(client):
     """A corrupt magic_exp stamp is treated as expired (fail safe)."""
     with client.session_transaction() as sess:
-        sess["user"] = "andrei"
+        sess["user"] = "hostuser"
         sess["role"] = _MAGIC_SESSION_ROLE
         sess["magic"] = True
         sess["magic_exp"] = "not-a-date"
@@ -139,13 +139,13 @@ def test_malformed_magic_exp_fails_closed(client):
 def test_non_magic_session_is_untouched(client, monkeypatch):
     """A normal (non-magic) session has no magic_exp and must pass through the
     before_request hook without being cleared."""
-    _seed_users(monkeypatch, andrei=UserConfig(role="host", stations=["gmnro13"]))
+    _seed_users(monkeypatch, hostuser=UserConfig(role="host", stations=["gmnro13"]))
     with client.session_transaction() as sess:
-        sess["user"] = "andrei"
+        sess["user"] = "hostuser"
         sess["role"] = "host"
         sess["stations"] = ["gmnro13"]
 
     resp = client.get("/api/auth/status")
     assert resp.status_code == 200
     with client.session_transaction() as sess:
-        assert sess["user"] == "andrei"  # untouched
+        assert sess["user"] == "hostuser"  # untouched

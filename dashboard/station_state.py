@@ -1,13 +1,12 @@
-"""station_state.py — durable VPS-side mirror for pushed station telemetry.
+"""station_state.py — per-station push sequence guard and media pointers.
 
 The reversed-HTTP push data plane (see ``docs/reversed_http_push_design.md``)
 has stations POST their own status/vitals/detections/media pointers to the VPS
-ingest API. Status and vitals live in the in-process :class:`StationCache` that
-the dashboard already reads, but that cache is lost on restart. This module adds
-a small durable mirror so the dashboard survives a restart with last-known
-values, and carries the per-station ``last_seq`` used for envelope idempotency
-(§2.3): a body whose ``seq`` is ``<= last_seq`` for that station is a replay and
-is dropped.
+ingest API. Status and vitals live in the :class:`StationCache` the dashboard
+reads (Redis-backed in production, so they survive a restart). This module
+carries the per-station ``last_seq`` used for envelope idempotency (§2.3): a
+body whose ``seq`` is ``<= last_seq`` for that station is a replay and is
+dropped. It also stores the pushed media pointers.
 
 Two tables, kept deliberately separate from ``detections`` (which the ingest
 handler writes through :func:`detection_db.upsert_detections` unchanged):
@@ -17,37 +16,49 @@ handler writes through :func:`detection_db.upsert_detections` unchanged):
 
 Storage is the same SQLite file as the detection index by default so a single
 WAL connection pool serves both, but the path is overridable for tests.
-"""
 
+Reading the SQLite ``station_state`` table directly on the VPS is misleading and
+has cost debugging time more than once: every row there is frozen at
+2026-07-23T13:32Z, the moment the dashboard restarted after #819 moved the seq
+guard to Redis. Production sets ``ROVIMEN_REDIS_URL``, so accept_seq /
+advance_seq short-circuit to Redis and the table is never written again, by
+design. Its ``last_status``/``last_vitals``/``last_seen_at`` columns are
+leftovers of a last-value mirror that nothing read and that is no longer
+written; the live values are the status/vitals hashes the overview reads
+through StationCache.
+"""
 from __future__ import annotations
 
 import json
 import logging
 import os
 import sqlite3
+import time
 import threading
 from contextlib import closing
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from cache_backend import RedisStationStateBackend
 
+import sqlite_writer
+
 logger = logging.getLogger(__name__)
 
-# The per-push seq/replay guard is the hottest write on the ingest path (every
-# heartbeat/vitals/detection/media POST checks + bumps it). On a single-writer
-# SQLite DB, ~50+ writes/min across the fleet hits the write lock and thread-
-# starves the worker (docs/reversed_http_push_design.md §9). When
-# ``ROVIMEN_REDIS_URL`` is set we move JUST this seq state onto Redis, where the
-# check-and-bump is an atomic Lua script. When it is unset the seq stays in
-# SQLite, exactly as before — zero behaviour change for single-worker dev/tests.
+# Every heartbeat/vitals POST used to make TWO writes to the single-writer
+# SQLite DB: the seq/replay check-and-bump AND a last-value mirror UPDATE (since
+# removed: nothing read it). Across the fleet that was ~50+ writes/min hitting
+# one write lock, which thread-starves the worker and — when a memory stall
+# freezes a lock-holder mid transaction past the 30 s busy_timeout — produces
+# the "database is locked" storm (docs/reversed_http_push_design.md §9). When
+# ``ROVIMEN_REDIS_URL`` is set the per-push seq guard is an atomic Redis
+# check-and-bump instead (see accept_seq), so the Redis path touches the shared
+# SQLite DB on ZERO of the hot status/vitals pushes. When it is unset the seq
+# stays in SQLite, exactly as before.
 #
-# The durable last-value mirror (last_status/last_vitals) and the media pointers
-# stay in SQLite regardless: they are low-frequency (status/vitals coalesce, the
-# mirror is only a restart fallback; media is 300s/900s cadence) and carry no
-# single-writer contention worth moving.
+# Media pointers stay in SQLite regardless: they are low-frequency (300s/900s
+# cadence) and carry no single-writer contention worth moving.
 _KIND_SEQ = "seq"
 
 _seq_backend: RedisStationStateBackend | None = None
@@ -90,7 +101,14 @@ DB_PATH = Path(
     )
 )
 
-_BUSY_TIMEOUT_MS = 30_000
+# Aligned with detection_db._BUSY_TIMEOUT_MS: both modules share ONE write
+# connection per process (sqlite_writer keys it on the database path), so the
+# busy_timeout a worker ends up with is whichever module opened it first.
+# 30 s here meant a contended write could hold an ingest request for
+# 5 x 30 s + back-off, past the 120 s proxy budget; 10 s keeps the worst case
+# inside it and lets the writer that holds the lock finish instead.
+_BUSY_TIMEOUT_MS = 10_000
+_POINTER_CHUNK_ROWS = 500
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS station_state (
@@ -124,9 +142,26 @@ def _connect(path: Path, *, read_only: bool = False) -> sqlite3.Connection:
     )
     con.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     if not read_only:
-        con.execute("PRAGMA journal_mode=WAL")
+        # journal_mode is persisted in the file; re-issuing the WAL pragma on
+        # every connection takes a lock transition for nothing.
+        mode = (con.execute("PRAGMA journal_mode").fetchone() or [""])[0]
+        if str(mode).lower() != "wal":
+            con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA synchronous=NORMAL")
     return con
+
+
+def _run_write(path: Path, fn):
+    """One transaction on this process's shared write connection
+    (see ``sqlite_writer``)."""
+    return sqlite_writer.run_write(path, _connect, fn)
+
+
+# ensure_schema() used to open, DDL and close a connection on EVERY write --
+# a second connection churn per request on top of the write itself, and each
+# close of the last connection tore the WAL down. The schema is idempotent,
+# so once a process has applied it to a file, it is done.
+_schema_ready: set[tuple[int, str]] = set()
 
 
 def open_db(path: Path = DB_PATH) -> sqlite3.Connection:
@@ -139,7 +174,12 @@ def open_db(path: Path = DB_PATH) -> sqlite3.Connection:
 
 
 def ensure_schema(path: Path = DB_PATH) -> None:
-    """Create the tables if missing. Safe to call repeatedly."""
+    """Create the tables if missing. Safe to call repeatedly; the DDL runs
+    once per process per file."""
+    key = (os.getpid(), str(path))
+    if key in _schema_ready and path.exists():
+        return
+    _schema_ready.add(key)
     with closing(open_db(path)):
         pass
 
@@ -185,9 +225,10 @@ def accept_seq(host_key: str, seq: int, path: Path = DB_PATH) -> bool:
     ``is_replay`` check and the subsequent bump into ONE atomic operation so two
     concurrent pushes with the same seq can never both be accepted.
 
-    * Redis path (``ROVIMEN_REDIS_URL`` set): a single atomic Lua check-and-bump,
+    * Redis path (``ROVIMEN_REDIS_URL`` set): a single atomic check-and-bump,
       no SQLite write at all — this is the whole point, removing the per-push
-      seq write from the single-writer SQLite DB.
+      seq write from the single-writer SQLite DB. A Redis error accepts the
+      push (see ``RedisStationStateBackend.seq_bump``).
     * SQLite path (unset): the check-and-bump runs inside one transaction on a
       ``BEGIN IMMEDIATE`` write lock, which serialises concurrent writers, so it
       is atomic there too. Behaviour is identical to the historical
@@ -197,98 +238,41 @@ def accept_seq(host_key: str, seq: int, path: Path = DB_PATH) -> bool:
     if backend is not None:
         return backend.seq_bump(host_key, _KIND_SEQ, seq)
     ensure_schema(path)
-    with closing(_connect(path)) as con:
-        with con:
-            # BEGIN IMMEDIATE takes the write lock up front so the read below
-            # can't be undercut by a concurrent writer between check and bump.
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute(
-                "SELECT last_seq FROM station_state WHERE host_key=?", (host_key,)
-            ).fetchone()
-            current = int(row[0]) if row and row[0] is not None else 0
-            if seq <= current:
-                return False
-            _bump_seq(con, host_key, seq)
-    return True
+
+    def _write(con: sqlite3.Connection) -> bool:
+        # BEGIN IMMEDIATE takes the write lock up front so the read below
+        # can't be undercut by a concurrent writer between check and bump.
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute(
+            "SELECT last_seq FROM station_state WHERE host_key=?", (host_key,)
+        ).fetchone()
+        current = int(row[0]) if row and row[0] is not None else 0
+        if seq <= current:
+            return False
+        _bump_seq(con, host_key, seq)
+        return True
+
+    return _run_write(path, _write)
 
 
 def _bump_seq(con: sqlite3.Connection, host_key: str, seq: int) -> None:
     """Advance the SQLite ``last_seq`` to ``max(current, seq)`` inside an open
-    txn, ensuring the row exists. When the Redis seq backend is active this is a
-    no-op wrt the seq (Redis owns it), but callers still need the row to exist so
-    the last-value mirror UPDATE below has a target — hence :func:`_ensure_row`.
+    txn, creating the row if missing.
+
+    Only reached on the SQLite seq path (``ROVIMEN_REDIS_URL`` unset): accept_seq
+    and advance_seq both short-circuit to Redis when the seq backend is active,
+    so the shared SQLite DB is never written on the hot push path in that case.
     """
-    if _get_seq_backend() is None:
-        con.execute(
-            """
-            INSERT INTO station_state (host_key, last_seq, updated_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(host_key) DO UPDATE SET
-                last_seq = MAX(station_state.last_seq, excluded.last_seq),
-                updated_at = excluded.updated_at
-            """,
-            (host_key, seq, _now()),
-        )
-    else:
-        _ensure_row(con, host_key)
-
-
-def _ensure_row(con: sqlite3.Connection, host_key: str) -> None:
-    """Create the station_state row if missing without touching ``last_seq`` —
-    used on the Redis seq path so the mirror UPDATE has a row to write into."""
     con.execute(
-        """INSERT INTO station_state (host_key, updated_at)
-           VALUES (?, ?)
-           ON CONFLICT(host_key) DO NOTHING""",
-        (host_key, _now()),
+        """
+        INSERT INTO station_state (host_key, last_seq, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(host_key) DO UPDATE SET
+            last_seq = MAX(station_state.last_seq, excluded.last_seq),
+            updated_at = excluded.updated_at
+        """,
+        (host_key, seq, _now()),
     )
-
-
-def record_status(
-    host_key: str,
-    seq: int,
-    status: dict[str, Any],
-    sent_at: str | None = None,
-    path: Path = DB_PATH,
-) -> None:
-    """Persist last-known status (durable restart mirror of the cache).
-
-    Advances the SQLite ``last_seq`` only on the SQLite seq path; when Redis owns
-    the seq the bump already happened atomically in :func:`accept_seq`.
-    """
-    ensure_schema(path)
-    seen = sent_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with closing(_connect(path)) as con:
-        with con:
-            _bump_seq(con, host_key, seq)
-            con.execute(
-                """UPDATE station_state
-                   SET last_status=?, last_seen_at=?, updated_at=?
-                   WHERE host_key=?""",
-                (json.dumps(status, default=str), seen, _now(), host_key),
-            )
-
-
-def record_vitals(
-    host_key: str,
-    seq: int,
-    vitals: dict[str, Any],
-    sent_at: str | None = None,
-    path: Path = DB_PATH,
-) -> None:
-    """Persist last-known vitals (durable restart mirror). Seq handling matches
-    :func:`record_status`."""
-    ensure_schema(path)
-    seen = sent_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with closing(_connect(path)) as con:
-        with con:
-            _bump_seq(con, host_key, seq)
-            con.execute(
-                """UPDATE station_state
-                   SET last_vitals=?, last_seen_at=?, updated_at=?
-                   WHERE host_key=?""",
-                (json.dumps(vitals, default=str), seen, _now(), host_key),
-            )
 
 
 def advance_seq(host_key: str, seq: int, path: Path = DB_PATH) -> None:
@@ -304,29 +288,7 @@ def advance_seq(host_key: str, seq: int, path: Path = DB_PATH) -> None:
         backend.seq_bump(host_key, _KIND_SEQ, seq)
         return
     ensure_schema(path)
-    with closing(_connect(path)) as con:
-        with con:
-            _bump_seq(con, host_key, seq)
-
-
-def get_state(host_key: str, path: Path = DB_PATH) -> dict[str, Any] | None:
-    """Return the durable state row for ``host_key`` (decoded), or None."""
-    ensure_schema(path)
-    with closing(_connect(path, read_only=True)) as con:
-        con.row_factory = sqlite3.Row
-        row = con.execute(
-            "SELECT * FROM station_state WHERE host_key=?", (host_key,)
-        ).fetchone()
-    if row is None:
-        return None
-    out = dict(row)
-    for col in ("last_status", "last_vitals"):
-        if out.get(col):
-            try:
-                out[col] = json.loads(out[col])
-            except (ValueError, TypeError):
-                out[col] = None
-    return out
+    _run_write(path, lambda con: _bump_seq(con, host_key, seq))
 
 
 def upsert_media_pointers(
@@ -344,37 +306,60 @@ def upsert_media_pointers(
     if not pointers:
         return 0
     ensure_schema(path)
-    n = 0
-    with closing(_connect(path)) as con:
-        with con:
-            for p in pointers:
-                cam = p.get("cam")
-                date = p.get("date")
-                kind = p.get("kind")
-                filename = p.get("filename")
-                if not (cam and date and kind and filename):
-                    continue
-                extra = {
-                    k: v
-                    for k, v in p.items()
-                    if k not in ("cam", "date", "kind", "filename")
-                }
-                con.execute(
-                    """INSERT OR REPLACE INTO media_pointers
-                       (host_key, cam, date, kind, filename, extra, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        host_key,
-                        cam,
-                        date,
-                        kind,
-                        filename,
-                        json.dumps(extra, default=str) if extra else None,
-                        _now(),
-                    ),
-                )
-                n += 1
-    return n
+
+    def _write(con: sqlite3.Connection, batch: list[dict[str, Any]]) -> int:
+        n = 0
+        for p in batch:
+            cam = p.get("cam")
+            date = p.get("date")
+            kind = p.get("kind")
+            filename = p.get("filename")
+            if not (cam and date and kind and filename):
+                continue
+            extra = {
+                k: v
+                for k, v in p.items()
+                if k not in ("cam", "date", "kind", "filename")
+            }
+            # No-op for an unchanged pointer: stations re-send the whole clip
+            # window every 900 s, so most rows already match; INSERT OR
+            # REPLACE rewrote them all (and their two indexes) regardless.
+            # ``updated_at`` therefore means "last time this pointer CHANGED",
+            # not "last time the station mentioned it" — same contract as
+            # night_sky.updated. Nothing reads it as a liveness signal.
+            con.execute(
+                """INSERT INTO media_pointers
+                   (host_key, cam, date, kind, filename, extra, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(cam, date, kind, filename) DO UPDATE SET
+                     host_key = excluded.host_key,
+                     extra = excluded.extra,
+                     updated_at = excluded.updated_at
+                   WHERE media_pointers.host_key IS NOT excluded.host_key
+                      OR media_pointers.extra IS NOT excluded.extra""",
+                (
+                    host_key,
+                    cam,
+                    date,
+                    kind,
+                    filename,
+                    json.dumps(extra, default=str) if extra else None,
+                    _now(),
+                ),
+            )
+            n += 1
+        return n
+
+    # Bounded transactions, like detection_db._run_write_chunked: one media
+    # push can carry up to 3 x 5000 pointers, and a single transaction of that
+    # size held the shared write lock past every other writer's busy_timeout.
+    total = 0
+    for i, start in enumerate(range(0, len(pointers), _POINTER_CHUNK_ROWS)):
+        if i:
+            time.sleep(0.02)
+        chunk = pointers[start:start + _POINTER_CHUNK_ROWS]
+        total += _run_write(path, lambda con, chunk=chunk: _write(con, chunk))
+    return total
 
 
 def get_media_pointers(

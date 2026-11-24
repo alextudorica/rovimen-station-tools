@@ -21,12 +21,13 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           # Accept an optional ALL-CAPS marker like "URGENT:" or "WIP:" before
-          # the conventional-commit type. Type list mirrors the previous
-          # amannn/action-semantic-pull-request config.
+          # the conventional-commit type, and an optional "!" breaking-change
+          # marker after the type/scope (conventional-commits spec). Type list
+          # mirrors the previous amannn/action-semantic-pull-request config.
           # Pattern is stored in a variable because bash =~ doesn't accept
           # literal parens inside the conditional expression — only via a
           # variable expansion.
-          pattern='^([A-Z]{2,}:[[:space:]]*)?(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?:[[:space:]]+.+'
+          pattern='^([A-Z]{2,}:[[:space:]]*)?(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?!?:[[:space:]]+.+'
           if [[ "$PR_TITLE" =~ $pattern ]]; then
             echo "OK: $PR_TITLE"
           else

@@ -1,4 +1,4 @@
-"""Tests for station API PATCH /api/settings validation — P2 #14.
+"""Tests for the deep merge behind PATCH /api/settings (config_patch.deep_merge) — P2 #14.
 
 P2 #14: The PATCH endpoint does no validation on the incoming payload.
         Arbitrary keys can be injected into config.json.
@@ -6,21 +6,9 @@ P2 #14: The PATCH endpoint does no validation on the incoming payload.
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
-from pathlib import Path
 
-import pytest
-
-
-def _deep_merge(base: dict, override: dict) -> dict:
-    """Replicate the _deep_merge logic from station_api.py."""
-    for key, val in override.items():
-        if isinstance(val, dict) and isinstance(base.get(key), dict):
-            _deep_merge(base[key], val)
-        else:
-            base[key] = val
-    return base
+from config_patch import deep_merge as _deep_merge
 
 
 class TestDeepMerge:

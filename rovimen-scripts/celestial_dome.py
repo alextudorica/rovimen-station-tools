@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Project per-station camera stacks onto a single celestial hemisphere.
 
-Standalone prototype for the planned dashboard celestial-sphere widget. Reads
+The one dome renderer: stations import it (``sky_dome_render.py``), and the
+deploy copies this file next to the dashboard modules on the VPS for the
+fallback dome and the dome timelapse (``dashboard/routes/sky_dome.py``). Reads
 each camera's RMS platepar to map every output dome pixel back to a camera
 pixel, samples the latest stack image, and blends overlapping FOVs. Draws
 cardinal-point labels and per-camera FOV outlines on top.
@@ -11,19 +13,12 @@ rotation_from_horiz from the platepar. No radial-distortion polynomial — for
 ~90 deg FOV cameras the corner deflection is only a couple of pixels, which is
 below one dome-pixel on a 1600 px output. Distortion correction is a clean
 drop-in if the visual is later judged not sharp enough.
-
-Usage:
-    uv run python tools/celestial_dome.py --station gmnro04 \\
-        --out plots_review/felician_dome.png
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import logging
 import math
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,9 +29,44 @@ DOME_PX = 1600
 HORIZON_FRAC = 0.93  # outer circle radius / half-image, leaves margin for labels
 BACKGROUND_RGB = (5, 5, 16)
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUT = REPO_ROOT / "plots_review" / "celestial_dome.png"
 
-log = logging.getLogger("celestial_dome")
+
+# ── Station-rendered dome upload contract ────────────────────────────────
+#
+# The dome is composited per station (multi-camera), but the ingest byte-plane
+# only accepts blobs under <cam>/<date>/<subdir> with subdir in a fixed
+# whitelist (see dashboard/ingest_api.py: meteors/stacks/timelapse/rms). So a
+# station uploads its rendered dome under its *primary* camera's night tree
+# using sentinel filenames the dashboard knows to look for. Both the station
+# renderer (rovimen-scripts/sky_dome_render.py) and the dashboard serve path
+# (dashboard/routes/sky_dome.py) import these helpers so the location can never
+# drift between producer and consumer.
+#
+# Sentinel names deliberately do NOT match ingest_api's media-pointer patterns
+# (``*_color.mkv`` / ``*_timelapse.mp4`` / ``*_night_stack.webp``) so an
+# uploaded dome writes bytes only and never surfaces as a normal clip/timelapse.
+
+STATION_DOME_PNG_SUBDIR = "stacks"
+STATION_DOME_TIMELAPSE_SUBDIR = "timelapse"
+STATION_DOME_TIMELAPSE_NAME = "rovimen_sky_dome.mp4"
+
+
+def station_dome_primary_cam(cam_codes: list[str]) -> str | None:
+    """Deterministic primary camera for a station's dome upload/serve path.
+
+    Lexicographically smallest camera code, so producer and consumer agree
+    regardless of config ordering as long as they share the same camera set.
+    Returns None when the station has no cameras.
+    """
+    valid = sorted(c for c in cam_codes if c)
+    return valid[0] if valid else None
+
+
+def station_dome_png_name(variant: str = "stack", overlay: bool = False) -> str:
+    """Sentinel filename for a station-uploaded dome PNG of this variant."""
+    suffix = "_overlay" if overlay else ""
+    stem = "rovimen_sky_dome" if variant == "stack" else f"rovimen_sky_dome_{variant}"
+    return f"{stem}{suffix}.png"
 
 
 @dataclass
@@ -235,56 +265,10 @@ def sample_image_bilinear(img: np.ndarray, px: np.ndarray, py: np.ndarray) -> np
 def render_dome(
     cameras: list[tuple[Plate, np.ndarray]], dome_px: int = DOME_PX
 ) -> Image.Image:
-    canvas = np.zeros((dome_px, dome_px, 3), dtype=np.float32)
-    weight = np.zeros((dome_px, dome_px), dtype=np.float32)
-
-    ys, xs = np.indices((dome_px, dome_px))
-    alt_grid, az_grid = dome_xy_to_altaz(xs.astype(np.float32), ys.astype(np.float32), dome_px)
-
-    horizon_r = (dome_px / 2.0) * HORIZON_FRAC
-    dome_mask = ((xs - dome_px / 2.0) ** 2 + (ys - dome_px / 2.0) ** 2) <= horizon_r**2
-
-    for plate, image in cameras:
-        px_arr, py_arr, in_bounds = altaz_to_pixel(alt_grid, az_grid, plate)
-        valid = in_bounds & dome_mask
-        if not valid.any():
-            continue
-
-        if image.ndim == 2:
-            img3 = np.stack([image, image, image], axis=-1)
-        else:
-            img3 = image
-        sampled = sample_image_bilinear(img3.astype(np.float32), px_arr, py_arr)
-
-        # Soft blend weight: 1 at FOV centre, fades to 0 at the half-diagonal FOV.
-        # Lets overlapping cameras feather into each other rather than hard-edging.
-        rho_diag = math.hypot(plate.fov_h / 2.0, plate.fov_v / 2.0)
-        alt_c = math.radians(plate.alt_centre)
-        az_c = math.radians(plate.az_centre)
-        a = np.radians(alt_grid)
-        cos_rho = np.sin(a) * math.sin(alt_c) + np.cos(a) * math.cos(alt_c) * np.cos(
-            np.radians(az_grid) - az_c
-        )
-        cos_rho = np.clip(cos_rho, -1.0, 1.0)
-        rho = np.degrees(np.arccos(cos_rho))
-        w = np.clip(1.0 - (rho / rho_diag) ** 2, 0.0, 1.0)
-        w = np.where(valid, w, 0.0).astype(np.float32)
-
-        canvas += sampled * w[..., None]
-        weight += w
-
-    nonzero = weight > 1e-6
-    canvas[nonzero] = canvas[nonzero] / weight[nonzero, None]
-
-    # Fill empty dome area (gaps between cameras, sky below cameras) with background
-    bg = np.array(BACKGROUND_RGB, dtype=np.float32)
-    canvas[~nonzero] = bg
-
-    # Outside the dome circle: solid background
-    canvas[~dome_mask] = bg
-    canvas = np.clip(canvas, 0, 255).astype(np.uint8)
-
-    return Image.fromarray(canvas)
+    """Blend each camera's (already normalised) image onto the dome."""
+    return DomeMaps([plate for plate, _ in cameras], dome_px=dome_px).render(
+        [image for _, image in cameras]
+    )
 
 
 _FONT_CANDIDATES = [
@@ -307,16 +291,6 @@ def _font(size: int) -> ImageFont.ImageFont:
         except OSError:
             continue
     return ImageFont.load_default()
-
-
-def draw_title(img: Image.Image, title: str, dome_px: int = DOME_PX) -> None:
-    """Legacy title at bottom-left. Kept for CLI use; dashboard calls
-    draw_metadata() instead."""
-    draw = ImageDraw.Draw(img, "RGBA")
-    font = _font(26)
-    bbox = draw.textbbox((0, 0), title, font=font)
-    th = bbox[3] - bbox[1]
-    draw.text((22, dome_px - th - 22), title, fill=(230, 230, 245, 240), font=font)
 
 
 def draw_metadata(
@@ -491,42 +465,55 @@ def draw_timelapse_branding(
     pad = 16
 
     # ── Logo loading ─────────────────────────────────────────────────────────
+    # The ROVIMEN logo leads; the operator logo is a small credit under it, the
+    # same hierarchy as the clip bar. Text "ROVIMEN" only if the asset is missing.
     logo_img: "Image.Image | None" = None
     if logo_path is not None:
         try:
             logo_img = Image.open(logo_path).convert("RGBA")
-            logo_h = 52
+            logo_h = 18
             logo_w = int(logo_img.width * logo_h / logo_img.height)
+            if logo_w > 180:  # wide wordmarks: cap the width instead
+                logo_w = 180
+                logo_h = max(8, int(logo_img.height * logo_w / logo_img.width))
             logo_img = logo_img.resize((logo_w, logo_h), Image.LANCZOS)
         except Exception:
             logo_img = None
+    mark_img: "Image.Image | None" = None
+    try:
+        mark_img = Image.open(Path(__file__).resolve().parent / "assets" / "rovimen_mark.png").convert("RGBA")
+        mark_h = 64
+        mark_img = mark_img.resize((int(mark_img.width * mark_h / mark_img.height), mark_h), Image.LANCZOS)
+    except Exception:
+        mark_img = None
 
-    # ── Bottom-left: logo + "ROVIMEN" ────────────────────────────────────────
+    # ── Bottom-left: ROVIMEN logo over the operator logo ─────────────────────
     font_brand = _font(30)
     brand_text = "ROVIMEN"
-    b_bbox = draw.textbbox((0, 0), brand_text, font=font_brand)
-    bw = b_bbox[2] - b_bbox[0]
-    bh = b_bbox[3] - b_bbox[1]
-
-    logo_w_bl = logo_img.width if logo_img else 0
-    logo_h_bl = logo_img.height if logo_img else 0
+    if mark_img:
+        bw, bh = mark_img.width, mark_img.height
+    else:
+        b_bbox = draw.textbbox((0, 0), brand_text, font=font_brand)
+        bw = b_bbox[2] - b_bbox[0]
+        bh = b_bbox[3] - b_bbox[1]
     gap = 10 if logo_img else 0
-    total_w = logo_w_bl + gap + bw
-    total_h = max(logo_h_bl, bh)
+    total_w = max(bw, logo_img.width if logo_img else 0)
+    total_h = bh + gap + (logo_img.height if logo_img else 0)
 
     box_x = pad
     box_y = dome_px - total_h - pad * 2
     draw.rounded_rectangle(
-        [box_x - 8, box_y - 8, box_x + total_w + 8, box_y + total_h + 8],
+        [box_x - 10, box_y - 8, box_x + total_w + 10, box_y + total_h + 8],
         radius=8,
         fill=(0, 0, 0, 150),
     )
+    if mark_img:
+        img.paste(mark_img, (box_x + (total_w - bw) // 2, box_y), mark_img)
+    else:
+        draw.text((box_x + (total_w - bw) // 2, box_y), brand_text,
+                  fill=(230, 230, 245, 240), font=font_brand)
     if logo_img:
-        logo_y = box_y + (total_h - logo_h_bl) // 2
-        img.paste(logo_img, (box_x, logo_y), logo_img)
-    text_y = box_y + (total_h - bh) // 2
-    draw.text((box_x + logo_w_bl + gap, text_y), brand_text,
-              fill=(230, 230, 245, 240), font=font_brand)
+        img.paste(logo_img, (box_x + (total_w - logo_img.width) // 2, box_y + bh + gap), logo_img)
 
     # ── Bottom-right: date/time ───────────────────────────────────────────────
     if timestamp:
@@ -715,64 +702,6 @@ def render_timelapse_batch(
 
     return results  # type: ignore[return-value]
 
-# Station registry
-#
-# Loaded from celestial_dome_stations.json (repo root): one entry per station
-# with a display label, site coordinates, and per-camera platepar + stack
-# image paths relative to the repo root. The registry describes a concrete
-# fleet, so it is gitignored — copy celestial_dome_stations.example.json and
-# edit it for your own stations.
-# ----------------------------------------------------------------------------
-
-REGISTRY_PATH = REPO_ROOT / "celestial_dome_stations.json"
-
-
-def _load_stations() -> dict[str, dict]:
-    if not REGISTRY_PATH.exists():
-        log.warning(
-            "station registry %s not found — copy "
-            "celestial_dome_stations.example.json and describe your fleet",
-            REGISTRY_PATH,
-        )
-        return {}
-    with open(REGISTRY_PATH, encoding="utf-8") as f:
-        return json.load(f)
-
-
-STATIONS: dict[str, dict] = _load_stations()
-
-
-def load_cameras(cfg: dict) -> tuple[list[tuple[Plate, np.ndarray]], list[Plate]]:
-    cameras = []
-    plates = []
-    for cam in cfg["cameras"]:
-        pp_path = REPO_ROOT / cam["platepar"]
-        img_path = REPO_ROOT / cam["image"]
-        if not pp_path.exists():
-            log.warning("platepar missing for %s: %s", cam["code"], pp_path)
-            continue
-        if not img_path.exists():
-            log.warning("image missing for %s: %s", cam["code"], img_path)
-            continue
-        plate = Plate.load(pp_path, cam["code"])
-        img = np.asarray(Image.open(img_path).convert("RGB"))
-        if (img.shape[1], img.shape[0]) != (plate.x_res, plate.y_res):
-            img = np.asarray(
-                Image.fromarray(img).resize((plate.x_res, plate.y_res), Image.LANCZOS)
-            )
-        log.info(
-            "  %-7s alt=%5.1f° az=%6.2f° FOV=%4.1f°x%4.1f° rot_horiz=%6.1f°",
-            plate.code,
-            plate.alt_centre,
-            plate.az_centre,
-            plate.fov_h,
-            plate.fov_v,
-            plate.rotation_from_horiz,
-        )
-        cameras.append((plate, img))
-        plates.append(plate)
-    return cameras, plates
-
 
 def normalize_camera_image(img: np.ndarray, plate: Plate) -> np.ndarray:
     """Resize and optionally de-rotate ``img`` to match the platepar frame.
@@ -798,7 +727,6 @@ def normalize_camera_image(img: np.ndarray, plate: Plate) -> np.ndarray:
 def render_station_dome(
     plates_with_images: list[tuple[Plate, np.ndarray]],
     *,
-    title: str | None = None,
     station: str | None = None,
     label: str | None = None,
     lat: float | None = None,
@@ -809,14 +737,15 @@ def render_station_dome(
 ) -> Image.Image:
     """Assemble a celestial-dome image from per-camera (plate, image) pairs.
 
-    Public entry point used by both the CLI and the dashboard
-    ``/api/sky_dome/<host>.png`` route. Caller is responsible for fetching the
+    Public entry point used by the station renderer (``sky_dome_render.py``)
+    and the dashboard's fallback ``/api/sky_dome/<host>.png`` render. Caller is
+    responsible for fetching the
     platepars and stack images; this function just reprojects, blends, and
     optionally draws overlays.
 
     When ``overlay`` is False (the default for the dashboard), the image is a
     clean mosaic with no annotations. When True, cardinal labels, FOV outlines,
-    camera legend, and metadata/title text are drawn on top.
+    camera legend, and the station metadata block are drawn on top.
     """
     normalized: list[tuple[Plate, np.ndarray]] = [
         (plate, normalize_camera_image(img, plate)) for plate, img in plates_with_images
@@ -827,62 +756,4 @@ def render_station_dome(
         if station:
             draw_metadata(dome, station, label or "", lat=lat, lon=lon,
                           timestamp=timestamp, dome_px=dome_px)
-        elif title:
-            draw_title(dome, title, dome_px=dome_px)
     return dome
-
-
-def render_station(key: str, cfg: dict, out: Path, dome_px: int, overlay: bool = True) -> bool:
-    log.info("station: %s — %s (lat=%.4f lon=%.4f)", key, cfg["label"], cfg["lat"], cfg["lon"])
-    cameras, _plates = load_cameras(cfg)
-    if not cameras:
-        log.warning("no valid cameras for %s; skipping", key)
-        return False
-    log.info("rendering dome (%d × %d px)...", dome_px, dome_px)
-    dome = render_station_dome(
-        cameras, title=f"{key} — {cfg['label']}", dome_px=dome_px, overlay=overlay,
-    )
-    out.parent.mkdir(parents=True, exist_ok=True)
-    dome.save(out)
-    log.info("wrote %s", out)
-    return True
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--station", default="gmnro04",
-                    help="dashboard station key, or 'all' to render every configured station")
-    ap.add_argument("--out", default=str(DEFAULT_OUT),
-                    help="output PNG path (ignored with --station all)")
-    ap.add_argument("--out-dir", default=str(REPO_ROOT / "plots_review"),
-                    help="output directory when --station all")
-    ap.add_argument("--dome-px", type=int, default=DOME_PX, help="dome image side length in pixels")
-    ap.add_argument("--overlay", action="store_true", default=True,
-                    help="draw cardinal labels, FOV outlines, legend, and metadata (default)")
-    ap.add_argument("--no-overlay", dest="overlay", action="store_false",
-                    help="clean mosaic without annotations")
-    args = ap.parse_args()
-
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    if args.station == "all":
-        out_dir = Path(args.out_dir)
-        ok = 0
-        for key, cfg in STATIONS.items():
-            out_path = out_dir / f"{key}_celestial_dome.png"
-            if render_station(key, cfg, out_path, args.dome_px, overlay=args.overlay):
-                ok += 1
-        log.info("done: %d/%d stations rendered into %s", ok, len(STATIONS), out_dir)
-        return 0 if ok else 2
-
-    cfg = STATIONS.get(args.station)
-    if cfg is None:
-        log.error("unknown station %s; known: %s", args.station, sorted(STATIONS) + ["all"])
-        return 1
-    if not render_station(args.station, cfg, Path(args.out), args.dome_px, overlay=args.overlay):
-        return 2
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

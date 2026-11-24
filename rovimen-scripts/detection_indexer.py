@@ -8,7 +8,7 @@ files, parses them, and upserts results into a local SQLite index at
 The station API reads this DB to serve /api/detections-index, which the
 VPS polls every few minutes instead of scanning the storagebox directly.
 
-The parse+join here mirrors dashboard/rms_parse.parse_session_detections so a
+The parse+join (rovimen_rms.session_detections) mirrors dashboard/rms_parse.parse_session_detections so a
 detection gets the SAME identity (real FF filename + meteor number) whether it
 is indexed here or by the VPS bootstrap — that is what stops the two index
 sources from double-counting. The two implementations are kept in lockstep by
@@ -20,16 +20,45 @@ Run as: detection-indexer.service (systemd)
 
 from __future__ import annotations
 
+import bisect
 import json
 import logging
-import math
+import queue
 import re
 import signal
 import sqlite3
 import sys
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import ff_thumbs
+import rovimen_config
+import rovimen_night
+import rovimen_rms
+
+# The FF-thumbnail live push rides the same HTTPS ingest byte plane as
+# archive_upload / rovimen_pusher. Guarded so the indexer still runs (indexing
+# only, no push) on partial installs or in tests without these modules.
+try:
+    from ingest_blob import post_blob
+except Exception:  # pragma: no cover - defensive
+    post_blob = None  # type: ignore
+
+try:
+    import flags_manager
+except Exception:  # pragma: no cover - defensive
+    flags_manager = None  # type: ignore
+
+try:
+    from rovimen_pusher import (
+        resolve_base_url as _resolve_base_url,
+        resolve_host_key as _resolve_host_key,
+        resolve_ingest_key as _resolve_ingest_key,
+    )
+except Exception:  # pragma: no cover - defensive
+    _resolve_base_url = _resolve_host_key = _resolve_ingest_key = None  # type: ignore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,13 +68,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 BASE = Path.home()
-CONFIG_PATH = next(
-    (p for p in [
-        BASE / "rovimen_scripts" / "config.json",
-        BASE / "meteor_detector" / "config.json",
-    ] if p.exists()),
-    BASE / "rovimen_scripts" / "config.json",
-)
+CONFIG_PATH = rovimen_config.config_path()
 DB_PATH = BASE / "rovimen_scripts" / "detections_index.db"
 
 # Scan interval for the hot window (recent sessions that may still change)
@@ -64,31 +87,25 @@ COLS = (
     "angular_velocity", "num_segments", "fps",
     "azim_beg", "elev_beg", "azim_end", "elev_end",
     "chunk_file",
+    # The meteor's first position (RMS pixels) and the measured time from the
+    # first frame of chunk_file to the meteor's first frame (clip_timing).
+    "x_beg", "y_beg", "clip_offset_s",
 )
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
 def _load_config() -> dict:
-    try:
-        return json.loads(CONFIG_PATH.read_text())
-    except Exception:
-        return {}
+    return rovimen_config.load_config(CONFIG_PATH)
 
 
 # ── RMS session discovery (mirrors station_api logic, no Flask dependency) ────
 
-_ARC_RE = re.compile(r"^([A-Z0-9]+)_(\d{8})_(\d{6})_")
-_FF_RE = re.compile(r"^FF_([A-Z0-9]+)_(\d{8})_(\d{6})_(\d{3})_")
-_JOIN_TOLERANCE_S = 2.0
+_ARC_RE = rovimen_night.SESSION_DIR_RE
+_FF_RE = rovimen_night.FF_NAME_RE
+_JOIN_TOLERANCE_S = rovimen_rms.JOIN_TOLERANCE_S
 
-
-def _night_date(date_str: str, time_str: str) -> str:
-    if int(time_str[:2]) < 12:
-        d = (datetime(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:]),
-                      tzinfo=timezone.utc) - timedelta(days=1))
-        return d.strftime("%Y%m%d")
-    return date_str
+_night_date = rovimen_night.night_of
 
 
 def _rms_camera_dirs(cfg: dict) -> list[tuple[str, Path]]:
@@ -138,228 +155,14 @@ def _all_sessions(rms_dir: Path, since_date: str | None = None) -> list[tuple[st
     return sessions
 
 
-# ── Parsers + join (mirror of dashboard/rms_parse) ────────────────────────────
+# ── Parsers + join (shared: rovimen_rms, mirrored by dashboard/rms_parse) ────
 
-def _ff_block_start(ff_file: str) -> datetime | None:
-    m = _FF_RE.match(ff_file)
-    if not m:
-        return None
-    date_s, time_s, ms_s = m.group(2), m.group(3), m.group(4)
-    try:
-        return datetime(
-            int(date_s[:4]), int(date_s[4:6]), int(date_s[6:8]),
-            int(time_s[:2]), int(time_s[2:4]), int(time_s[4:6]),
-            int(ms_s) * 1000,
-        )
-    except ValueError:
-        return None
-
-
-def _opt(s: str) -> float | None:
-    s = s.strip()
-    return None if s in ("None", "") else float(s)
-
-
-def _radiant_rows(path: Path) -> list[dict]:
-    results: list[dict] = []
-    try:
-        text = path.read_text(errors="ignore")
-    except OSError:
-        return results
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 17:
-            continue
-        try:
-            begin_dt = datetime.strptime(parts[0].strip(), "%Y%m%d %H:%M:%S.%f")
-        except ValueError:
-            try:
-                begin_dt = datetime.strptime(parts[0].strip().split(".")[0], "%Y%m%d %H:%M:%S")
-            except ValueError:
-                continue
-        try:
-            shower = parts[3].strip() or "SPO"
-            if shower == "...":
-                shower = "SPO"
-            results.append({
-                "_begin_dt": begin_dt,
-                "time_utc": begin_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-                "jd": float(parts[1]),
-                "solar_lon": _opt(parts[2]),
-                "shower": shower,
-                "ra_beg": float(parts[4]),
-                "dec_beg": float(parts[5]),
-                "ra_end": float(parts[6]),
-                "dec_end": float(parts[7]),
-                "ra_radiant": _opt(parts[8]),
-                "dec_radiant": _opt(parts[9]),
-                "mag_apparent": _opt(parts[14]),
-                "mag_absolute": _opt(parts[15]),
-                "radiant_elev": _opt(parts[16]),
-            })
-        except (ValueError, IndexError):
-            continue
-    return results
-
-
-def _ftp_rows(path: Path) -> list[dict]:
-    results: list[dict] = []
-    try:
-        lines = path.read_text(errors="ignore").splitlines()
-    except OSError:
-        return results
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if line.startswith("FF_") and line.endswith(".fits"):
-            ff_file = line
-            i += 1
-            if i < len(lines) and "Recalibrated" in lines[i]:
-                i += 1
-            if i >= len(lines):
-                break
-            header = lines[i].strip().split()
-            if len(header) < 4:
-                i += 1
-                continue
-            try:
-                meteor_no = int(header[1])
-                num_segments = int(header[2])
-                fps = float(header[3])
-            except (ValueError, IndexError):
-                i += 1
-                continue
-            i += 1
-            frames: list[dict] = []
-            while i < len(lines):
-                dl = lines[i].strip()
-                if not dl or dl.startswith("-") or dl.startswith("FF_"):
-                    break
-                fp = dl.split()
-                if len(fp) >= 9:
-                    try:
-                        frames.append({
-                            "frame": float(fp[0]),
-                            "ra": float(fp[3]), "dec": float(fp[4]),
-                            "azim": float(fp[5]), "elev": float(fp[6]),
-                            "mag": float(fp[8]),
-                        })
-                    except ValueError:
-                        break
-                else:
-                    break
-                i += 1
-            if frames:
-                duration_s = (frames[-1]["frame"] - frames[0]["frame"]) / fps if fps > 0 else 0.0
-                ang_vel = None
-                if duration_s > 0 and len(frames) >= 2:
-                    ra0, dec0 = math.radians(frames[0]["ra"]), math.radians(frames[0]["dec"])
-                    ra1, dec1 = math.radians(frames[-1]["ra"]), math.radians(frames[-1]["dec"])
-                    dlat, dlon = dec1 - dec0, ra1 - ra0
-                    a = (math.sin(dlat / 2) ** 2
-                         + math.cos(dec0) * math.cos(dec1) * math.sin(dlon / 2) ** 2)
-                    ang_dist = math.degrees(2 * math.asin(min(1.0, math.sqrt(a))))
-                    ang_vel = round(ang_dist / duration_s, 2)
-                begin_dt = _ff_block_start(ff_file)
-                if begin_dt is not None and fps > 0:
-                    begin_dt = begin_dt + timedelta(seconds=frames[0]["frame"] / fps)
-                results.append({
-                    "_begin_dt": begin_dt,
-                    "ff_file": ff_file,
-                    "meteor_no": meteor_no,
-                    "duration_s": round(duration_s, 3),
-                    "angular_velocity": ang_vel,
-                    "num_segments": num_segments,
-                    "fps": fps,
-                    "peak_mag": min(f["mag"] for f in frames),
-                    "azim_beg": frames[0]["azim"],
-                    "elev_beg": frames[0]["elev"],
-                    "azim_end": frames[-1]["azim"],
-                    "elev_end": frames[-1]["elev"],
-                })
-            continue
-        i += 1
-    return results
-
-
-def _session_detections(session: Path) -> list[dict]:
-    ftp_by_key: dict[tuple[str, int], dict] = {}
-    for f in sorted(session.glob("FTPdetectinfo_*.txt")):
-        if "_unfiltered" in f.name or "_backup" in f.name:
-            continue
-        for row in _ftp_rows(f):
-            ftp_by_key[(row["ff_file"], row["meteor_no"])] = row
-    ftps = list(ftp_by_key.values())
-
-    radiants: list[dict] = []
-    for f in sorted(session.glob("*_radiants.txt")):
-        radiants.extend(_radiant_rows(f))
-
-    used = [False] * len(radiants)
-    rows: list[dict] = []
-    for ftp in ftps:
-        match: dict | None = None
-        if ftp["_begin_dt"] is not None:
-            best_idx, best_dt = -1, _JOIN_TOLERANCE_S + 1.0
-            for idx, rad in enumerate(radiants):
-                if used[idx]:
-                    continue
-                diff = abs((ftp["_begin_dt"] - rad["_begin_dt"]).total_seconds())
-                if diff < best_dt:
-                    best_dt, best_idx = diff, idx
-            if best_idx >= 0 and best_dt <= _JOIN_TOLERANCE_S:
-                used[best_idx] = True
-                match = radiants[best_idx]
-        rows.append(_merge_row(ftp, match))
-
-    for idx, rad in enumerate(radiants):
-        if not used[idx]:
-            rows.append(_radiant_only_row(rad))
-    return rows
-
-
-def _merge_row(ftp: dict, rad: dict | None) -> dict:
-    if rad is not None:
-        time_utc = rad.get("time_utc")
-        mag_apparent = rad.get("mag_apparent")
-    else:
-        bdt = ftp.get("_begin_dt")
-        time_utc = bdt.strftime("%Y-%m-%dT%H:%M:%S") if bdt is not None else None
-        mag_apparent = ftp.get("peak_mag")
-    rad = rad or {}
-    return {
-        "ff_file": ftp["ff_file"], "meteor_no": ftp["meteor_no"],
-        "time_utc": time_utc, "jd": rad.get("jd"), "solar_lon": rad.get("solar_lon"),
-        "shower": rad.get("shower"), "mag_apparent": mag_apparent,
-        "mag_absolute": rad.get("mag_absolute"), "duration_s": ftp.get("duration_s"),
-        "ra_beg": rad.get("ra_beg"), "dec_beg": rad.get("dec_beg"),
-        "ra_end": rad.get("ra_end"), "dec_end": rad.get("dec_end"),
-        "ra_radiant": rad.get("ra_radiant"), "dec_radiant": rad.get("dec_radiant"),
-        "radiant_elev": rad.get("radiant_elev"),
-        "angular_velocity": ftp.get("angular_velocity"),
-        "num_segments": ftp.get("num_segments"), "fps": ftp.get("fps"),
-        "azim_beg": ftp.get("azim_beg"), "elev_beg": ftp.get("elev_beg"),
-        "azim_end": ftp.get("azim_end"), "elev_end": ftp.get("elev_end"),
-    }
-
-
-def _radiant_only_row(rad: dict) -> dict:
-    bdt = rad["_begin_dt"]
-    return {
-        "ff_file": f"RAD_{bdt.strftime('%Y%m%d_%H%M%S_%f')}", "meteor_no": 1,
-        "time_utc": rad.get("time_utc"), "jd": rad.get("jd"), "solar_lon": rad.get("solar_lon"),
-        "shower": rad.get("shower"), "mag_apparent": rad.get("mag_apparent"),
-        "mag_absolute": rad.get("mag_absolute"), "duration_s": None,
-        "ra_beg": rad.get("ra_beg"), "dec_beg": rad.get("dec_beg"),
-        "ra_end": rad.get("ra_end"), "dec_end": rad.get("dec_end"),
-        "ra_radiant": rad.get("ra_radiant"), "dec_radiant": rad.get("dec_radiant"),
-        "radiant_elev": rad.get("radiant_elev"),
-        "angular_velocity": None, "num_segments": None, "fps": None,
-        "azim_beg": None, "elev_beg": None, "azim_end": None, "elev_end": None,
-    }
+_ff_block_start = rovimen_rms.ff_block_start
+_radiant_rows = rovimen_rms.radiant_rows
+_ftp_rows = rovimen_rms.ftp_rows
+_session_detections = rovimen_rms.session_detections
+_merge_row = rovimen_rms.merge_row
+_radiant_only_row = rovimen_rms.radiant_only_row
 
 
 # ── SQLite schema ─────────────────────────────────────────────────────────────
@@ -392,6 +195,10 @@ CREATE TABLE IF NOT EXISTS detections (
     azim_end        REAL,
     elev_end        REAL,
     chunk_file      TEXT,
+    x_beg           REAL,
+    y_beg           REAL,
+    clip_offset_s   REAL,
+    clip_offset_file TEXT,
     PRIMARY KEY (cam, date, ff_file, meteor_no)
 );
 
@@ -402,26 +209,217 @@ CREATE TABLE IF NOT EXISTS indexed_sessions (
     indexed_at      REAL
 );
 
+-- Per-night sky quality derived from CALSTARS star counts (one row per
+-- cam/night). Served on /api/detections-index so the VPS can tell a cloudy
+-- night (few stars, ~0 detections) apart from a broken feed. calstars_mtime
+-- gates the recompute: only rebuild the row when the newest CALSTARS changed.
+CREATE TABLE IF NOT EXISTS night_sky (
+    cam            TEXT NOT NULL,
+    night          TEXT NOT NULL,
+    n_ff           INTEGER,
+    median_stars   REAL,
+    cloud_fraction REAL,
+    calstars_mtime REAL,
+    updated        TEXT,
+    PRIMARY KEY (cam, night)
+);
+
 CREATE INDEX IF NOT EXISTS idx_det_date    ON detections(date);
 CREATE INDEX IF NOT EXISTS idx_det_cam     ON detections(cam);
 CREATE INDEX IF NOT EXISTS idx_det_shower  ON detections(shower);
 CREATE INDEX IF NOT EXISTS idx_det_mag     ON detections(mag_apparent);
+
+-- Station-only bookkeeping (key/value): see _sync_rotation_offsets.
+CREATE TABLE IF NOT EXISTS indexer_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT
+);
 """
 
 # Bump when adding columns. _open_db() applies ALTER TABLE for any missing
 # columns detected via PRAGMA table_info, keeping the DB backward-compatible.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 # Version-keyed migrations: {version: [(table, col, col_def), ...]}
 _MIGRATIONS: dict[int, list[tuple[str, str, str]]] = {
     # Version 1 is the baseline (covered by CREATE TABLE above).
     2: [("detections", "chunk_file", "TEXT")],
+    # clip_offset_file is station-only: which clip clip_offset_s was measured
+    # in, so a splice written later (detection_lock) is measured again.
+    3: [("detections", "clip_offset_file", "TEXT")],
 }
 
+# Re-indexing a session (its files change all night) must keep the measured
+# clip offset: an upsert that updates every parsed column but clip_offset_s
+# (and the station-only clip_offset_file). A changed chunk_file still sends
+# the row back to _clip_offset_pass, which compares it to clip_offset_file.
+_KEY_COLS = ("cam", "date", "ff_file", "meteor_no")
+_MEASURED_COLS = ("clip_offset_s",)
 _INSERT_SQL = (
-    f"INSERT OR REPLACE INTO detections ({', '.join(COLS)}) "
-    f"VALUES ({', '.join(':' + c for c in COLS)})"
+    f"INSERT INTO detections ({', '.join(COLS)}) "
+    f"VALUES ({', '.join(':' + c for c in COLS)}) "
+    f"ON CONFLICT({', '.join(_KEY_COLS)}) DO UPDATE SET "
+    + ", ".join(f"{c}=excluded.{c}" for c in COLS
+                if c not in _KEY_COLS and c not in _MEASURED_COLS)
 )
+
+_NIGHT_SKY_INSERT_SQL = (
+    "INSERT OR REPLACE INTO night_sky "
+    "(cam, night, n_ff, median_stars, cloud_fraction, calstars_mtime, updated) "
+    "VALUES (:cam, :night, :n_ff, :median_stars, :cloud_fraction, "
+    ":calstars_mtime, :updated)"
+)
+
+
+# ── Per-night sky quality (CALSTARS star counts) ──────────────────────────────
+#
+# RMS writes one CALSTARS block per FF frame listing the stars it extracted.
+# On a clear night a wide-field FF holds tens of stars; when cloud rolls in the
+# count collapses toward zero. So per night:
+#   cloud_fraction = share of FF blocks whose star count is below a low
+#                    threshold, threshold = max(8, ff_min_stars // 3).
+# ff_min_stars is the RMS star-extraction floor (config key ``ff_min_stars``,
+# RMS default 40 → threshold 13). Dividing by three keeps the bar well under a
+# healthy frame's count so a merely hazy frame doesn't read as overcast, while
+# the floor of 8 stops a tiny/short FOV from tripping it on a clear night.
+#
+# A high cloud_fraction on a night with ~0 detections is the weather-vs-fault
+# discriminator: cloudy, not a dead station.
+
+_CLOUD_STAR_FLOOR = 8
+_FF_MIN_STARS_DEFAULT = 40  # RMS StarExtraction default
+
+
+def _cloud_star_threshold(cfg: dict) -> int:
+    """Low star-count threshold below which an FF frame counts as clouded."""
+    try:
+        ff_min = int(cfg.get("ff_min_stars", _FF_MIN_STARS_DEFAULT))
+    except (TypeError, ValueError):
+        ff_min = _FF_MIN_STARS_DEFAULT
+    return max(_CLOUD_STAR_FLOOR, ff_min // 3)
+
+
+_CALSTARS_FF_RE = re.compile(r"(FF_[A-Z0-9]+_\d{8}_\d{6}_\d{3}_\d+\.fits)")
+
+
+def _calstars_star_counts(path: Path) -> list[int]:
+    """Star count per FF block in a CALSTARS file.
+
+    Prefer RMS's own reader (authoritative); fall back to a format-tolerant
+    text parse (mirrors station_api._calstars_star_counts) so indexing works
+    on hosts without the RMS venv and in tests. Returns [] on any read error.
+
+    An empty result from the RMS reader is treated as a miss, not as an answer:
+    the reader skips a fixed-length header and yields nothing at all on a
+    readable CALSTARS whose header shape it does not recognise. Returning that
+    [] would skip the night_sky row and never try the text parse below, quietly
+    costing that station its weather-vs-fault signal.
+    """
+    try:
+        from RMS.Formats import CALSTARS  # noqa: PLC0415 (optional, venv-only)
+        calstars_list, _ = CALSTARS.readCALSTARS(str(path.parent), path.name)
+        counts_rms = [len(stars) for _ff, stars in calstars_list]
+        if counts_rms:
+            return counts_rms
+    except Exception:
+        pass
+    counts: dict[str, int] = {}
+    current: str | None = None
+    try:
+        text = path.read_text(errors="replace")
+    except OSError:
+        return []
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = _CALSTARS_FF_RE.search(line)
+        if m:
+            current = m.group(1)
+            counts.setdefault(current, 0)
+            continue
+        if current and line:
+            tokens = line.replace(",", " ").split()
+            try:
+                for tok in tokens:
+                    float(tok)
+            except ValueError:
+                continue
+            counts[current] += 1
+    return list(counts.values())
+
+
+def _median(values: list[int]) -> float:
+    """Median of a non-empty list. Caller guarantees non-empty."""
+    s = sorted(values)
+    n = len(s)
+    mid = n // 2
+    if n % 2:
+        return float(s[mid])
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
+def _newest_calstars(session: Path) -> Path | None:
+    """The most recently modified CALSTARS_*.txt in a session dir, or None."""
+    newest: Path | None = None
+    newest_mtime = -1.0
+    for f in session.glob("CALSTARS_*.txt"):
+        try:
+            m = f.stat().st_mtime
+        except OSError:
+            continue
+        if m > newest_mtime:
+            newest, newest_mtime = f, m
+    return newest
+
+
+def _compute_night_sky(counts: list[int], threshold: int) -> dict:
+    """Derive n_ff / median_stars / cloud_fraction from per-FF star counts."""
+    n_ff = len(counts)
+    below = sum(1 for c in counts if c < threshold)
+    return {
+        "n_ff": n_ff,
+        "median_stars": round(_median(counts), 2) if counts else None,
+        "cloud_fraction": round(below / n_ff, 4) if n_ff else None,
+    }
+
+
+def _index_night_sky(
+    con: sqlite3.Connection,
+    cam: str,
+    night: str,
+    session: Path,
+    cfg: dict,
+) -> None:
+    """Compute + upsert the per-night sky row from the newest CALSTARS.
+
+    Cheap and idempotent: skips the recompute when the newest CALSTARS mtime
+    matches the stored one. No CALSTARS in the session (older/partial night) →
+    silently skip, so it never blocks detection indexing.
+    """
+    calstars = _newest_calstars(session)
+    if calstars is None:
+        return
+    try:
+        mtime = calstars.stat().st_mtime
+    except OSError:
+        return
+    row = con.execute(
+        "SELECT calstars_mtime FROM night_sky WHERE cam=? AND night=?",
+        (cam, night),
+    ).fetchone()
+    if row and row[0] == mtime:
+        return  # unchanged since last compute
+    counts = _calstars_star_counts(calstars)
+    if not counts:
+        return  # unreadable / empty CALSTARS — leave any prior row intact
+    metrics = _compute_night_sky(counts, _cloud_star_threshold(cfg))
+    con.execute(_NIGHT_SKY_INSERT_SQL, {
+        "cam": cam, "night": night,
+        "n_ff": metrics["n_ff"],
+        "median_stars": metrics["median_stars"],
+        "cloud_fraction": metrics["cloud_fraction"],
+        "calstars_mtime": mtime,
+        "updated": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
 
 
 def _apply_schema_migrations(con: sqlite3.Connection) -> None:
@@ -450,6 +448,10 @@ def _apply_schema_migrations(con: sqlite3.Connection) -> None:
                         version, table, col, col_def,
                     )
                     con.execute(f"ALTER TABLE {table} ADD COLUMN {col} {col_def}")
+        if on_disk < 3:
+            # Re-index every session once: rows written before v3 carry
+            # whole-second time_utc and no first-frame position.
+            con.execute("DELETE FROM indexed_sessions")
         con.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
         con.commit()
         logger.info("detection_indexer: schema at version %d", _SCHEMA_VERSION)
@@ -468,50 +470,80 @@ def _open_db() -> sqlite3.Connection:
 
 # ── Chunk lookup ─────────────────────────────────────────────────────────────
 
-_CHUNK_RE = re.compile(r'^([A-Z0-9]+)_(\d{8})_(\d{6})_color\.mkv$')
+_CHUNK_RE = rovimen_night.CHUNK_RE
+# A boundary splice written by detection_lock._stitch_clips, e.g.
+# RO000P_20260724_002833_002853_color.mkv — Tstart and Tend, not one start.
+_STITCHED_CHUNK_RE = rovimen_night.STITCHED_CHUNK_RE
 _CHUNK_DURATION_S = 20
+# Sanity bound on a splice's Tstart..Tend so a malformed pair can't swallow a
+# detection minutes away. Also the walk-back window in _find_chunk.
+_STITCH_SPAN_MAX_S = 600
 
 
 def _capture_base(cfg: dict) -> Path:
-    return Path(
-        cfg.get('videocapture_path') or
-        cfg.get('color_video_path') or
-        cfg.get('reenc_path') or
-        cfg.get('color_capture_path') or
-        cfg.get('ssd_color_path') or
-        str(BASE / 'color_capture')
-    )
+    return rovimen_config.capture_root(cfg)
 
 
-def _build_chunk_index(cam: str, night: str, cfg: dict) -> list[tuple[datetime, str]]:
-    """Return sorted [(chunk_start_utc, filename)] for cam/night."""
+def _chunk_dt(ds: str, ts: str, cfg: dict | None = None) -> datetime | None:
+    """A YYYYMMDD + HHMMSS filename stamp as aware UTC, or None if malformed.
+
+    Honours ``chunk_names_utc: false`` (pre-#851 local-named chunks) like
+    station_api; on every current station names are UTC.
+    """
+    try:
+        return rovimen_night.chunk_utc_dt(ds, ts, cfg).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _build_chunk_index(
+    cam: str, night: str, cfg: dict,
+) -> list[tuple[datetime, datetime, str]]:
+    """Return sorted [(start_utc, end_utc, filename)] for cam/night.
+
+    Covers both the raw 20 s capture chunks and the boundary splices
+    detection_lock._stitch_clips writes into the same directory. A meteor near
+    a chunk edge is locked and uploaded as the splice while the raw chunks stay
+    unlocked, so only the splice name resolves against the archive later.
+    """
     cap_dir = _capture_base(cfg) / cam / night
     if not cap_dir.exists():
         return []
-    index: list[tuple[datetime, str]] = []
+    index: list[tuple[datetime, datetime, str]] = []
     for f in cap_dir.glob('*_color.mkv'):
-        m = _CHUNK_RE.match(f.name)
-        if not m:
-            continue
-        ds, ts = m.group(2), m.group(3)
-        try:
-            chunk_dt = datetime(
-                int(ds[:4]), int(ds[4:6]), int(ds[6:8]),
-                int(ts[:2]), int(ts[2:4]), int(ts[4:6]),
-                tzinfo=timezone.utc,
-            )
-        except ValueError:
-            continue
-        index.append((chunk_dt, f.name))
+        sm = _STITCHED_CHUNK_RE.match(f.name)
+        if sm:
+            start = _chunk_dt(sm.group(2), sm.group(3), cfg)
+            end = _chunk_dt(sm.group(2), sm.group(4), cfg)
+            if start is None or end is None:
+                continue
+            if end < start:  # the splice crosses midnight
+                end += timedelta(days=1)
+            if not 0 < (end - start).total_seconds() <= _STITCH_SPAN_MAX_S:
+                continue
+        else:
+            m = _CHUNK_RE.match(f.name)
+            if not m:
+                continue
+            start = _chunk_dt(m.group(2), m.group(3), cfg)
+            if start is None:
+                continue
+            end = start + timedelta(seconds=_CHUNK_DURATION_S)
+        index.append((start, end, f.name))
     index.sort(key=lambda x: x[0])
     return index
 
 
 def _find_chunk(
-    chunk_index: list[tuple[datetime, str]],
+    chunk_index: list[tuple[datetime, datetime, str]],
     time_utc: str,
 ) -> str | None:
-    """Binary search: return chunk filename that contains time_utc, or None."""
+    """Binary search: return the clip filename that contains time_utc, or None.
+
+    A meteor near a chunk edge sits in both its raw chunk and the boundary
+    splice, and it is the splice that gets locked and uploaded — prefer it, so
+    chunk_file names a file the dashboard can actually find in the archive.
+    """
     if not chunk_index or not time_utc:
         return None
     try:
@@ -527,27 +559,544 @@ def _find_chunk(
             lo = mid + 1
         else:
             hi = mid - 1
-    if idx < 0:
+    # Entries sort by start, and a splice starts half a chunk before the raw
+    # chunk it overlaps, so the covering splice can sit behind the newest entry
+    # that starts before the detection. Walk back over the bounded window where
+    # any span could still reach det_dt. Raw chunks don't overlap, so this can
+    # only ever add a splice, never a different raw chunk.
+    raw: str | None = None
+    while idx >= 0:
+        start, end, filename = chunk_index[idx]
+        if (det_dt - start).total_seconds() > _STITCH_SPAN_MAX_S:
+            break
+        if det_dt < end:
+            if _STITCHED_CHUNK_RE.match(filename):
+                return filename
+            if raw is None:
+                raw = filename
+        idx -= 1
+    return raw
+
+
+# ── FF thumbnails: live BW push ──────────────────────────────────────────────
+#
+# Colour clips + stacks only reach the archive after the dawn re-encode, so a
+# detection can sit imageless on the dashboard for hours. Render a tiny BW
+# WebP from the detection's FF maxpixel as soon as the row is indexed and POST
+# it to the VPS ffthumbs blob subdir. The dashboard serves it until the colour
+# stack lands. POSTs run on a worker thread so a slow/unreachable VPS never
+# stalls the indexing loop; a failed POST is simply retried on the next poll
+# (the uploaded flag is only set on success).
+
+_FFTHUMB_MAX_WIDTH = 480
+_FFTHUMB_QUALITY = 80
+
+_ffthumb_queue: queue.Queue[tuple[Path, str, str]] = queue.Queue()
+_ffthumb_queued: set[tuple[str, str, str]] = set()
+_ffthumb_lock = threading.Lock()
+# One-time numpy/venv capability check for this process. When the RMS venv is
+# missing/broken, every render fails identically — without this gate the pass
+# re-attempted the whole backlog every poll (gmnro05: 120 log msgs/s, 4.7M
+# lines/day, journald retention collapsed to hours).
+_ffthumb_env_ok: bool | None = None
+# Renders that keep failing (corrupt FF, unreadable file) stop being retried
+# after this many attempts instead of looping over the backlog forever.
+_FFTHUMB_MAX_ATTEMPTS = 3
+_ffthumb_failed: dict[tuple[str, str, str], int] = {}
+_ingest_unconfigured_warned = False
+
+
+def _is_file(path: Path) -> bool:
+    """``path.is_file()``, False on an I/O error (a failing colour disk)."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _ffthumb_name(chunk_file: str | None, ff_file: str) -> str | None:
+    """Thumbnail filename for a detection row.
+
+    Prefer the chunk stem (``<cam>_<date>_<HHMMSS>[_<Tend>].webp``) so the
+    dashboard can derive it from chunk_file exactly like a stack sibling; fall
+    back to the FF's own cam/date/time. None for radiant-only rows (no FF frame
+    exists to render).
+    """
+    if chunk_file and chunk_file.endswith("_color.mkv"):
+        return chunk_file[: -len("_color.mkv")] + ".webp"
+    m = _FF_RE.match(ff_file or "")
+    if not m:
         return None
-    chunk_start, filename = chunk_index[idx]
-    if det_dt < chunk_start + timedelta(seconds=_CHUNK_DURATION_S):
-        return filename
+    return f"{m.group(1)}_{m.group(2)}_{m.group(3)}.webp"
+
+
+def _locate_ff(cam: str, night: str, ff_file: str, cfg: dict) -> Path | None:
+    """Find the FF FITS file for a detection row across RMS session dirs."""
+    for _cam_code, rms_dir in _rms_camera_dirs(cfg):
+        for s_cam, s_night, session in _all_sessions(rms_dir, since_date=night):
+            if s_cam != cam or s_night != night:
+                continue
+            p = session / ff_file
+            if p.is_file():
+                return p
     return None
+
+
+def _render_ffthumb(ff_path: Path, dest: Path) -> bool:
+    """Render a BW WebP thumbnail from one FF maxpixel. Atomic write."""
+    buf = ff_thumbs.ff_maxpixel_to_webp(
+        [ff_path], max_width=_FFTHUMB_MAX_WIDTH, lossless=False,
+        quality=_FFTHUMB_QUALITY,
+    )
+    if buf is None:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    tmp.write_bytes(buf.getvalue())
+    tmp.replace(dest)
+    return True
+
+
+def _post_ffthumb(path: Path, cam: str, night: str, cfg: dict | None = None) -> bool:
+    """POST one rendered thumbnail to the VPS ffthumbs blob subdir.
+
+    Marks the per-night uploaded flag on success so neither this loop nor the
+    archive_upload backfill re-POSTs it. Returns False (no raise) on any
+    failure — the next poll re-enqueues because the flag stays unset.
+    """
+    global _ingest_unconfigured_warned
+    if post_blob is None:
+        return False
+    cfg = cfg if cfg is not None else _load_config()
+    base_url = _resolve_base_url(cfg) if _resolve_base_url else None
+    ingest_key = _resolve_ingest_key() if _resolve_ingest_key else None
+    host_key = _resolve_host_key(cfg) if _resolve_host_key else None
+    if not (base_url and ingest_key and host_key):
+        if not _ingest_unconfigured_warned:
+            _ingest_unconfigured_warned = True
+            logger.warning(
+                "ffthumb push: ingest not configured (base_url/key/host_key) — "
+                "thumbnails stay local until archive_upload backfills them")
+        return False
+    url = (f"{base_url.rstrip('/')}/api/ingest/v1/{host_key}"
+           f"/blob/{cam}/{night}/ffthumbs/{path.name}")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        logger.warning("ffthumb read failed for %s: %s", path, exc)
+        return False
+    if not post_blob(url, ingest_key, data):
+        return False
+    try:
+        if flags_manager is not None:
+            flags_manager.mark_ffthumb_uploaded(cam, night, path.name, cfg)
+    except OSError as exc:
+        logger.warning("could not persist ffthumb uploaded flag for %s: %s",
+                       path.name, exc)
+    logger.info("pushed ffthumb %s/%s/%s", cam, night, path.name)
+    return True
+
+
+def _ffthumb_worker() -> None:
+    """Daemon thread: drain the upload queue. One item at a time, never raises."""
+    while not _stop:
+        try:
+            path, cam, night = _ffthumb_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+        try:
+            _post_ffthumb(path, cam, night)
+        except Exception:
+            logger.exception("ffthumb upload error for %s", path.name)
+        finally:
+            with _ffthumb_lock:
+                _ffthumb_queued.discard((cam, night, path.name))
+            _ffthumb_queue.task_done()
+
+
+# ── Measured clip offsets ────────────────────────────────────────────────────
+#
+# Where each detection's meteor starts in its colour clip, measured from the
+# video (clip_timing.measure_meteor_start): the clip-name time is off by the
+# camera/relay latency, keyframe-aligned segment starts and whole-second
+# names, 0.5-1.5 s and different per camera. The players seek to this.
+
+_CLIP_OFFSET_BATCH = 30          # measurements per pass (each ~1-2 s of ffmpeg)
+_CLIP_SETTLE_S = 60              # leave a clip alone this long after its last write
+
+
+def _clip_start(name: str, cfg: dict) -> datetime | None:
+    """The start time a clip's filename encodes (raw chunk or splice)."""
+    m = _STITCHED_CHUNK_RE.match(name) or _CHUNK_RE.match(name)
+    return _chunk_dt(m.group(2), m.group(3), cfg) if m else None
+
+
+ROTATION_RESYNC_SUN_DEG = 5.0
+
+
+def _sync_rotation_offsets(con: sqlite3.Connection, cfg: dict,
+                           now: datetime | None = None) -> int:
+    """Send a camera's measured clip offsets back to be measured again when its
+    ``rotate`` setting is not the one they were measured with.
+
+    clip_timing crops the meteor in the turned frame of a ``rotate: true``
+    camera (#1425); offsets measured before that cropped the wrong patch of
+    sky. ``indexer_meta.rotated_cams`` records the rotated cameras the stored
+    offsets assume. No record means offsets older than #1425, so every rotated
+    camera is measured again once; afterwards only a camera whose flag
+    changes. Returns the number of rows sent back.
+
+    Only while the sun is at least ROTATION_RESYNC_SUN_DEG up: rows sent back
+    are measured 30 a minute whatever the hour (their nights are done), so a
+    bundle that lands at the 16:45 UTC update must not start a backlog of
+    decodes beside RMS capture on a Pi. Until then nothing is recorded and a
+    later pass tries again."""
+    rotated = sorted(cam for cam, sc in (cfg.get('stations') or {}).items()
+                     if isinstance(sc, dict) and sc.get('rotate'))
+    row = con.execute("SELECT value FROM indexer_meta WHERE key='rotated_cams'").fetchone()
+    if row is not None:
+        try:
+            before = set(json.loads(row[0]))
+        except ValueError:
+            before = set()
+        if before == set(rotated):
+            return 0
+        changed = sorted(before.symmetric_difference(rotated))
+    else:
+        changed = rotated
+    loc = rovimen_config.station_location(cfg)
+    if changed and loc is not None and rovimen_night.sun_altitude_deg(
+            loc[0], loc[1], now or datetime.now(timezone.utc)) < ROTATION_RESYNC_SUN_DEG:
+        return 0
+    n = 0
+    if changed:
+        n = con.execute(
+            "UPDATE detections SET clip_offset_file=NULL WHERE clip_offset_file IS NOT NULL "
+            f"AND cam IN ({','.join('?' * len(changed))})", changed).rowcount
+    con.execute("INSERT OR REPLACE INTO indexer_meta (key, value) VALUES ('rotated_cams', ?)",
+                (json.dumps(rotated),))
+    con.commit()
+    if n:
+        logger.info("clip offsets: %d row(s) of %s to measure again (rotate setting)",
+                    n, ", ".join(changed))
+    return n
+
+
+def _clip_offset_pass(con: sqlite3.Connection, cfg: dict,
+                      since_date: str | None = None) -> int:
+    """Measure clip_offset_s for detections whose clip has not been measured
+    (or has changed since). A meteor not visible in colour records the clip
+    with a NULL offset, so it is not decoded again until the clip changes.
+
+    Only nights whose dawn processing is done (``morning_done``): the clips
+    are final by then (splices written, re-encoded in place), and the decode
+    runs in daylight instead of beside RMS capture on a Pi. Until then the
+    dashboard uses the camera's median correction (routes/detections.py)."""
+    global _ffthumb_env_ok
+    if _ffthumb_env_ok is None:
+        _ffthumb_env_ok = ff_thumbs.ensure_rms_venv_on_path()
+    if not _ffthumb_env_ok:
+        return 0
+    import clip_timing
+    rows = con.execute(
+        "SELECT cam, date, ff_file, meteor_no, time_utc, x_beg, y_beg, chunk_file "
+        "FROM detections WHERE chunk_file IS NOT NULL AND x_beg IS NOT NULL "
+        "AND (clip_offset_file IS NULL OR clip_offset_file != chunk_file) "
+        "AND date >= ? ORDER BY time_utc DESC",
+        (since_date or "00000000",),
+    ).fetchall()
+    base = _capture_base(cfg)
+    done = 0
+    morning_done: dict[tuple[str, str], bool] = {}
+    for cam, night, ff_file, meteor_no, time_utc, x, y, chunk in rows:
+        if done >= _CLIP_OFFSET_BATCH or _stop:
+            break
+        if flags_manager is not None:
+            key = (cam, night)
+            if key not in morning_done:
+                try:
+                    morning_done[key] = flags_manager.is_morning_done(cam, night, cfg)
+                except Exception:
+                    morning_done[key] = False
+            if not morning_done[key]:
+                continue
+        clip = base / cam / night / chunk
+        try:
+            if time.time() - clip.stat().st_mtime < _CLIP_SETTLE_S:
+                continue
+        except OSError:
+            continue
+        start = _clip_start(chunk, cfg)
+        try:
+            det = datetime.fromisoformat(time_utc).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if start is None:
+            continue
+        expected = (det - start).total_seconds()
+        rotate = bool(cfg.get('stations', {}).get(cam, {}).get('rotate', False))
+        offset = clip_timing.measure_meteor_start(clip, x, y, expected, rotate=rotate)
+        con.execute(
+            "UPDATE detections SET clip_offset_s=?, clip_offset_file=? "
+            "WHERE cam=? AND date=? AND ff_file=? AND meteor_no=?",
+            (offset, chunk, cam, night, ff_file, meteor_no),
+        )
+        con.commit()
+        done += 1
+        logger.info("clip offset %s/%s %s: %s (clip name says %.2f s)",
+                    cam, night, chunk, f"{offset:.2f} s" if offset is not None else "not visible",
+                    expected)
+    return done
+
+
+def _ffthumb_pass(con: sqlite3.Connection, cfg: dict,
+                  since_date: str | None = None) -> int:
+    """Render missing thumbnails for indexed detections and enqueue un-uploaded
+    ones for POSTing. Runs after every scan (and at startup as catch-up).
+    Returns the number of thumbnails rendered this pass."""
+    global _ffthumb_env_ok
+    if _ffthumb_env_ok is None:
+        _ffthumb_env_ok = ff_thumbs.ensure_rms_venv_on_path()
+        if not _ffthumb_env_ok:
+            logger.error(
+                "ffthumb: no RMS venv with numpy found (looked at ~/RMS/venv, "
+                "~/vRMS, ~/rms_venv) — FF thumbnails disabled until restart")
+    if not _ffthumb_env_ok:
+        return 0
+    if since_date:
+        rows = con.execute(
+            "SELECT cam, date, ff_file, chunk_file FROM detections WHERE date >= ?",
+            (since_date,),
+        ).fetchall()
+    else:
+        rows = con.execute(
+            "SELECT cam, date, ff_file, chunk_file FROM detections").fetchall()
+
+    # Group by night, dedup by thumb name (several detections can share a chunk).
+    by_night: dict[tuple[str, str], dict[str, str]] = {}
+    for cam, night, ff_file, chunk_file in rows:
+        name = _ffthumb_name(chunk_file, ff_file)
+        if name is None:
+            continue
+        by_night.setdefault((cam, night), {}).setdefault(name, ff_file)
+
+    base = rovimen_config.ffthumb_root(cfg)
+    rendered = 0
+    # Newest nights first so tonight's detections get images before backlog.
+    for (cam, night), names in sorted(by_night.items(), key=lambda kv: kv[0][1],
+                                      reverse=True):
+        thumb_dir = base / cam / night
+        legacy_dir = rovimen_config.legacy_ffthumb_dir(cfg, cam, night)
+        uploaded: set[str] = set()
+        if flags_manager is not None:
+            try:
+                uploaded = flags_manager.uploaded_ffthumbs(cam, night, cfg)
+            except Exception:
+                pass
+        for name, ff_file in names.items():
+            # The archive copy is canonical: once uploaded, a thumbnail the
+            # janitor deleted after stacks_days is not rendered again.
+            if name in uploaded:
+                continue
+            dest = thumb_dir / name
+            fail_key = (cam, night, name)
+            if _ffthumb_failed.get(fail_key, 0) >= _FFTHUMB_MAX_ATTEMPTS:
+                continue
+            try:
+                if not dest.exists() and _is_file(legacy_dir / name):
+                    dest = legacy_dir / name
+                if not dest.exists():
+                    ff_path = _locate_ff(cam, night, ff_file, cfg)
+                    if ff_path is None:
+                        continue
+                    if not _render_ffthumb(ff_path, dest):
+                        _ffthumb_failed[fail_key] = _ffthumb_failed.get(fail_key, 0) + 1
+                        continue
+                    _ffthumb_failed.pop(fail_key, None)
+                    rendered += 1
+                    logger.info("rendered ffthumb %s/%s/%s", cam, night, name)
+            except Exception as exc:
+                _ffthumb_failed[fail_key] = _ffthumb_failed.get(fail_key, 0) + 1
+                logger.warning("ffthumb render failed for %s/%s/%s (attempt %d/%d): %s",
+                               cam, night, name, _ffthumb_failed[fail_key],
+                               _FFTHUMB_MAX_ATTEMPTS, exc)
+                continue
+            _enqueue_ffthumb(dest, cam, night, uploaded)
+    return rendered
+
+
+# ── FF thumbnails for every chunk ────────────────────────────────────────────
+#
+# The all-footage grid shows a thumbnail per 20 s colour chunk. Its colour
+# stack exists only where the night stacker runs and only once archive_upload
+# has sent it (hours late, or at dawn, on stations that stack at dawn or not
+# at all), but RMS writes an FF for every 10.24 s block whatever the colour
+# pipeline does. So every finished chunk of the last two nights gets the BW
+# maxpixel of the FF block at its middle, under the chunk stem the dashboard's
+# ffthumbs tier already looks up (~1.5 KB each). The colour stack replaces it
+# in the dashboard as soon as it lands.
+
+_CHUNK_FFTHUMB_NIGHTS = 2            # tonight and last night
+_CHUNK_FFTHUMB_MAX_PER_PASS = 200    # bounds a backlog (fresh install, outage)
+_CHUNK_FFTHUMB_SETTLE_S = 20         # after a chunk ends, its middle FF is on disk
+_CHUNK_FFTHUMB_GIVE_UP_S = 900       # no FF this long after the end: RMS had a gap
+_FF_BLOCK_S = 256 / 25.0
+_chunk_ffthumb_skip: set[tuple[str, str, str]] = set()
+
+
+def _ff_index(cfg: dict, since_night: str) -> dict[str, list[tuple[datetime, Path]]]:
+    """FF files of every camera from sessions since *since_night*, as
+    {cam: [(block_start_utc, path)]} sorted by start."""
+    index: dict[str, list[tuple[datetime, Path]]] = {}
+    for _code, rms_dir in _rms_camera_dirs(cfg):
+        for cam, _night, session in _all_sessions(rms_dir, since_date=since_night):
+            try:
+                names = [e.name for e in session.iterdir()]
+            except OSError:
+                continue
+            for name in names:
+                if not name.startswith("FF_") or not name.endswith(".fits"):
+                    continue
+                start = _ff_block_start(name)
+                if start is not None:
+                    index.setdefault(cam, []).append(
+                        (start.replace(tzinfo=timezone.utc), session / name))
+    for entries in index.values():
+        entries.sort(key=lambda e: e[0])
+    return index
+
+
+def _ff_for_chunk(ffs: list[tuple[datetime, Path]], start: datetime,
+                  end: datetime) -> Path | None:
+    """The FF whose block covers the chunk's middle, else any FF block that
+    overlaps the chunk, else None."""
+    mid = start + (end - start) / 2
+    starts = [s for s, _ in ffs]
+    i = bisect.bisect_right(starts, mid) - 1
+    if i >= 0 and (mid - starts[i]).total_seconds() < _FF_BLOCK_S:
+        return ffs[i][1]
+    for s, path in ffs[max(i, 0):]:
+        if s >= end:
+            break
+        if s + timedelta(seconds=_FF_BLOCK_S) > start:
+            return path
+    return None
+
+
+def _chunk_ffthumb_pass(cfg: dict, now: datetime | None = None) -> int:
+    """Render a BW thumbnail for every finished colour chunk of the last
+    _CHUNK_FFTHUMB_NIGHTS nights that has none, newest first, and queue the
+    un-uploaded ones. Returns the number rendered this pass."""
+    if not _ffthumb_env_ok:
+        return 0
+    now = now or datetime.now(timezone.utc)
+    base = _capture_base(cfg)
+    nights_by_cam: dict[str, list[str]] = {}
+    for cam_dir in (base.iterdir() if base.is_dir() else []):
+        if not cam_dir.is_dir():
+            continue
+        nights = sorted((d.name for d in cam_dir.iterdir()
+                         if d.is_dir() and re.fullmatch(r"\d{8}", d.name)), reverse=True)
+        if nights:
+            nights_by_cam[cam_dir.name] = nights[:_CHUNK_FFTHUMB_NIGHTS]
+    if not nights_by_cam:
+        return 0
+    oldest = min(n for nights in nights_by_cam.values() for n in nights)
+    since = (datetime.strptime(oldest, "%Y%m%d") - timedelta(days=1)).strftime("%Y%m%d")
+    ff_index = _ff_index(cfg, since)
+
+    root = rovimen_config.ffthumb_root(cfg)
+    rendered = 0
+    todo: list[tuple[datetime, str, str, str, datetime]] = []
+    for cam, nights in nights_by_cam.items():
+        if cam not in ff_index:
+            continue
+        for night in nights:
+            for start, end, name in _build_chunk_index(cam, night, cfg):
+                if _STITCHED_CHUNK_RE.match(name):
+                    continue
+                if (now - end).total_seconds() < _CHUNK_FFTHUMB_SETTLE_S:
+                    continue
+                thumb = name[: -len("_color.mkv")] + ".webp"
+                if (cam, night, thumb) in _chunk_ffthumb_skip:
+                    continue
+                todo.append((start, cam, night, thumb, end))
+
+    uploaded_by_night: dict[tuple[str, str], set[str]] = {}
+    todo.sort(key=lambda t: t[0], reverse=True)
+    for start, cam, night, thumb, end in todo:
+        key = (cam, night)
+        if key not in uploaded_by_night:
+            uploaded: set[str] = set()
+            if flags_manager is not None:
+                try:
+                    uploaded = flags_manager.uploaded_ffthumbs(cam, night, cfg)
+                except Exception:
+                    pass
+            uploaded_by_night[key] = uploaded
+        uploaded = uploaded_by_night[key]
+        dest = root / cam / night / thumb
+        legacy = rovimen_config.legacy_ffthumb_dir(cfg, cam, night) / thumb
+        if not dest.exists() and _is_file(legacy):
+            dest = legacy
+        if dest.exists():
+            if thumb in uploaded:
+                _chunk_ffthumb_skip.add((cam, night, thumb))
+            else:
+                _enqueue_ffthumb(dest, cam, night, uploaded)
+            continue
+        if rendered >= _CHUNK_FFTHUMB_MAX_PER_PASS:
+            continue
+        ff_path = _ff_for_chunk(ff_index[cam], start, end)
+        if ff_path is None:
+            if (now - end).total_seconds() > _CHUNK_FFTHUMB_GIVE_UP_S:
+                _chunk_ffthumb_skip.add((cam, night, thumb))
+            continue
+        try:
+            ok = _render_ffthumb(ff_path, dest)
+        except Exception as exc:
+            logger.warning("chunk ffthumb render failed for %s/%s/%s: %s",
+                           cam, night, thumb, exc)
+            ok = False
+        if not ok:
+            _chunk_ffthumb_skip.add((cam, night, thumb))
+            continue
+        rendered += 1
+        _enqueue_ffthumb(dest, cam, night, uploaded)
+    if rendered:
+        logger.info("rendered %d chunk ffthumb(s)", rendered)
+    return rendered
+
+
+def _enqueue_ffthumb(dest: Path, cam: str, night: str, uploaded: set[str]) -> None:
+    """Queue one rendered thumbnail for the upload worker, unless it is already
+    uploaded or already waiting in the queue."""
+    if dest.name in uploaded or post_blob is None:
+        return
+    key = (cam, night, dest.name)
+    with _ffthumb_lock:
+        if key in _ffthumb_queued:
+            return
+        _ffthumb_queued.add(key)
+    _ffthumb_queue.put((dest, cam, night))
 
 
 # ── Indexing logic ────────────────────────────────────────────────────────────
 
 def _session_fingerprint(session: Path) -> float | None:
-    """Largest mtime across all radiants + filtered FTPdetectinfo files.
+    """Largest mtime across all radiants + filtered FTPdetectinfo + CALSTARS.
 
     Any edit to any relevant file moves the fingerprint, so a re-index is
-    triggered even when a session has several matching files.
+    triggered even when a session has several matching files. CALSTARS is
+    included so a clouded-out night that produced star tables but no
+    detections still triggers the sky-row compute — that is exactly the night
+    the weather signal exists for.
     """
     latest: float | None = None
     try:
         for f in session.iterdir():
             n = f.name
-            if n.endswith("_radiants.txt") or (
+            if n.endswith("_radiants.txt") or n.startswith("CALSTARS") or (
                 n.startswith("FTPdetectinfo")
                 and "_unfiltered" not in n and "_backup" not in n
             ):
@@ -582,8 +1131,15 @@ def _index_session(
 
     detections = _session_detections(session)
     if not detections:
-        # Still record the fingerprint so we don't re-parse an empty session.
+        # A clouded-out night legitimately has ~0 detections but still produced
+        # CALSTARS, so compute the sky row even here — that's exactly the night
+        # the weather-vs-fault signal exists for. Still record the fingerprint
+        # so we don't re-parse the (detection-)empty session next poll.
         with con:
+            try:
+                _index_night_sky(con, cam, night, session, cfg or {})
+            except Exception as exc:  # never let sky compute break indexing
+                logger.warning("night_sky compute failed for %s/%s: %s", cam, night, exc)
             con.execute(
                 "INSERT OR REPLACE INTO indexed_sessions VALUES (?,?,?,?)",
                 (str(session), fingerprint, 0, time.time()),
@@ -601,6 +1157,10 @@ def _index_session(
             payload["cam"], payload["date"] = cam, night
             payload["chunk_file"] = _find_chunk(chunk_idx, det.get("time_utc") or "")
             con.execute(_INSERT_SQL, payload)
+        try:
+            _index_night_sky(con, cam, night, session, cfg or {})
+        except Exception as exc:  # never let sky compute break indexing
+            logger.warning("night_sky compute failed for %s/%s: %s", cam, night, exc)
         con.execute(
             "INSERT OR REPLACE INTO indexed_sessions VALUES (?,?,?,?)",
             (str(session), fingerprint, len(detections), time.time()),
@@ -638,6 +1198,10 @@ def main() -> None:
     con = _open_db()
     cfg = _load_config()
 
+    # FF-thumbnail POSTs run off-thread so a slow VPS never stalls indexing.
+    threading.Thread(target=_ffthumb_worker, name="ffthumb-upload",
+                     daemon=True).start()
+
     # Startup: full scan — catches anything missed while service was down.
     logger.info("startup: full scan of all sessions")
     try:
@@ -645,6 +1209,14 @@ def main() -> None:
         logger.info("startup scan complete: %d rows indexed", n)
     except Exception as exc:
         logger.error("startup scan failed: %s", exc)
+
+    # Startup catch-up: render+push any missing thumbnails in the hot window
+    # (covers detections indexed while the service was down).
+    hot_since = (datetime.now(timezone.utc) - timedelta(days=HOT_DAYS)).strftime("%Y%m%d")
+    try:
+        _ffthumb_pass(con, cfg, since_date=hot_since)
+    except Exception as exc:
+        logger.error("startup ffthumb pass failed: %s", exc)
 
     while not _stop:
         start = time.monotonic()
@@ -654,6 +1226,19 @@ def main() -> None:
             _scan(con, cfg, since_date=since)
         except Exception as exc:
             logger.error("scan error: %s", exc)
+        try:
+            _ffthumb_pass(con, cfg, since_date=since)
+        except Exception as exc:
+            logger.error("ffthumb pass error: %s", exc)
+        try:
+            _chunk_ffthumb_pass(cfg)
+        except Exception as exc:
+            logger.error("chunk ffthumb pass error: %s", exc)
+        try:
+            _sync_rotation_offsets(con, cfg)
+            _clip_offset_pass(con, cfg, since_date=since)
+        except Exception as exc:
+            logger.error("clip offset pass error: %s", exc)
         elapsed = time.monotonic() - start
         sleep_for = max(0, HOT_POLL_INTERVAL - elapsed)
         # Sleep in 1s increments so SIGTERM is handled promptly

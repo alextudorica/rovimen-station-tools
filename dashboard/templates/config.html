@@ -3,11 +3,25 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#161b22">
 <title>ROVIMEN — Config</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
 <script type="importmap">
 {
   "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
     "/static/dashboard-common.js":          "{{ url_for('static', filename='dashboard-common.js',          v=build_version) }}",
     "/static/dashboard-video-modal.js":     "{{ url_for('static', filename='dashboard-video-modal.js',     v=build_version) }}",
     "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}"
@@ -20,24 +34,15 @@
 <body>
 
 <div class="cfg-header" id="cfg-header">
-  <a href="/" class="nav-logo">ROVIMEN</a>
-  <nav class="main-nav">
-    <a href="/" class="nav-tab">Stations</a>
-    <a href="/events" class="nav-tab">Detections</a>
-    <a href="/highlights" class="nav-tab">Highlights</a>
-    <a href="/showers" class="nav-tab">Showers</a>
-    <a href="/social" class="nav-tab nav-tab-admin" id="logo-dd-social" style="display:none">Social</a>
-    <a href="/admin" class="nav-tab nav-tab-admin" id="logo-dd-admin" style="display:none">Admin</a>
-    <button class="nav-tab" onclick="openAppPanel('about')">About</button>
-  </nav>
-  <span id="cfg-auth" style="font-size:11px;display:flex;align-items:center;gap:8px;margin-left:auto"></span>
+  {% set nav_active = 'admin' %}{% include "_nav.html" %}
 </div>
 
-<div class="cfg-main">
+<main class="cfg-main">
+  <h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap">Station configs</h1>
   <div id="cfg-status-bar" class="cfg-status"></div>
   <div id="cfg-diff-banner" class="cfg-diff-banner"></div>
   <div id="cfg-body"><div class="cfg-loading">Loading station configs…</div></div>
-</div>
+</main>
 
 <script type="module" src="{{ url_for('static', filename='dashboard-config.js', v=build_version) }}"></script>
 
@@ -59,5 +64,6 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
     <div id="app-panel-body"></div>
   </div>
 </div>
+  {% include "_license_footer.html" %}
 </body>
 </html>

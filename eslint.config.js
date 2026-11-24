@@ -39,6 +39,7 @@ const browserGlobals = {
   performance: 'readonly',
   getComputedStyle: 'readonly',
   matchMedia: 'readonly',
+  CSS: 'readonly',
   localStorage: 'readonly',
   sessionStorage: 'readonly',
   history: 'readonly',
@@ -78,7 +79,8 @@ export default [
     files: ['dashboard/static/sw.js'],
     languageOptions: {
       ecmaVersion: 2022,
-      sourceType: 'module',
+      // Registered as a classic worker: an import/export must fail lint.
+      sourceType: 'script',
       globals: {
         self: 'readonly',
         caches: 'readonly',

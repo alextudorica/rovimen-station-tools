@@ -4,10 +4,14 @@ import hashlib
 import json
 import logging
 import math
+import os
 import time
 import threading
+from pathlib import Path
 
 import numpy as np
+
+from atomic_write import write_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +36,53 @@ _cache: tuple[str, dict] | None = None  # (platepar_hash, result)
 def _platepar_hash(platepars: dict[str, dict]) -> str:
     raw = json.dumps(platepars, sort_keys=True, default=str)
     return hashlib.md5(raw.encode()).hexdigest()
+
+
+# ── On-disk seed ──────────────────────────────────────────────────────
+# Coverage results are pure functions of the platepar set, which changes
+# only on (rare) recalibrations. Persisting them lets a freshly recycled
+# gunicorn worker inherit the previous worker's results instead of
+# recomputing the whole-fleet point-in-polygon math on boot — that boot
+# storm (60-120 s of single-worker CPU saturation) is what made every
+# max_requests recycle a multi-minute 504 window. Mirrors the sky-dome
+# disk-seed fix. Disabled (compute-only, unchanged behaviour) when
+# ROVIMEN_NETWORK_STATS_CACHE is unset — keeps tests/dev-server pure.
+_SEED_DIR_ENV = "ROVIMEN_NETWORK_STATS_CACHE"
+
+
+def _seed_dir() -> Path | None:
+    d = os.environ.get(_SEED_DIR_ENV)
+    return Path(d) if d else None
+
+
+def _seed_read(name: str):
+    d = _seed_dir()
+    if d is None:
+        return None
+    try:
+        with (d / name).open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _seed_write(name: str, payload, *, family: str, keep_hash: str) -> None:
+    d = _seed_dir()
+    if d is None:
+        return
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        write_atomic(d / name, json.dumps(payload), tmp=d / f"{name}.{os.getpid()}.tmp",
+                     encoding="utf-8")
+        # Drop seeds from superseded platepar sets (different hash).
+        for old in d.glob(f"{family}-*"):
+            if keep_hash not in old.name and not old.name.endswith(".tmp"):
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 def _deg2rad(d: float) -> float:
@@ -368,79 +419,6 @@ def _empty_result(config: dict) -> dict:
 
 _computing = False
 
-def compute_coverage_grid(
-    platepars: dict[str, dict], config: dict, altitude_km: float = 100.0
-) -> list[dict]:
-    """Return grid cells with their station count for map overlay rendering."""
-    cam_to_station, _ = _build_camera_index(platepars, config)
-    valid_cams = [c for c in cam_to_station if c in platepars]
-    if not valid_cams:
-        return []
-
-    bounds = _grid_bounds(platepars, altitude_km)
-    if bounds is None:
-        return []
-    grid_lat, grid_lon, cell_area = _make_grid(*bounds)
-
-    station_masks: dict[str, np.ndarray] = {}
-    for cam_code, pp in platepars.items():
-        station_id = cam_to_station.get(cam_code)
-        if station_id is None:
-            continue
-        fov_h = float(pp["fov_h"])
-        fov_v = float(pp["fov_v"])
-        if fov_h <= 0 or fov_v <= 0:
-            continue
-        poly = _fov_polygon(
-            float(pp["lat"]), float(pp["lon"]),
-            float(pp["az_centre"]), float(pp["alt_centre"]),
-            fov_h, fov_v, altitude_km,
-        )
-        mask = _point_in_polygon_vectorized(grid_lat, grid_lon, poly)
-        if station_id in station_masks:
-            station_masks[station_id] = station_masks[station_id] | mask
-        else:
-            station_masks[station_id] = mask.copy()
-
-    if not station_masks:
-        return []
-
-    station_count = np.zeros_like(grid_lat, dtype=np.int32)
-    for smask in station_masks.values():
-        station_count += smask.astype(np.int32)
-
-    cells = []
-    indices = np.argwhere(station_count >= 1)
-    for r, c in indices:
-        cells.append({
-            "lat": round(float(grid_lat[r, c]), 4),
-            "lon": round(float(grid_lon[r, c]), 4),
-            "n": int(station_count[r, c]),
-        })
-    return cells
-
-
-_coverage_cache_lock = threading.Lock()
-_coverage_cache: dict[str, list[dict]] = {}  # key: "hash:alt" -> cells
-
-
-def get_coverage_grid(
-    platepars: dict[str, dict], config: dict, altitude_km: float = 100.0
-) -> list[dict]:
-    h = _platepar_hash(platepars)
-    key = f"{h}:{altitude_km}"
-    with _coverage_cache_lock:
-        if key in _coverage_cache:
-            return _coverage_cache[key]
-    result = compute_coverage_grid(platepars, config, altitude_km)
-    with _coverage_cache_lock:
-        _coverage_cache.clear()
-        _coverage_cache[key] = result
-    return result
-
-
-_computing = False
-
 def get_network_stats(platepars: dict[str, dict], config: dict) -> dict:
     global _cache, _computing
     h = _platepar_hash(platepars)
@@ -451,9 +429,15 @@ def get_network_stats(platepars: dict[str, dict], config: dict) -> dict:
             return _cache[1]
         _computing = True
     try:
+        seeded = _seed_read(f"netstats-{h}.json")
+        if seeded is not None:
+            with _cache_lock:
+                _cache = (h, seeded)
+            return seeded
         result = compute_network_stats(platepars, config)
         with _cache_lock:
             _cache = (h, result)
+        _seed_write(f"netstats-{h}.json", result, family="netstats", keep_hash=h)
         return result
     finally:
         with _cache_lock:
@@ -483,7 +467,5 @@ def _precompute_all() -> None:
     pp = platepar_store.get_all()
     if not pp:
         return
-    logger.info("network_stats: precomputing (platepar change detected, %d cameras)", len(pp))
+    logger.info("network_stats: refreshing network stats (%d cameras; disk seed reused when the platepar set is unchanged)", len(pp))
     get_network_stats(pp, _precompute_config)
-    for alt in ALTITUDE_SLICES_DOUBLE:
-        get_coverage_grid(pp, _precompute_config, alt)

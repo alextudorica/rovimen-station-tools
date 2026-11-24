@@ -3,13 +3,29 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0f1626">
 <title>ROVIMEN — Meteor Showers</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-showers.css', v=build_version) }}">
 <script type="importmap">
 {
   "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
+    "/static/dashboard-video-modal.js": "{{ url_for('static', filename='dashboard-video-modal.js', v=build_version) }}",
     "/static/dashboard-common.js": "{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"
   }
 }
@@ -20,69 +36,63 @@
 <body>
 
 <div class="ov-header">
-  <a href="/" class="nav-logo">ROVIMEN</a>
-  <nav class="main-nav">
-    {% if nav_show('overview') %}<a href="/map" class="nav-tab">Stations</a>{% endif %}
-    {% if nav_show('events') %}<a href="/events" class="nav-tab">Detections</a>{% endif %}
-    {% if nav_show('highlights') %}<a href="/highlights" class="nav-tab">Highlights</a>{% endif %}
-    {% if nav_show('showers') %}<a href="/showers" class="nav-tab active">Showers</a>{% endif %}
-    <a href="/social" class="nav-tab nav-tab-admin" id="logo-dd-social" style="display:none">Social</a>
-    <a href="/admin" class="nav-tab nav-tab-admin" id="logo-dd-admin" style="display:none">Admin</a>
-    <button class="nav-tab" onclick="openAppPanel('about')">About</button>
-  </nav>
-  <div style="margin-left:auto;display:flex;align-items:center;gap:14px">
-    <span id="utc-clock" class="hdr-clock"></span>
-    <div id="ov-auth"></div>
+  {% set nav_active = 'showers' %}{% include "_nav.html" %}
+</div>
+
+<!-- A year calendar of meteor showers: one row per shower on a shared
+     Jan-Dec axis, drawn by dashboard-showers.js into #sh-page-wrap. -->
+<main class="sh-page-wrap" id="sh-page-wrap">
+  <header class="sh-head">
+    <h1 class="sh-title">Meteor showers</h1>
+    <p class="sh-tonight" id="sh-tonight" aria-live="polite"></p>
+  </header>
+
+  <div class="sh-toolbar">
+    <input type="search" id="sh-search" name="q" class="sh-search" placeholder="Search by name or code" autocomplete="off" spellcheck="false" aria-label="Search showers by name or code">
+    <div class="sh-scope" role="group" aria-label="Which showers to list">
+      <button type="button" class="sh-scope-btn active" data-scope="major" aria-pressed="true">Major <span id="sh-n-major"></span></button>
+      <button type="button" class="sh-scope-btn" data-scope="all" aria-pressed="false">All IAU <span id="sh-n-all"></span></button>
+    </div>
+    <label class="sh-check-label">
+      <input type="checkbox" id="sh-only-detections">
+      Seen by ROVIMEN
+    </label>
+    <div class="sh-zoom" role="group" aria-label="Zoom the calendar">
+      <button type="button" class="sh-zoom-btn sh-zoom-pan" id="sh-zoom-prev" aria-label="Earlier" title="Earlier" hidden>&#8249;</button>
+      <label class="sh-zoom-label" for="sh-zoom">Zoom</label>
+      <input type="range" id="sh-zoom" min="0" max="100" step="1" value="0" aria-valuetext="Whole year">
+      <button type="button" class="sh-zoom-btn sh-zoom-pan" id="sh-zoom-next" aria-label="Later" title="Later" hidden>&#8250;</button>
+      <button type="button" class="sh-zoom-btn sh-zoom-pan sh-zoom-year" id="sh-zoom-year" hidden>Whole year</button>
+    </div>
+    <span class="sh-count" id="sh-count" aria-live="polite"></span>
   </div>
-</div>
 
-<!-- Month filter -->
-<div class="sh-filter-bar" id="sh-filter-bar">
-  <button class="sh-month-btn active" data-month="all">All months</button>
-  <button class="sh-month-btn" data-month="Sporadic">Sporadic</button>
-  <button class="sh-month-btn" data-month="January">January</button>
-  <button class="sh-month-btn" data-month="February">February</button>
-  <button class="sh-month-btn" data-month="March">March</button>
-  <button class="sh-month-btn" data-month="April">April</button>
-  <button class="sh-month-btn" data-month="May">May</button>
-  <button class="sh-month-btn" data-month="June">June</button>
-  <button class="sh-month-btn" data-month="July">July</button>
-  <button class="sh-month-btn" data-month="August">August</button>
-  <button class="sh-month-btn" data-month="September">September</button>
-  <button class="sh-month-btn" data-month="October">October</button>
-  <button class="sh-month-btn" data-month="November">November</button>
-  <button class="sh-month-btn" data-month="December">December</button>
-</div>
+  <div class="sh-cal" id="sh-cal">
+    <div class="sh-loading" id="sh-loading">Loading shower data&hellip;</div>
+  </div>
 
-<!-- Search + metadata -->
-<div class="sh-toolbar">
-  <input type="search" id="sh-search" class="sh-search" placeholder="Search by name or code…" autocomplete="off">
-  <label class="sh-check-label">
-    <input type="checkbox" id="sh-only-detections">
-    Only with ROVIMEN detections
-  </label>
-  <span class="sh-count" id="sh-count"></span>
-  <span class="sh-source-note">
-    Source: <a href="https://www.ta3.sk/IAUC22DB/MDC2022/" target="_blank" rel="noopener">IAU Meteor Data Center</a>
-    &middot; ZHR: <a href="https://www.imo.net/resources/calendar/" target="_blank" rel="noopener">IMO Shower Calendar</a>
-  </span>
-</div>
-
-<!-- Shower cards -->
-<div class="sh-page-wrap" id="sh-page-wrap">
-  <div class="sh-loading" id="sh-loading">Loading shower data&hellip;</div>
-</div>
+  <p class="sh-source-note">
+    Major showers have an IMO rate or ROVIMEN detections this year.
+    Showers: <a href="https://www.ta3.sk/IAUC22DB/MDC2022/" target="_blank" rel="noopener">IAU Meteor Data Center</a>.
+    Rates (ZHR): <a href="https://www.imo.net/resources/calendar/" target="_blank" rel="noopener">IMO shower calendar</a>.
+    <span id="sh-profile-note" hidden>Activity shapes: each shower's share of all
+      <a href="https://globalmeteornetwork.org/data/" target="_blank" rel="noopener">Global Meteor Network</a>
+      multi-station meteors per half day (<span></span>); height from the ZHR.
+      An outline means the shape is measured but the rate is not known; a dashed line, no measured shape.</span>
+  </p>
+</main>
 
 <!-- About panel -->
-<div id="app-panel" class="app-panel" onclick="appPanelClose(event)">
+<div id="app-panel" class="app-panel" role="dialog" aria-modal="true" aria-hidden="true" onclick="appPanelClose(event)">
   <div class="app-panel-inner">
     <div class="app-panel-header">
       <span id="app-panel-title" class="app-panel-title"></span>
-      <button class="cam-modal-close" onclick="appPanelClose(null)">&#x2715;</button>
+      <button class="cam-modal-close" aria-label="Close panel" onclick="appPanelClose(null)">&#x2715;</button>
     </div>
     <div id="app-panel-body"></div>
   </div>
 </div>
 
+  {% include "_license_footer.html" %}
 </body>
 </html>

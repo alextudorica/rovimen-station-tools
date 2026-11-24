@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#161b22">
+<title>ROVIMEN — Cum construiești o stație pentru observarea meteorilor?</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
+<meta name="description" content="Cum îți faci o stație ROVIMEN pentru observarea meteorilor: iei o cameră gata asamblată sau o construiești, alegi switch-ul și calculatorul, le montezi și conectezi stația la rețea cu o singură comandă.">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-wiki.css', v=build_version) }}">
+<script type="importmap">
+{
+  "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
+    "/static/dashboard-video-modal.js": "{{ url_for('static', filename='dashboard-video-modal.js', v=build_version) }}",
+    "/static/dashboard-common.js": "{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"
+  }
+}
+</script>
+<script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
+<script type="module" src="{{ url_for('static', filename='dashboard-wiki.js', v=build_version) }}"></script>
+</head>
+<body>
+
+<div class="ov-header">
+  {% set nav_active = 'wiki' %}{% set wiki_href = '/wiki/ro' %}{% include "_nav.html" %}
+</div>
+
+<div class="wk-layout">
+
+  <!-- Cuprins -->
+  <aside class="wk-toc" id="wk-toc" aria-label="Cuprinsul ghidului">
+    <div class="wk-toc-title">Ghid de construcție</div>
+    <a href="#intro">Ce este o stație</a>
+    <a href="#camera">Camera</a>
+    <a href="#build">Construiește camera singur</a>
+    <a href="#equipment">Switch și calculator</a>
+    <a href="#setup">Montaj și cabluri</a>
+    <a href="#install">Instalarea calculatorului</a>
+    <a href="#join">Conectarea la ROVIMEN</a>
+    <a href="#cost">Cât costă</a>
+    <a href="#faq">Întrebări frecvente</a>
+  </aside>
+
+  <main class="wk-main">
+
+    <header class="wk-hero">
+      <div class="wk-langs" role="group" aria-label="Limba">
+        <a class="wk-lang" href="/wiki" hreflang="en" lang="en">EN</a>
+        <a class="wk-lang wk-lang-on" href="/wiki/ro" hreflang="ro" aria-current="page">RO</a>
+      </div>
+      <h1>Cum construiești o stație pentru observarea meteorilor?</h1>
+      <p class="wk-lede">
+        O stație de observare a meteorilor înseamnă o cameră mică pe acoperiș și un
+        calculator mic în casă. Aici găsești tot ce ai de făcut: procuri camera, alegi
+        switch-ul și calculatorul, le montezi și rulezi o singură comandă care conectează
+        stația la ROVIMEN. Restul îl configurăm noi, de la distanță.
+      </p>
+      <div class="wk-callout wk-callout-tip">
+        O stație cu o cameră costă în total <strong>≈ 1580 lei (≈ 300 €)</strong>, iar
+        una cu trei camere <strong>≈ 2650 lei (≈ 500 €)</strong>, ambele cu un mini-PC la
+        mâna a doua. Detaliile sunt la secțiunea <a href="#cost">Cât costă</a>.
+      </div>
+      <figure class="wk-figure">
+        <div class="wk-photos">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/01_installed_day.jpg', v=build_version) }}"
+               width="1600" height="1200" fetchpriority="high"
+               alt="Camere albe montate pe o cruce de lemn, în vârful acoperișului unei șuri, pe fundalul cerului albastru.">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/02_installed_night.jpg', v=build_version) }}"
+               width="1600" height="1205"
+               alt="Aceleași camere pe acoperiș, noaptea, cu stele pe cer.">
+        </div>
+        <figcaption>O stație în funcțiune, ziua și noaptea: mai multe camere pe același suport, fiecare urmărind altă porțiune a cerului.</figcaption>
+      </figure>
+    </header>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="intro">
+      <h2>Ce este o stație</h2>
+      <p>
+        Fiecare cameră urmărește o porțiune fixă a cerului și își trimite imaginea
+        printr-un singur cablu de rețea, prin care primește și curent. În casă, un
+        calculator mic înregistrează toată noaptea. Dimineața caută meteorii, îi trimite
+        către
+        <a href="https://globalmeteornetwork.org/" target="_blank" rel="noopener">Global Meteor Network</a>
+        și publică clipurile și imaginile nopții pe acest dashboard. Când două stații
+        surprind același meteor, rețeaua îi calculează traiectoria prin atmosferă și
+        orbita.
+      </p>
+      <p>
+        Stația nu are piese în mișcare, așa că, odată pusă la punct, funcționează singură
+        ani de zile.
+      </p>
+
+      <figure class="wk-figure">
+        <span class="wk-plate">
+          <img src="{{ url_for('static', filename='media/wiki/2_dataflow.ro.svg', v=build_version) }}" width="1440" height="740" loading="lazy" decoding="async"
+               alt="Ce se întâmplă cu o noapte de înregistrări: camera transmite toată noaptea către calculatorul stației, care înregistrează; în zori, stația caută meteorii, se calibrează după stele și face imaginea nopții, timelapse-ul și câte un clip pentru fiecare meteor; înregistrarea completă rămâne pe stație, rezultatele ajung la serverul GMN, iar clipurile și imaginile la dashboardul ROVIMEN.">
+        </span>
+        <figcaption>O noapte, de la amurg până la încărcarea de dimineață. Nu trebuie să intervină nimeni.</figcaption>
+      </figure>
+
+      <h3>Cine ce face</h3>
+      <div class="wk-table-wrap">
+        <table class="wk-table">
+          <thead><tr><th>Tu</th><th>Noi</th></tr></thead>
+          <tbody>
+            <tr><td>Cumperi sau construiești camera</td><td>Îți trimitem o cameră gata asamblată sau o carcasă printată pentru camera ta</td></tr>
+            <tr><td>Cumperi switch-ul și calculatorul</td><td>Te ajutăm să alegi, dacă ai nevoie</td></tr>
+            <tr><td>Instalezi Ubuntu și rulezi scriptul de conectare</td><td>Îți trimitem scriptul de conectare</td></tr>
+            <tr><td>Montezi camera și rotești obiectivul când îți spunem</td><td>Instalăm programele, configurăm camerele, le înregistrăm la GMN și le calibrăm în prima noapte senină</td></tr>
+            <tr><td>Ții calculatorul pornit</td><td>Actualizăm stația și rezolvăm problemele de la distanță</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="camera">
+      <h2>Camera</h2>
+      <div class="wk-cards">
+        <div class="wk-card wk-card-best">
+          <div class="wk-card-badge">Cel mai simplu</div>
+          <h3 class="wk-card-title">Ți-o trimitem noi</h3>
+          <p class="wk-price">≈ 420 lei (80 €) pe cameră</p>
+          <p>
+            Gata asamblată și închisă: cameră, obiectiv, carcasă și presetupă. Tu doar o
+            montezi și conectezi cablul.
+          </p>
+        </div>
+        <div class="wk-card">
+          <div class="wk-card-badge wk-badge-alt">Pe cont propriu</div>
+          <h3 class="wk-card-title">O construiești tu</h3>
+          <p class="wk-price">kit de 292 lei + o presetupă</p>
+          <p>
+            Cumperi kitul camerei, iar noi îți trimitem o carcasă printată; plătești doar
+            transportul. Pașii sunt <a href="#build">mai jos</a>.
+          </p>
+        </div>
+      </div>
+      <p>
+        Pe amândouă le poți cere din panoul
+        <button type="button" class="wk-link-btn" onclick="openAppPanel('about')">About</button>.
+        Ambele variante folosesc camera cea mai răspândită în rețea: un senzor Sony
+        IMX291 pentru lumină slabă, cu obiectiv de 4&nbsp;mm f/0.95, care acoperă
+        aproximativ 88 × 45° din cer.
+      </p>
+
+      <figure class="wk-figure">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/03_ready_cameras.jpg', v=build_version) }}"
+             width="1600" height="1017" loading="lazy" decoding="async"
+             alt="Carcase albe de camere, gata asamblate, cu obiective, așezate pe o pânză.">
+        <figcaption>Camere gata asamblate, înainte să fie trimise.</figcaption>
+      </figure>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="build">
+      <h2>Construiește camera singur</h2>
+      <p>
+        Ai nevoie de
+        <a href="https://www.aliexpress.com/item/1005003139136600.html" target="_blank" rel="noopener">kitul camerei IMX291 cu obiectiv de 4&nbsp;mm</a>
+        (292&nbsp;lei cu transport, preț verificat pe 26 iulie 2026), de carcasa și placa
+        de montaj printate, pe care ți le trimitem noi, și de o presetupă. Ca unealtă îți
+        trebuie doar o șurubelniță mică.
+      </p>
+
+      <figure class="wk-figure">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/04_parts.jpg', v=build_version) }}"
+             width="1600" height="1237" loading="lazy" decoding="async"
+             alt="Toate piesele pe masă: carcasa printată, din care ies mufele mici ale camerei, placa de montaj printată cu patru pini, placa camerei cu obiectivul, o presetupă și cablul alb de rețea.">
+        <figcaption>Tot ce intră într-o cameră.</figcaption>
+      </figure>
+
+      <ol class="wk-list wk-ol">
+        <li><strong>Scoate filtrul IR-cut din suportul obiectivului.</strong> Este
+          pătrățelul mic de sticlă, albastru-verzui, din interiorul suportului. Filtrul
+          oprește lumina infraroșie, iar fără el sensibilitatea camerei aproape se
+          dublează.</li>
+        <li><strong>Fixează suportul obiectivului pe placă</strong>, peste senzor, cu cele
+          două șuruburi mici. Nu atinge senzorul: orice urmă de pe el apare pe toate
+          imaginile. Dacă se depune praf, suflă-l; nu-l șterge niciodată.</li>
+      </ol>
+      <div class="wk-photos">
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/05_board_and_holder.jpg', v=build_version) }}"
+               width="900" height="672" loading="lazy" decoding="async"
+               alt="Placa camerei, cu senzorul la vedere, lângă suportul obiectivului, în care se vede încă filtrul IR-cut albastru-verzui.">
+          <figcaption>Placa și suportul obiectivului, cu filtrul IR-cut încă montat. Foto: Radu Istode.</figcaption>
+        </figure>
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/06_holder_fitted.jpg', v=build_version) }}"
+               width="1600" height="1200" loading="lazy" decoding="async"
+               alt="Suportul obiectivului prins pe placă, peste senzor; alături, filtrul IR-cut scos.">
+          <figcaption>Suportul prins pe placă, filtrul IR-cut scos (în dreapta). Foto: Radu Istode.</figcaption>
+        </figure>
+      </div>
+
+      <ol class="wk-list wk-ol" start="3">
+        <li><strong>Înșurubează obiectivul</strong> aproape până la capăt, fără să-l
+          strângi: focalizarea finală se face noaptea, pe stele (vezi secțiunea
+          <a href="#setup">Montaj și cabluri</a>).</li>
+      </ol>
+      <div class="wk-photos">
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/07_lens_fitted.jpg', v=build_version) }}"
+               width="1600" height="1195" loading="lazy" decoding="async"
+               alt="Placa camerei văzută din față, cu obiectivul înșurubat în suport.">
+          <figcaption>Obiectivul montat, văzut din față.</figcaption>
+        </figure>
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/08_module_side.jpg', v=build_version) }}"
+               width="1600" height="1200" loading="lazy" decoding="async"
+               alt="Placa camerei văzută din lateral: obiectivul în față, iar pe spatele plăcii conectorii albi mici.">
+          <figcaption>Din lateral: în conectorii mici din spate intră cablul.</figcaption>
+        </figure>
+      </div>
+
+      <ol class="wk-list wk-ol" start="4">
+        <li><strong>Așază placa camerei pe cei patru pini</strong> ai plăcii de montaj
+          printate, cu obiectivul spre exterior.</li>
+        <li><strong>Trece cablul prin presetupă</strong>, în carcasă, și conectează-i
+          mufele mici în conectorii de pe spatele plăcii.</li>
+        <li><strong>Introdu placa în carcasă și strânge presetupa</strong> până când
+          cablul nu se mai mișcă. Presetupa asigură singură etanșarea.</li>
+      </ol>
+      <div class="wk-photos">
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/09_gland.jpg', v=build_version) }}"
+               width="1600" height="1205" loading="lazy" decoding="async"
+               alt="O presetupă de plastic gri: capac, corp filetat și piuliță.">
+          <figcaption>Presetupa.</figcaption>
+        </figure>
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/10_housing_closed.jpg', v=build_version) }}"
+               width="1600" height="1600" loading="lazy" decoding="async"
+               alt="Carcasa albă închisă, cu cablul ieșind prin presetupa strânsă și o bucșă filetată din alamă deasupra.">
+          <figcaption>Carcasa închisă: cablul iese prin presetupă.</figcaption>
+        </figure>
+      </div>
+
+      <div class="wk-callout wk-callout-warn">
+        <strong>Testeaz-o pe masă înainte s-o urci pe acoperiș.</strong> Leag-o la switch
+        după ce calculatorul s-a <a href="#join">conectat la ROVIMEN</a>, iar noi verificăm
+        imaginea și configurăm camera de la distanță. Orice problemă se rezolvă mult mai
+        ușor pe masă decât pe acoperiș.
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="equipment">
+      <h2>Switch și calculator</h2>
+
+      <h3>Switch-ul PoE</h3>
+      <p>
+        Switch-ul este cutia care alimentează camerele prin cablurile de rețea, așa că
+        afară nu ai nevoie de nicio priză. În porturile lui conectezi camerele și cablul
+        care vine de la router; switch-ul dă curent doar dispozitivelor care au nevoie.
+      </p>
+      <p>
+        Îți recomandăm
+        <a href="https://www.emag.ro/switch-poe-tp-link-desktop-8-porturi-10-100-1000mbps-poe-62w-buget-poe-ls108gp/pd/D5YGZN3BM/" target="_blank" rel="noopener">TP-Link LS108GP</a>
+        (228&nbsp;lei pe eMAG): 8 porturi, toate cu PoE, suficiente pentru cel mult șapte
+        camere plus routerul. Merge orice switch PoE; cel din poză este un model mai mic,
+        cu 4 porturi.
+      </p>
+      <figure class="wk-figure">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/12_switch.jpg', v=build_version) }}"
+             width="1600" height="1056" loading="lazy" decoding="async"
+             alt="Un switch PoE mic, negru: cablul de la router în portul LAN verde din stânga, cablul unei camere în portul 1, porturile 2-4 libere.">
+        <figcaption>Un switch PoE mai mic: cablul de la router în LAN (stânga), camera în portul 1, trei porturi libere pentru alte camere.</figcaption>
+      </figure>
+      <p>
+        Mai ai nevoie de <strong>câte un cablu de rețea pentru exterior la fiecare
+        cameră</strong>, suficient de lung cât să ajungă de la switch la cameră și cu
+        mufele deja montate. De exemplu, acest
+        <a href="https://www.emag.ro/cablu-de-retea-u-utp-cat6-patch-cord-30m-pentru-exterior-negru-ccgl85900bk300/pd/D7X0LM3BM/" target="_blank" rel="noopener">cablu Nedis Cat6 pentru exterior, de 30&nbsp;m</a>
+        (94&nbsp;lei pe eMAG).
+      </p>
+
+      <h3>Calculatorul</h3>
+      <p>
+        Cel mai potrivit este un mini-PC de birou, la mâna a doua. Noaptea doar
+        înregistrează; munca grea vine dimineața, când caută meteorii și comprimă
+        înregistrarea nopții. Ce să urmărești:
+      </p>
+      <dl class="wk-kv">
+        <dt>Procesor</dt>
+        <dd>Intel Core i5, <strong>generația a 8-a sau mai nou</strong> (codul modelului
+          începe cu i5-8…, i5-9… sau mai mare, de exemplu i5-8500T).</dd>
+        <dt>Memorie</dt>
+        <dd>16&nbsp;GB, ca pe majoritatea stațiilor noastre; pentru una sau două camere
+          ajung 8&nbsp;GB.</dd>
+        <dt>Disc</dt>
+        <dd>Un SSD. La stațiile noastre, o cameră merge pe 128&nbsp;GB, două sau trei pe
+          256&nbsp;GB, iar cinci sau șase pe 500&nbsp;GB. Două camere încap și pe
+          128&nbsp;GB, dacă stația păstrează mai puțin video.</dd>
+        <dt>Rețea</dt>
+        <dd>O mufă de rețea, legată cu cablu la router.</dd>
+      </dl>
+      <p>
+        Modele bune: HP ProDesk 400 G4 Mini, Lenovo ThinkCentre M720q sau M920q, Dell
+        OptiPlex 5060 Micro, HP EliteDesk 800 G4 Mini, Fujitsu Esprimo Q558. La mâna a
+        doua costă în jur de <strong>700–900&nbsp;lei (130–170 €)</strong>.
+        <a href="https://diabloscomputer.ro/calculatoare-second-hand-i5?q=Marca-HP/Model+procesor-Core+i5+Gen.12-Core+i5+gen8-Core+i5+gen9-Core+i5+Gen10/Capacitate+memorie+RAM-16+GB" target="_blank" rel="noopener">Căutarea aceasta pe Diablos Computer</a>
+        arată PC-uri HP second-hand cu un i5 potrivit și 16&nbsp;GB; alege un model mini
+        sau compact.
+      </p>
+      <p>
+        <strong>Ai deja un Raspberry Pi 5?</strong> Poate rula o cameră. Nu îți
+        recomandăm să cumperi unul special pentru asta: un Pi 5 nou costă cam cât un
+        mini-PC la mâna a doua, care face mai mult.
+      </p>
+      <div class="wk-callout wk-callout-warn">
+        <strong>Evită calculatoarele foarte ieftine</strong> cu procesoare Celeron,
+        Pentium Silver sau Atom și orice procesor cu doar două nuclee. Arată la fel, dar
+        nu fac față procesării de dimineață.
+      </div>
+      <p class="wk-fine">
+        Opțional: un UPS mic (în jur de 300&nbsp;lei) acolo unde se ia des curentul.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="setup">
+      <h2>Montaj și cabluri</h2>
+
+      <h3>Cablurile</h3>
+      <figure class="wk-figure">
+        <span class="wk-plate">
+          <img src="{{ url_for('static', filename='media/wiki/1_network.ro.svg', v=build_version) }}" width="1440" height="880" loading="lazy" decoding="async"
+               alt="Schema rețelei: internetul intră în routerul de acasă, routerul în switch-ul PoE, din fiecare port PoE pleacă un cablu de exterior spre o cameră, calculatorul stației este legat la switch sau la router, iar rezultatele pleacă spre serverul GMN și spre dashboardul ROVIMEN.">
+        </span>
+        <figcaption>
+          Un singur cablu pe cameră duce și curentul, și imaginea. Totul rămâne în rețeaua
+          de acasă, în spatele routerului pe care îl ai deja; nu se deschide nimic spre
+          internet.
+        </figcaption>
+      </figure>
+      <ul class="wk-list">
+        <li><strong>Routerul la switch:</strong> un cablu de rețea obișnuit, de la router
+          la switch.</li>
+        <li><strong>Calculatorul:</strong> în router sau într-un port liber al
+          switch-ului.</li>
+        <li><strong>Camerele:</strong> câte un cablu de exterior pentru fiecare, în
+          porturile PoE. De adrese ne ocupăm noi.</li>
+      </ul>
+
+      <h3>Calculatorul trebuie să pornească singur</h3>
+      <p>
+        Se mai ia curentul, iar la stație nu e nimeni care să apese butonul. În BIOS-ul
+        calculatorului caută setarea numită <strong>After Power Loss</strong>,
+        <strong>Restore on AC Power Loss</strong> sau <strong>AC Recovery</strong> și
+        pune-o pe <strong>Power On</strong>. Intri în BIOS apăsând o tastă imediat după
+        pornire: F10 la HP, F1 la Lenovo, F2 la Dell și Fujitsu.
+      </p>
+      <p>
+        Apoi verifică: cu calculatorul pornit, scoate ștecherul din priză, așteaptă zece
+        secunde și bagă-l la loc. Calculatorul trebuie să pornească singur; dacă nu
+        pornește, setarea nu s-a salvat.
+      </p>
+
+      <h3>Montare și orientare</h3>
+      <ul class="wk-list">
+        <li><strong>Fixeaz-o bine.</strong> Bucșa de alamă de pe carcasă are filetul
+          standard de 1/4 inch pentru camere, așa că se potrivește orice suport de cameră,
+          de exemplu
+          <a href="https://www.emag.ro/suport-camera-mozeeda-set-2-buc-montare-fara-gaurire-rotatie-360-negru-m014/pd/D7T2R93BM/" target="_blank" rel="noopener">aceste suporturi Mozeeda</a>
+          (36&nbsp;lei perechea, pe eMAG). Prinde suportul cu șuruburi de un perete sau de
+          o grindă: camera nu trebuie să se miște în vânt, altfel măsurătorile ies
+          greșite.</li>
+        <li><strong>Orientează-o la 35–45° deasupra orizontului</strong>, departe de
+          stâlpii de iluminat și de lămpile vecinilor.</li>
+        <li><strong>În cadru trebuie să fie doar cer:</strong> fără margini de acoperiș,
+          fără crengi.</li>
+        <li><strong>Lasă cablul să coboare din presetupă</strong> și să facă o buclă mică,
+          ca apa să picure de pe el în loc să se scurgă spre carcasă.</li>
+        <li><strong>Ai mai multe camere?</strong> Îndreaptă-le în direcții diferite. Te
+          ajutăm să alegi direcțiile, astfel încât porțiunile de cer pe care le urmăresc
+          să se suprapună și cu ale stațiilor vecine.</li>
+      </ul>
+      <figure class="wk-figure wk-figure-half">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/11_mount_thread.jpg', v=build_version) }}"
+             width="1600" height="1205" loading="lazy" decoding="async"
+             alt="Prim-plan cu bucșa filetată din alamă de pe carcasa albă.">
+        <figcaption>Filetul standard pentru camere, pe partea de sus a carcasei.</figcaption>
+      </figure>
+
+      <h3>Focalizarea</h3>
+      <p>
+        Focalizarea se face noaptea, pe stele: fără filtrul IR-cut, un obiectiv reglat
+        ziua nu mai e clar noaptea. În prima noapte senină deschidem imaginea live a
+        camerei și îți spunem în ce parte să rotești obiectivul, până când stelele devin
+        puncte clare. Durează câteva minute și e nevoie doar de cineva lângă cameră.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="install">
+      <h2>Instalarea calculatorului</h2>
+      <p>
+        Instalează <strong>Ubuntu 24.04 LTS Desktop</strong>, un sistem de operare
+        gratuit.
+        <a href="https://ubuntu.com/desktop/docs/en/latest/tutorial/install-ubuntu-desktop/" target="_blank" rel="noopener">Ghidul pas cu pas de la Ubuntu</a>
+        (în engleză) arată cum pregătești stick-ul USB și cum faci instalarea.
+      </p>
+      <ul class="wk-list">
+        <li><strong>Instalarea șterge tot de pe discul calculatorului.</strong> Folosește
+          un calculator dedicat stației.</li>
+        <li><strong>Alege un nume de utilizator și o parolă</strong> și păstrează parola: o
+          vei folosi o dată, pentru scriptul de conectare.</li>
+        <li><strong>Leagă calculatorul la router cu un cablu</strong> și lasă-l
+          pornit.</li>
+      </ul>
+      <p>
+        Dacă folosești un Raspberry Pi pe care îl ai deja, instalează pe el
+        <strong>Raspberry Pi OS (64-bit)</strong> cu
+        <a href="https://www.raspberrypi.com/software/" target="_blank" rel="noopener">Raspberry Pi Imager</a>.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="join">
+      <h2>Conectarea la ROVIMEN</h2>
+      <ol class="wk-list wk-ol">
+        <li><strong>Cere-ne scriptul de conectare</strong> din panoul
+          <button type="button" class="wk-link-btn" onclick="openAppPanel('about')">About</button>.
+          Spune-ne localitatea, câte camere ai și cum te numești.</li>
+        <li><strong>Îți trimitem un fișier mic</strong>, cu un nume de forma
+          <code>rovimen-onboard-numele-tau.sh</code>. Salvează-l pe calculatorul
+          stației.</li>
+        <li><strong>Deschide un terminal în folderul respectiv:</strong> deschide folderul
+          în care ai salvat fișierul, dă clic dreapta pe un spațiu gol și alege
+          <em>Deschide în terminal</em> (<em>Open in Terminal</em>). Scrie:
+          <div class="wk-pre">sudo bash rovimen-onboard-numele-tau.sh</div>
+          cu numele exact al fișierului tău, apoi parola. Cât timp scrii parola nu apare
+          nimic pe ecran; e normal.</li>
+        <li><strong>Așteaptă câteva minute.</strong> La final apare o linie care începe cu
+          <code>Done. Tailscale:</code>. Trimite-ne linia respectivă.</li>
+      </ol>
+      <figure class="wk-figure wk-figure-screen">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/13_join_done.png', v=build_version) }}"
+             width="1025" height="686" loading="lazy" decoding="async"
+             alt="Fereastra terminalului după ce scriptul de conectare s-a terminat: numele stației, adresa ei în rețea și linia care începe cu Done. Tailscale.">
+        <figcaption>Finalul scriptului de conectare, cu valori de exemplu. Avem nevoie de linia de sub „Please send this one line back”.</figcaption>
+      </figure>
+
+      <h3>Ce face scriptul</h3>
+      <ul class="wk-list">
+        <li>Conectează calculatorul la rețeaua privată ROVIMEN (Tailscale), ca să putem
+          ajunge la el fără să modifici nimic la router.</li>
+        <li>Ne permite să ne conectăm ca să instalăm și să întreținem programele stației.
+          Fiecare conectare rămâne înregistrată în jurnalul de sistem al
+          calculatorului.</li>
+        <li>Setează ceasul pe UTC, ora folosită de toată rețeaua, dezactivează modul de
+          repaus și împiedică actualizările automate să repornească calculatorul.</li>
+      </ul>
+
+      <h3>Ce urmează</h3>
+      <p>
+        Instalăm programele pentru meteori, configurăm camerele, le înregistrăm la Global
+        Meteor Network și le calibrăm pe fiecare după stele, în prima noapte senină.
+        Primești un cont pe acest dashboard, unde îți vezi în fiecare dimineață meteorii,
+        clipurile și imaginile nopții.
+      </p>
+      <div class="wk-callout wk-callout-tip">
+        <strong>De acum, trebuie doar să-l ții pornit.</strong> Stația pornește la amurg,
+        lucrează dimineața și la începutul după-amiezii, încarcă rezultatele și o ia de la
+        capăt în noaptea următoare. O dată pe zi, după-amiaza, se repornește singură; e
+        normal.
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="cost">
+      <h2>Cât costă</h2>
+      <p>
+        În lei, cu camere gata asamblate. Echivalentul în euro este calculat la cursul
+        BCE de 1&nbsp;EUR = 5,2788&nbsp;lei (30 septembrie 2026). Switch-ul, cablul și
+        suporturile au prețurile de pe eMAG din 30 septembrie 2026; mini-PC-ul este o
+        estimare, așa că totalurile pot varia cu aproximativ 15%. Transportul nu este
+        inclus.
+      </p>
+      <div class="wk-cards wk-cards-cost">
+        <div class="wk-card">
+          <h3 class="wk-card-title">A. O cameră</h3>
+          <ul class="wk-cost-list">
+            <li><span>Cameră gata asamblată</span><span>422</span></li>
+            <li><span>Cablu de exterior, 30&nbsp;m</span><span>94</span></li>
+            <li><span>Suporturi de cameră, set de 2</span><span>36</span></li>
+            <li><span>Switch PoE TP-Link LS108GP</span><span>228</span></li>
+            <li><span>Mini-PC la mâna a doua, i5, 16&nbsp;GB, SSD de 256&nbsp;GB</span><span>800</span></li>
+          </ul>
+          <p class="wk-cost-total">1580 lei (≈ 300 €)</p>
+          <p class="wk-note">O stație completă. La același calculator și același switch poți adăuga mai târziu și alte camere.</p>
+        </div>
+        <div class="wk-card wk-card-best">
+          <div class="wk-card-badge">Recomandat</div>
+          <h3 class="wk-card-title">B. Trei camere</h3>
+          <ul class="wk-cost-list">
+            <li><span>3 × cameră gata asamblată</span><span>1266</span></li>
+            <li><span>3 × cablu de exterior</span><span>282</span></li>
+            <li><span>2 × suporturi de cameră, set de 2</span><span>73</span></li>
+            <li><span>Switch PoE TP-Link LS108GP</span><span>228</span></li>
+            <li><span>Mini-PC la mâna a doua, i5, 16&nbsp;GB, SSD de 256&nbsp;GB</span><span>800</span></li>
+          </ul>
+          <p class="wk-cost-total">2649 lei (≈ 503 €)</p>
+          <p class="wk-note">Trei direcții de cer și loc pentru încă patru camere pe același switch.</p>
+        </div>
+        <div class="wk-card">
+          <h3 class="wk-card-title">C. O cameră în plus, mai târziu</h3>
+          <ul class="wk-cost-list">
+            <li><span>Cameră gata asamblată</span><span>422</span></li>
+            <li><span>Cablu de exterior</span><span>94</span></li>
+            <li><span>Suporturi de cameră, set de 2</span><span>36</span></li>
+          </ul>
+          <p class="wk-cost-total">552 lei (≈ 105 €)</p>
+          <p class="wk-note">Calculatorul și switch-ul sunt comune, așa că fiecare cameră în plus costă puțin.</p>
+        </div>
+      </div>
+      <p class="wk-fine">
+        Dacă îți construiești singur camerele, în locul fiecărei camere gata asamblate
+        pui kitul de 292&nbsp;lei, o presetupă și transportul carcasei printate.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="faq">
+      <h2>Întrebări frecvente</h2>
+      <div class="wk-faq">
+        <details>
+          <summary>Trebuie să știu Linux?</summary>
+          <p>Nu. Instalezi Ubuntu ca pe orice alt sistem de operare și scrii o singură
+            comandă. Restul îl facem noi.</p>
+        </details>
+        <details>
+          <summary>Ce se întâmplă când e înnorat?</summary>
+          <p>Nimic rău. Stația înregistrează, nu găsește nimic și merge mai departe. Și
+            nopțile înnorate sunt date utile.</p>
+        </details>
+        <details>
+          <summary>Cât curent consumă?</summary>
+          <p>Un mini-PC cu trei camere consumă sub 60&nbsp;W, adică aproximativ
+            1,4&nbsp;kWh pe zi.</p>
+        </details>
+        <details>
+          <summary>Am nevoie de internet rapid?</summary>
+          <p>Nu. Merge cu orice conexiune de acasă: stația își încarcă rezultatele o dată
+            pe zi, iar înregistrarea completă rămâne pe stație.</p>
+        </details>
+        <details>
+          <summary>Ce puteți face pe calculatorul meu?</summary>
+          <p>Scriptul de conectare ne permite să ne conectăm, prin rețeaua privată
+            ROVIMEN, ca să instalăm și să întreținem programele stației. Fiecare conectare
+            rămâne înregistrată în jurnalul de sistem al calculatorului. De aceea,
+            folosește un calculator dedicat stației.</p>
+        </details>
+        <details>
+          <summary>Îmi pot vedea meteorii?</summary>
+          <p>Da. Primești un cont pe acest dashboard, cu clipurile, imaginile nopții și
+            timelapse-urile stației tale, iar datele tale ajung în Global Meteor
+            Network.</p>
+        </details>
+        <details>
+          <summary>Cât rezistă echipamentul?</summary>
+          <p>Ani de zile. În timp se uzează doar mufele cablurilor de exterior și discul,
+            pe care se scrie în fiecare noapte.</p>
+        </details>
+      </div>
+      <p class="wk-fine wk-updated">
+        Prețuri verificate pe 30 septembrie 2026 (kitul camerei pe 26 iulie 2026), cu
+        echivalentul în euro la cursul BCE de 5,2788&nbsp;lei. Ai găsit ceva greșit?
+        Spune-ne din panoul
+        <button type="button" class="wk-link-btn" onclick="openAppPanel('about')">About</button>.
+        Pentru detalii tehnice, vezi
+        <a href="https://globalmeteornetwork.org/wiki/index.php?title=Main_Page" target="_blank" rel="noopener">wiki-ul Global Meteor Network</a>
+        (în engleză).
+      </p>
+    </section>
+
+  </main>
+</div>
+
+<!-- About panel -->
+<div id="app-panel" class="app-panel" role="dialog" aria-modal="true" aria-hidden="true" onclick="appPanelClose(event)">
+  <div class="app-panel-inner">
+    <div class="app-panel-header">
+      <span id="app-panel-title" class="app-panel-title"></span>
+      <button class="cam-modal-close" aria-label="Închide panoul" onclick="appPanelClose(null)">&#x2715;</button>
+    </div>
+    <div id="app-panel-body"></div>
+  </div>
+</div>
+
+  {% include "_license_footer.html" %}
+</body>
+</html>

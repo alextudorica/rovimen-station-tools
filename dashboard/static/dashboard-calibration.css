@@ -1,0 +1,177 @@
+.cal-main{max-width:1600px;margin:0 auto;padding:16px 24px 40px}
+
+.cal-topbar{display:flex;align-items:baseline;gap:16px;margin-bottom:16px}
+.cal-title{font-size:var(--fs-4xl);margin:0;text-wrap:balance}
+.cal-summary{color:var(--muted);font-size:var(--fs-base)}
+
+.cal-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+
+.cal-card{background:var(--card);border:1px solid var(--border);border-radius:var(--radius-xl);min-width:0;padding:10px;
+  display:flex;flex-direction:column;gap:8px}
+.cal-card-title{font-weight:600;font-size:var(--fs-lg);display:flex;align-items:baseline;gap:8px}
+.cal-card-host{font-weight:400;color:var(--muted);font-size:var(--fs-md)}
+
+.cal-stack-wrap{position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:var(--radius-sm);overflow:hidden}
+.cal-stack-img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+
+/* Mask overlay: mask.bmp is a strictly binary bitmap (0=masked-out,
+   255=active sky, no alpha channel, no midtones). Color-matrix filters
+   (sepia/saturate/hue-rotate) can't inject hue into pure black OR pure
+   white -- both are zero-chroma extremes that pass through any color matrix
+   unchanged (confirmed by rendering it: two earlier attempts, one inverted
+   +screen-blended, one multiply-blended, both rendered with NO visible tint
+   at all). CSS mask-image sidesteps that: it reads the bitmap's luminance
+   directly as an alpha channel (no color math involved) to cut a solid
+   color layer down to shape. `.cal-mask-img` is therefore a plain <div>
+   (not an <img>), with its `mask-image`/`-webkit-mask-image` set in JS
+   (dashboard-calibration.js's setupMask) to a data: URL of the mask
+   INVERTED via <canvas> first -- on a real camera the active/unmasked sky
+   is nearly the whole frame, so masking-in the bright side (the naive,
+   un-inverted default) tints almost the entire picture instead of just the
+   small excluded strip. This rule supplies the solid magenta fill and the
+   sizing/positioning so it lines up with the stack image beneath it. Shared
+   by the card thumbnail and the zoom modal so the overlay survives zooming
+   in. */
+.cal-mask-tint{position:absolute;inset:0;background-color:#ff33cc;opacity:0.6;
+  -webkit-mask-repeat:no-repeat;mask-repeat:no-repeat;
+  -webkit-mask-position:center;mask-position:center;
+  -webkit-mask-size:contain;mask-size:contain;
+  /* mask.bmp has no alpha channel -- default mask-mode (match-source -> alpha
+     for a plain raster source) reads every pixel as fully opaque regardless
+     of grayscale value, so the whole box tints uniformly. Force luminance
+     mode so the actual black/white content drives the mask, not a
+     nonexistent alpha channel. (-webkit-mask-source-type is the older
+     WebKit-prefixed equivalent some engines still need alongside it.) */
+  mask-mode:luminance;-webkit-mask-source-type:luminance}
+
+/* One row per card, one column per entry in dashboard-calibration.js's PLOTS.
+   Equal fractions rather than auto-fit with a minimum: at card width auto-fit
+   dropped to two columns and left the third plot alone on a second row, which
+   reads as a layout bug. These are contact-sheet thumbnails -- they are meant
+   to be scanned as a set and opened in the zoom modal to be read -- so an
+   even row that gets narrower as plots are added is the right trade. */
+.cal-plots-row{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:6px}
+.cal-plot-wrap{min-width:0;background:#000;border-radius:var(--radius-sm);min-height:50px;
+  display:flex;align-items:center;justify-content:center;padding:2px}
+.cal-plot-wrap img{width:100%;height:auto;display:block}
+/* The empty label is per-plot, carried on the element as a data attribute so
+   the wording lives next to the plot definition in JS rather than being
+   duplicated as a CSS rule per plot kind. */
+.cal-plot-wrap.cal-empty::after{content:attr(data-empty-label);color:var(--muted);
+  font-size:var(--fs-sm);text-align:center;padding:8px}
+.cal-plot-wrap.cal-empty img{display:none}
+
+.cal-facts{display:flex;flex-direction:column;gap:4px;font-size:var(--fs-md)}
+.cal-fact{color:var(--muted)}
+.cal-fact-bad{color:var(--red);font-weight:600}
+.cal-stale-warn{color:var(--yellow);font-weight:600}
+.cal-stale-bad{color:var(--red);font-weight:600}
+
+.cal-ops{display:flex;flex-direction:column;gap:6px;padding-top:6px;border-top:1px solid var(--border)}
+.cal-ops-row{display:flex;gap:6px;flex-wrap:wrap}
+
+.cal-error{color:var(--red);padding:24px;text-align:center}
+
+.cal-autofit-btn,.cal-mask-btn{background:color-mix(in srgb,var(--blue) 12%,transparent);border:1px solid color-mix(in srgb,var(--blue) 35%,transparent);
+  color:var(--blue);font-family:inherit;font-size:var(--fs-md);font-weight:600;padding:5px 10px;
+  border-radius:var(--radius-md);cursor:pointer}
+.cal-autofit-btn:hover,.cal-mask-btn:hover{background:color-mix(in srgb,var(--blue) 22%,transparent)}
+.cal-autofit-btn:disabled,.cal-mask-btn:disabled{opacity:.5;cursor:default}
+.cal-autofit-result{display:flex;flex-direction:column;gap:6px;font-size:var(--fs-md)}
+.cal-autofit-status{color:var(--muted)}
+.cal-autofit-error{color:var(--red)}
+.cal-autofit-applied{color:var(--green);font-weight:600}
+.cal-autofit-result button{align-self:flex-start;background:var(--card);border:1px solid var(--border);
+  color:var(--text);font-family:inherit;font-size:var(--fs-sm);padding:4px 9px;border-radius:5px;cursor:pointer;
+  margin-right:6px}
+.cal-autofit-result .cal-autofit-accept{border-color:color-mix(in srgb,var(--green) 40%,transparent);color:var(--green)}
+.cal-autofit-result button:disabled{opacity:.5;cursor:default}
+
+.cal-badge-overdue{display:inline-block;background:rgba(224,85,85,.15);color:var(--red);
+  border:1px solid rgba(224,85,85,.4);border-radius:var(--radius-sm);padding:1px 6px;font-size:var(--fs-sm);
+  font-weight:600;text-transform:uppercase;letter-spacing:.3px;margin-bottom:2px;width:fit-content}
+
+.cal-zoomable{cursor:zoom-in}
+
+.cal-modal{display:none;position:fixed;inset:0;z-index:1100;background:rgba(0,0,0,.88);overscroll-behavior:contain;
+  flex-direction:column;align-items:center;justify-content:center;padding:32px;gap:12px}
+.cal-modal.open{display:flex}
+.cal-modal-head{display:flex;align-items:baseline;gap:14px}
+.cal-modal-title{color:#fff;font-size:var(--fs-base);font-weight:600}
+.cal-modal-dl{color:var(--blue);font-size:var(--fs-md);text-decoration:none}
+.cal-modal-dl:hover{text-decoration:underline}
+/* The wrap, not the img, carries the scroll-zoom transform: the mask overlay
+   is a sibling of the image and has to scale and pan with it, pixel for
+   pixel, or the tint slides off the obstruction it marks. */
+.cal-modal-imgwrap{position:relative;display:inline-flex;max-width:calc(100vw - 64px);
+  max-height:calc(100vh - 96px);transform-origin:center center}
+.cal-modal-img{display:block;max-width:calc(100vw - 64px);max-height:calc(100vh - 96px);
+  object-fit:contain;border-radius:var(--radius-sm);cursor:zoom-out}
+.cal-modal-mask{pointer-events:none;border-radius:var(--radius-sm)}
+.cal-modal-close{position:absolute;top:16px;right:20px;background:none;border:none;color:#fff;
+  font-size:32px;line-height:1;cursor:pointer;padding:4px 10px}
+
+@media (max-width:700px){
+  .cal-main{padding:12px}
+  .cal-grid{grid-template-columns:1fr}
+  /* One card per row on a phone, so the plots have the full width to share
+     and stay legible three-up. */
+  .cal-plots-row{grid-auto-flow:column}
+}
+
+/* ── Mask editor ───────────────────────────────────────────────────────── */
+
+.cal-mask-modal{gap:10px}
+.cal-mask-head{display:flex;align-items:baseline;gap:14px;color:#fff}
+.cal-mask-title{font-size:var(--fs-lg);font-weight:600}
+.cal-mask-stats{font-size:var(--fs-md);color:var(--muted);font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+
+.cal-mask-canvaswrap{position:relative;background:#000;border-radius:var(--radius-sm);overflow:hidden;
+  max-width:min(1280px,calc(100vw - 64px));max-height:calc(100vh - 220px);width:100%}
+.cal-mask-stackimg{display:block;width:100%;height:100%;object-fit:contain}
+/* Canvas sits exactly over the stack: both are the frame, at the frame's
+   aspect ratio (set in JS from the mask's own pixel size), so a brush mark
+   lands on the obstruction the operator is pointing at. */
+.cal-mask-canvas{position:absolute;inset:0;width:100%;height:100%;cursor:crosshair;touch-action:none}
+/* Brush outline follows the cursor at the on-screen size of the brush, so a
+   stroke's footprint is visible before it is committed. */
+.cal-mask-ring{position:absolute;border:1px solid rgba(255,255,255,.85);border-radius:50%;
+  transform:translate(-50%,-50%);pointer-events:none;box-shadow:0 0 0 1px rgba(0,0,0,.6) inset}
+
+.cal-mask-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  max-width:min(1280px,calc(100vw - 64px));width:100%}
+.cal-mask-label{color:var(--muted);font-size:var(--fs-md)}
+.cal-mask-sizeval{color:#fff;font-size:var(--fs-md);min-width:44px;font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+.cal-mask-spacer{flex:1 1 auto}
+.cal-mask-toolbar button{background:var(--card);border:1px solid var(--border);color:var(--text);
+  font-family:inherit;font-size:var(--fs-md);padding:5px 10px;border-radius:var(--radius-md);cursor:pointer}
+.cal-mask-toolbar button:hover{border-color:var(--blue)}
+.cal-mask-toolbar button:disabled{opacity:.45;cursor:default}
+.cal-mask-toolbar .cal-mask-save{background:color-mix(in srgb,var(--green) 14%,transparent);border-color:color-mix(in srgb,var(--green) 45%,transparent);
+  color:var(--green);font-weight:600}
+.cal-mask-status{color:var(--muted);font-size:var(--fs-md);text-align:center;
+  max-width:min(1280px,calc(100vw - 64px))}
+.cal-mask-status.cal-mask-error{color:var(--red)}
+.cal-mask-status.cal-mask-ok{color:var(--green)}
+
+@media (max-width:700px){
+  .cal-mask-canvaswrap{max-height:calc(100vh - 280px)}
+}
+
+/* ── Data in monospace, interface in sans ── */
+.cal-card-cam,.cal-card-host,.cal-modal-title{font-family:var(--mono-font);font-variant-numeric:tabular-nums}
+.cal-summary,.cal-facts{font-variant-numeric:tabular-nums}
+.cal-card-title{flex-wrap:wrap;min-width:0}
+.cal-card-host{overflow-wrap:anywhere}
+.cal-ops button,.cal-autofit-result button,.cal-mask-toolbar button,.cal-badge-overdue{font-family:var(--ui-font)}
+/* Re-base pointing shares the primary look of its two neighbours. */
+.cal-rebase-btn{background:color-mix(in srgb,var(--blue) 12%,transparent);border:1px solid color-mix(in srgb,var(--blue) 35%,transparent);
+  color:var(--blue);font-size:var(--fs-md);font-weight:600;padding:5px 10px;border-radius:var(--radius-md);cursor:pointer}
+.cal-rebase-btn:hover{background:color-mix(in srgb,var(--blue) 22%,transparent)}
+.cal-rebase-btn:disabled{opacity:.5;cursor:default}
+.cal-mask-preset[aria-pressed="true"]{border-color:var(--blue);color:var(--blue)}
+
+/* Keyboard focus on the zoomable thumbnails and the modal controls. */
+.cal-zoomable:focus-visible,.cal-modal-close:focus-visible,.cal-modal-dl:focus-visible,
+.cal-mask-toolbar button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.cal-modal-close:hover{color:var(--blue)}

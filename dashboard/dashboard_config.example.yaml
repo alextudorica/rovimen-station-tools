@@ -13,7 +13,7 @@
 # Time window (seconds) for correlating detections across stations into events.
 correlation_window_s: 1
 
-# Port each station's REST API (rovimen_station_api.py) listens on.
+# Port each station's REST API (rovimen-scripts/station_api.py) listens on.
 station_api_port: 7779
 
 # Pages anonymous (not-logged-in) visitors may reach. Remove a key to re-gate
@@ -24,12 +24,6 @@ public_pages:
 - events
 - live
 - showers
-
-# Optional: a subset of YOUR camera codes to treat as a muted "secondary"
-# overlay on the meteor map. Events seen ONLY by these stations render dimmed;
-# events with >=1 non-highlight station are the headline set. Leave empty (the
-# default) for a single, undifferentiated set of your stations.
-highlight_codes: []
 
 stations:
   # --- A fully-active station with two cameras --------------------------------

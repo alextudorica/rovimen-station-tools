@@ -4,8 +4,9 @@
  * Each page instantiates VideoModal into a bare container div.
  * The constructor injects all HTML; the caller never touches the DOM directly.
  *
- * Single-video mode: VDB, Archive, Highlights, Overview GMN, RMS detections.
- * Multi-video mode:  Events page (synchronized multi-camera scrubber).
+ * One clip at a time: VDB, Archive, Highlights, Overview GMN, RMS detections,
+ * Events. Synchronized multi-camera playback is MultiDetModal
+ * (dashboard-multi-det-modal.js).
  *
  * Usage:
  *   import { VideoModal } from './dashboard-video-modal.js';
@@ -16,13 +17,16 @@
  *   modal.close();
  */
 
-import { _modalOpen, _modalClose, _toast, state } from './dashboard-common.js';
+import { _modalOpen, _modalClose, _toast, state, escHtml, wireLockButton, lockClip, keepClip, wireProcessClipButton, saveDownload, saveBlob, downloadFailedText, fullResStackUrl, viewQuery, retryVideoIfPreparing, deriveStackName } from './dashboard-common.js';
+import { wireHofButton } from './dashboard-hof-add.js';
+import { wireBasketButton } from './dashboard-basket-add.js';
+import { wireHideButton, hideTarget } from './dashboard-hidden.js';
 
 /**
  * True for an anonymous public visitor (no logged-in session). Read off
  * state.AUTH_USER, which every page seeds from /api/auth/status BEFORE any
  * modal can open (see #648). Operator-only actions — Download clip, Crop,
- * loop/frame download, Show/Download stack, multi-download/stitch — are
+ * loop/frame download, Show/Download stack, stitch — are
  * hidden when this is true so the public sees playback controls only. The
  * server already gates those actions; this only stops us SHOWING dead
  * controls. Fail-safe: defaults to treating a missing signal as anon so we
@@ -30,6 +34,114 @@ import { _modalOpen, _modalClose, _toast, state } from './dashboard-common.js';
  */
 function _vmIsAnon() {
   return !state.AUTH_USER;
+}
+
+// Sentinel label marking a full-width heading row inside the detail grid,
+// rather than a label/value pair. Not a string a real field could be called.
+const _INFO_HEADING = '\u0000heading';
+
+/**
+ * GMN photometric masses span grams to micrograms, so a fixed unit renders
+ * either "0.00 kg" or a wall of zeroes. Pick the unit that keeps the number
+ * readable and mark it as an estimate — it is derived from the light curve
+ * with an assumed luminous efficiency, not measured.
+ */
+export function fmtMass(kg) {
+  if (kg == null || !isFinite(kg) || kg <= 0) return null;
+  if (kg >= 1)     return `~${kg.toFixed(2)} kg`;
+  if (kg >= 1e-3)  return `~${(kg * 1e3).toFixed(1)} g`;
+  if (kg >= 1e-6)  return `~${(kg * 1e6).toFixed(1)} mg`;
+  return `~${(kg * 1e9).toFixed(1)} µg`;
+}
+
+/**
+ * Resolve the always-available BW FF meteor-stack URL for a clip.
+ *
+ * When the caller passes an explicit ``stack.url`` (a color/archive stack, or
+ * an already-built URL as VDB/highlights/HoF do) that wins. Otherwise, when the
+ * clip has a full identity (station host-key + camera + date + filename), derive
+ * the BW FF stack webp and point it at ``/stack/…`` — the tiered media route
+ * that resolves the station copy, then the storage-box archive stack, then the
+ * BW FF thumbnail, so it stays downloadable for archived nights too. Returns
+ * null only when nothing is derivable (e.g. an external GMN clip with no
+ * ROVIMEN identity), in which case the Download-stack button stays hidden.
+ */
+export function stackUrlFor(opts) {
+  if (opts?.stack?.url) return opts.stack.url;
+  const { station, camera, date, filename } = opts || {};
+  if (!station || !camera || !date || !filename) return null;
+  const name = deriveStackName(filename);
+  if (!name) return null;
+  return `/stack/${encodeURIComponent(station)}/${encodeURIComponent(camera)}` +
+         `/${encodeURIComponent(date)}/${encodeURIComponent(name)}`;
+}
+
+/**
+ * Resolve the URL the "Download stack" button hands out.
+ *
+ * The inline preview (stackUrlFor) uses the fast /stack thumbnail, but the
+ * download must be the branded full-resolution image: the archive route and the
+ * /fullstack route both burn the ROVIMEN/astromania overlay in on demand, so a
+ * downloaded stack is never un-attributed. Prefers an explicit ``stack.url``
+ * (VDB/highlights pass the gated ``/api/archive/file/…`` URL); otherwise derives
+ * ``/fullstack/…`` from the clip identity rather than the thumbnail ``/stack/…``.
+ * An explicit ``/stack/…`` URL (Events and the grid pass one) is mapped to its
+ * ``/fullstack/…`` twin, so it never hands out the 480 px thumbnail either.
+ */
+export function stackDownloadUrlFor(opts) {
+  if (opts?.stack?.url) return fullResStackUrl(opts.stack.url);
+  const { station, camera, date, filename } = opts || {};
+  if (!station || !camera || !date || !filename) return null;
+  const name = deriveStackName(filename);
+  if (!name) return null;
+  return `/fullstack/${encodeURIComponent(station)}/${encodeURIComponent(camera)}` +
+         `/${encodeURIComponent(date)}/${encodeURIComponent(name)}`;
+}
+
+/**
+ * The Video DB time window for a clip: a few minutes around the clip's start
+ * (plus the detection offset when known), from the chunk name's
+ * ``<CAM>_<YYYYMMDD>_<HHMMSS>`` token. {} when the name has no time.
+ */
+export function vmClipWindow(filename, detOffset, minutes = 3) {
+  const m = /_(\d{8})_(\d{2})(\d{2})(\d{2})/.exec(filename || '');
+  if (!m) return {};
+  const startS = (+m[2]) * 3600 + (+m[3]) * 60 + (+m[4]) + (Number(detOffset) || 0);
+  // Widen outward to whole minutes so the clip's own minute is always inside.
+  const fmt = min => {
+    const t = ((min % 1440) + 1440) % 1440;
+    return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+  };
+  return {
+    from: fmt(Math.floor((startS - minutes * 60) / 60)),
+    to:   fmt(Math.ceil((startS + minutes * 60) / 60)),
+  };
+}
+
+/**
+ * "Open station" / "Open in Video DB" targets for a clip, or null without a
+ * station, camera and night. The night is the YYYYMMDD folder date (ISO dates
+ * from Highlights / Hall of Fame are normalised); ``clip=`` makes the station
+ * page open this clip's player on arrival.
+ */
+export function vmOpenLinks({ station, camera, date, filename, detOffset } = {}) {
+  const night = String(date || '').replace(/-/g, '');
+  if (!station || !camera || !/^\d{8}$/.test(night)) return null;
+  const clip = /^[A-Za-z0-9._-]+\.(mkv|mp4)$/.test(filename || '') ? filename : null;
+  const host = encodeURIComponent(station);
+  const win = vmClipWindow(clip, detOffset);
+  return {
+    stationUrl: `/station/${host}/rms` + viewQuery({ cam: camera, date: night, clip },
+      ['cam', 'date', 'clip']),
+    vdbUrl: `/station/${host}/videodb` + viewQuery(
+      { cam: camera, date: night, ...win, clip },
+      ['cam', 'date', 'from', 'to', 'clip']),
+    // The fleet-wide Grid (Events tab) has no per-camera/station filter — it's
+    // every camera's footage for this night, narrowed to this clip's window.
+    gridUrl: `/events` + viewQuery(
+      { tab: 'grid', date: night, gfrom: win.from, gto: win.to },
+      ['tab', 'date', 'gfrom', 'gto']),
+  };
 }
 
 let _vmCount = 0;
@@ -43,7 +155,6 @@ export class VideoModal {
    *   trim   {boolean} - Show draggable trim handles.
    *   stitch {boolean} - Show stitch-prev/stitch-next row (VDB only).
    *   nav    {boolean} - Show prev/next navigation buttons in header.
-   *   multi  {boolean} - Multi-video synchronized mode (events page).
    */
   constructor(mountEl, config = {}) {
     this._mount  = mountEl;
@@ -52,7 +163,6 @@ export class VideoModal {
       trim:   config.trim   ?? false,
       stitch: config.stitch ?? false,
       nav:    config.nav    ?? false,
-      multi:  config.multi  ?? false,
     };
     this._el            = null;   // backdrop element
     this._opts          = null;   // current open() opts
@@ -68,12 +178,7 @@ export class VideoModal {
     this._cropActive    = false;
     this._cropBox       = null;   // { x, y, w, h } normalized 0-1 in video content space
     this._cropDragStart = null;   // pointer-down start norm coord
-    // Multi-video state
-    this._multiVideos   = [];
-    this._multiPlaying  = false;
-    this._multiRaf      = null;
-    this._multiWinPre   = 5;
-    this._multiWinPost  = 5;
+    this._metaAbort     = null;   // aborts the loading clip's metadata listeners
 
     this._ensureMount();
     VideoModal._instances.add(this);
@@ -93,7 +198,7 @@ export class VideoModal {
   /**
    * Open the modal.
    *
-   * Single-video opts:
+   * Opts:
    *   src          {string}   Video URL.
    *   title        {string}   Header title text.
    *   detOffset    {number}   Detection time within clip (seconds). Shows marker.
@@ -105,27 +210,28 @@ export class VideoModal {
    *   stack        {object}   { url: string } — enables "Show stack".
    *   detection    {object}   RMS detection fields for collapsible info section.
    *   witnesses    {Array}    [{cam, station, url, time, label}] — other cameras.
+   *   hide         {object}   { target, hidden, page, onChange(resp) } — the
+   *                           Hide / Unhide button (dashboard-hidden.js). When
+   *                           absent, a clip with a camera and a detection time
+   *                           still gets it; null turns it off.
    *   stitch       {object}   { hasPrev, hasNext, onPrev, onNext, onUnstitch }
    *   nav          {object}   { hasPrev, hasNext, onPrev, onNext }
    *   onClose      {function} Called when the modal closes.
-   *
-   * Multi-video opts:
-   *   title        {string}
-   *   videos       {Array}    [{cam, station, url, offset, label, downloadUrl, stackUrl, filename}]
-   *   windowSec    {number}   Playback window ±N seconds around detection (default 5).
    */
   open(opts) {
     // Reset stack DOM before clearing _stackVisible — _openSingle checks it too late
-    if (this._stackVisible && !this._cfg.multi) {
+    if (this._stackVisible) {
       this._q('.vm-video-el').style.display     = '';
       this._q('.vm-stack-img').style.display    = 'none';
       this._q('.vm-controls-row').style.display = '';
       const _sb = this._q('.vm-stack-show-btn');
       const _bb = this._q('.vm-backvideo-btn');
       const _sd = this._q('.vm-stack-dl-btn');
+      const _cd = this._q('.vm-color-stack-dl-btn');
       if (_sb) _sb.style.display = '';
       if (_bb) _bb.style.display = 'none';
       if (_sd) _sd.style.display = 'none';
+      if (_cd) _cd.style.display = 'none';
     }
 
     this._opts          = opts;
@@ -136,13 +242,8 @@ export class VideoModal {
     this._infoExpanded  = false;
     this._frameTime     = null;
     this._frameSeeking  = false;
-    this._multiPlaying  = false;
 
-    if (this._cfg.multi) {
-      this._openMulti(opts);
-    } else {
-      this._openSingle(opts);
-    }
+    this._openSingle(opts);
     _modalOpen(this._el);
   }
 
@@ -150,23 +251,18 @@ export class VideoModal {
   close() {
     if (!this._el?.classList.contains('open')) return;
     this._stopRaf();
-    this._multiStopRaf();
+    this._q('.vm-actions-row')?.classList.remove('vm-sheet-open');
+    this._metaAbort?.abort();
+    this._metaAbort = null;
 
-    // Single-video cleanup
     const vid = this._q('.vm-video-el');
     if (vid) { vid.pause(); vid.src = ''; vid.load(); }
-
-    // Multi-video cleanup
-    for (const v of this._multiVideos) {
-      try { v.el.pause(); v.el.src = ''; v.el.load(); } catch (_) {}
-    }
-    this._multiVideos = [];
 
     _modalClose(this._el);
     this._opts?.onClose?.();
   }
 
-  /** Navigate prev (dir=-1) or next (dir=1). Single-video mode only. */
+  /** Navigate prev (dir=-1) or next (dir=1). */
   navigate(dir) {
     const cb = dir < 0 ? this._opts?.nav?.onPrev : this._opts?.nav?.onNext;
     cb?.();
@@ -181,6 +277,7 @@ export class VideoModal {
     Object.assign(this._trim, partial);
     this._trimDraw();
     this._durLabel();
+    this._syncDownloadButtons();
   }
 
   /**
@@ -227,6 +324,7 @@ export class VideoModal {
     this._el.setAttribute('role', 'dialog');
     this._el.setAttribute('aria-modal', 'true');
     this._el.setAttribute('aria-hidden', 'true');
+    this._el.setAttribute('aria-labelledby', `vm-title-${this._id}`);
     this._el.dataset.vmId = this._id;
     this._el.innerHTML = this._html();
     this._mount.appendChild(this._el);
@@ -242,24 +340,26 @@ export class VideoModal {
 <div class="vm-dialog">
 
   <div class="vm-header">
-    <button class="vm-nav-btn vm-nav-prev" aria-label="Previous" style="${navHide}">&#8592;</button>
-    <span class="vm-title"></span>
+    <button type="button" class="vm-nav-btn vm-nav-prev" aria-label="Previous" style="${navHide}">&#8592;</button>
+    <span class="vm-title" id="vm-title-${this._id}"></span>
     <div class="vm-header-right">
-      <div class="vm-multi-badges" style="display:none"></div>
-      <div class="vm-multi-dl-btns" style="display:none"></div>
-      <button class="vm-nav-btn vm-nav-next" aria-label="Next" style="${navHide}">&#8594;</button>
-      <button class="vm-close-btn" aria-label="Close">&#10005; Close</button>
+      <div class="vm-open-links" style="display:none">
+        <a class="vm-open-link vm-open-station" href="#" title="Open this camera's station page on this night"><span class="vm-open-verb">Open station</span><span class="vm-open-short">Station</span></a>
+        <a class="vm-open-link vm-open-vdb" href="#" title="Open this camera in the Video DB at this time"><span class="vm-open-verb">Open in </span>Video DB</a>
+        <a class="vm-open-link vm-open-grid" href="#" title="Loads videos from all cameras at this time"><span class="vm-open-verb">Open in </span>Video Grid</a>
+      </div>
+      <button type="button" class="vm-nav-btn vm-nav-next" aria-label="Next" style="${navHide}">&#8594;</button>
+      <button type="button" class="vm-close-btn" aria-label="Close" title="Close"><span aria-hidden="true">&#10005;</span></button>
     </div>
   </div>
 
-  <!-- ── Single-video layout ── -->
-  <div class="vm-single-section" style="${c.multi ? 'display:none' : ''}">
+  <div class="vm-single-section">
 
     <div class="vm-video-section">
-      <div class="vm-video-wrap">
+      <div class="vm-video-wrap" tabindex="0" role="button" aria-label="Play or pause (Space)">
         <video class="vm-video-el" playsinline></video>
         <img class="vm-stack-img" alt="FF stack" style="display:none">
-        <div class="vm-video-loading">Loading video&#x2026;</div>
+        <div class="vm-video-loading" role="status">Loading video&#x2026;</div>
         <div class="vm-video-err" style="display:none">Clip not available</div>
         <canvas class="vm-crop-canvas"></canvas>
       </div>
@@ -267,22 +367,23 @@ export class VideoModal {
 
     <div class="vm-controls-row">
       <div class="vm-ctrl-btns">
-        <button class="vm-ctrl-btn vm-btn-play" title="Play / Pause">&#9654;</button>
-        <button class="vm-ctrl-btn vm-btn-slow" title="0.5&#215; slow motion">&#189;&#215;</button>
-        <button class="vm-ctrl-btn vm-btn-rewind" title="Rewind to start">&#x23EE;</button>
-        <button class="vm-ctrl-btn vm-btn-rewind-det" title="Jump to detection" style="display:none">&#x23EE;&#9670;</button>
-        <button class="vm-ctrl-btn vm-btn-frame-back"  title="Previous frame">&#9664;&#9474;</button>
-        <button class="vm-ctrl-btn vm-btn-frame-fwd"   title="Next frame">&#9474;&#9654;</button>
-        <button class="vm-ctrl-btn vm-btn-loop" title="Loop between trim points">&#8635;</button>
+        <button type="button" class="vm-ctrl-btn vm-btn-play" title="Play / Pause" aria-label="Play">&#9654;</button>
+        <button type="button" class="vm-ctrl-btn vm-btn-slow" title="0.5&#215; slow motion" aria-label="Slow motion" aria-pressed="false">&#189;&#215;</button>
+        <button type="button" class="vm-ctrl-btn vm-btn-rewind" title="Rewind to start" aria-label="Rewind to start">&#x23EE;</button>
+        <button type="button" class="vm-ctrl-btn vm-btn-rewind-det" title="Jump to detection" aria-label="Jump to detection" style="display:none">&#x23EE;&#9670;</button>
+        <button type="button" class="vm-ctrl-btn vm-btn-frame-back"  title="Previous frame" aria-label="Previous frame">&#9664;&#9474;</button>
+        <button type="button" class="vm-ctrl-btn vm-btn-frame-fwd"   title="Next frame" aria-label="Next frame">&#9474;&#9654;</button>
+        <button type="button" class="vm-ctrl-btn vm-btn-loop" title="Loop between trim points" aria-label="Loop between trim points" aria-pressed="false">&#8635;</button>
       </div>
       <div class="vm-trackbar-wrap">
-        <div class="vm-trackbar">
+        <div class="vm-trackbar" tabindex="0" role="slider" aria-label="Seek"
+             aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" aria-valuetext="0.0 s">
           <div class="vm-trackbar-fill"></div>
           <div class="vm-trackbar-det-marker"></div>
           <div class="vm-trackbar-stitch-marker"></div>
           <div class="vm-trackbar-playhead"></div>
-          <div class="vm-trackbar-start-handle"></div>
-          <div class="vm-trackbar-end-handle"></div>
+          <div class="vm-trackbar-start-handle" tabindex="0" role="slider" aria-label="Trim start"></div>
+          <div class="vm-trackbar-end-handle" tabindex="0" role="slider" aria-label="Trim end"></div>
         </div>
         <div class="vm-trackbar-labels">
           <span class="vm-lbl-start"></span>
@@ -292,45 +393,68 @@ export class VideoModal {
       </div>
       <div class="vm-time-display">
         <span class="vm-time-current">0:00</span>
-        <span>/</span>
+        <span aria-hidden="true">/</span>
         <span class="vm-time-total">0:00</span>
       </div>
     </div>
 
     <div class="vm-stitch-row" style="display:none">
-      <button class="vm-stitch-btn vm-stitch-prev">&#8592; Stitch prev</button>
+      <button type="button" class="vm-stitch-btn vm-stitch-prev">&#8592; Stitch prev</button>
       <span class="vm-stitch-label"></span>
-      <button class="vm-stitch-btn vm-stitch-unstitch" style="display:none">&#10005; Unstitch</button>
-      <button class="vm-stitch-btn vm-stitch-next">Stitch next &#8594;</button>
+      <button type="button" class="vm-stitch-btn vm-stitch-unstitch" style="display:none">&#10005; Unstitch</button>
+      <button type="button" class="vm-stitch-btn vm-stitch-next">Stitch next &#8594;</button>
     </div>
 
     <div class="vm-actions-row">
       <span class="vm-dur-label"></span>
-      <button class="vm-action-btn vm-switch-multi-btn" style="display:none">All stations &#8594;</button>
-      <button class="vm-action-btn vm-download-btn" style="display:none">&#8595; Download clip</button>
-      <button class="vm-action-btn vm-frame-dl-btn" style="display:none">&#8595; Download frame</button>
-      <div class="vm-loop-dl-wrap" style="display:none">
-        <div class="vm-loop-dl-popover" style="display:none">
-          <span class="vm-loop-dl-label">Iterations</span>
-          <div class="vm-loop-stepper">
-            <button class="vm-loop-step-btn vm-loop-step-dec">&#8722;</button>
-            <input type="number" class="vm-loop-count" min="1" max="10" value="3" readonly>
-            <button class="vm-loop-step-btn vm-loop-step-inc">+</button>
-          </div>
-          <button class="vm-action-btn vm-loop-dl-go">&#8595; Download</button>
+      <button type="button" class="vm-action-btn vm-switch-multi-btn" style="display:none">All stations &#8594;</button>
+      <button type="button" class="vm-action-btn vm-download-btn" style="display:none" title="The whole clip at full resolution (MP4)">&#8595; Download clip</button>
+      <button type="button" class="vm-action-btn vm-more-btn" aria-expanded="false" aria-haspopup="dialog">&#8943; More</button>
+      <div class="vm-act-scrim"></div>
+      <div class="vm-act-sheet" aria-label="Clip actions">
+        <div class="vm-act-sheet-head">
+          <span>Clip actions</span>
+          <button type="button" class="vm-action-btn vm-act-sheet-close" aria-label="Close actions">&#10005;</button>
         </div>
-        <button class="vm-action-btn vm-loop-dl-btn">&#8593; Download loop</button>
+        <div class="vm-act-group" data-label="Download">
+          <button type="button" class="vm-action-btn secondary vm-download-trim-btn" style="display:none" title="Only the part between the trim handles (re-encoded)">&#8595; Download trimmed</button>
+          <button type="button" class="vm-action-btn vm-frame-dl-btn" style="display:none">&#8595; Download frame</button>
+          <div class="vm-loop-dl-wrap" style="display:none">
+            <div class="vm-loop-dl-popover" style="display:none">
+              <span class="vm-loop-dl-label">Iterations</span>
+              <div class="vm-loop-stepper">
+                <button type="button" class="vm-loop-step-btn vm-loop-step-dec" aria-label="Fewer iterations">&#8722;</button>
+                <input type="number" class="vm-loop-count" min="1" max="10" value="3" readonly aria-label="Iterations">
+                <button type="button" class="vm-loop-step-btn vm-loop-step-inc" aria-label="More iterations">+</button>
+              </div>
+              <button type="button" class="vm-action-btn vm-loop-dl-go">&#8595; Download</button>
+            </div>
+            <button type="button" class="vm-action-btn vm-loop-dl-btn" aria-expanded="false">&#8593; Download loop</button>
+          </div>
+          <a class="vm-action-btn vm-stack-dl-btn" style="display:none" download>&#8595; Download stack</a>
+          <a class="vm-action-btn secondary vm-color-stack-dl-btn" style="display:none" download>&#8595; Download color stack</a>
+        </div>
+        <div class="vm-act-group" data-label="View">
+          <button type="button" class="vm-action-btn secondary vm-crop-btn" style="display:none">&#9701; Crop</button>
+          <button type="button" class="vm-action-btn secondary vm-stack-show-btn" style="display:none">&#9632; Show stack</button>
+          <button type="button" class="vm-action-btn secondary vm-backvideo-btn" style="display:none">&#9654; Back to video</button>
+        </div>
+        <div class="vm-act-group" data-label="Keep">
+          <button type="button" class="vm-action-btn secondary vm-lock-btn" style="display:none"></button>
+          <button type="button" class="vm-action-btn secondary vm-hof-btn" style="display:none"></button>
+          <button type="button" class="vm-action-btn secondary vm-basket-btn" style="display:none"></button>
+          <button type="button" class="vm-action-btn secondary vm-process-btn" style="display:none">Process clip</button>
+        </div>
+        <div class="vm-act-group" data-label="Review">
+          <button type="button" class="vm-action-btn secondary vm-hide-btn" style="display:none">Hide</button>
+        </div>
       </div>
-      <button class="vm-action-btn secondary vm-crop-btn" style="display:none">&#9701; Crop</button>
-      <a class="vm-action-btn vm-stack-dl-btn" style="display:none" download>&#8595; Download stack</a>
-      <button class="vm-action-btn secondary vm-stack-show-btn" style="display:none">&#9632; Show stack</button>
-      <button class="vm-action-btn secondary vm-backvideo-btn" style="display:none">&#9654; Back to video</button>
     </div>
 
     <div class="vm-info-section" style="display:none">
       <div class="vm-info-summary">
         <span class="vm-info-summary-text"></span>
-        <button class="vm-info-expand-btn">&#9660; Expand info</button>
+        <button type="button" class="vm-info-expand-btn" aria-expanded="false">&#9660; Expand info</button>
       </div>
       <div class="vm-info-full">
         <div class="vm-info-grid"></div>
@@ -344,23 +468,6 @@ export class VideoModal {
 
   </div><!-- end vm-single-section -->
 
-  <!-- ── Multi-video layout ── -->
-  <div class="vm-multi-section" style="${c.multi ? '' : 'display:none'}">
-    <div class="vm-multi-status">Loading videos&#x2026;</div>
-    <div class="vm-multi-grid"></div>
-    <div class="vm-multi-bar" style="display:none">
-      <button class="vm-ctrl-btn vm-multi-pp-btn">&#9654;</button>
-      <div class="vm-multi-scrubber-wrap">
-        <input type="range" class="vm-multi-scrubber" min="-500" max="500" value="-500" step="1">
-        <div style="position:relative;height:0">
-          <div class="vm-multi-scrubber-marker"></div>
-        </div>
-        <div class="vm-multi-scrubber-ticks"></div>
-      </div>
-      <span class="vm-multi-pos-label">&#8722;5.0s</span>
-    </div>
-  </div>
-
 </div>`;
   }
 
@@ -372,18 +479,47 @@ export class VideoModal {
     this._el.addEventListener('click', (e) => {
       if (e.target === this._el) this.close();
     });
+    // Escape closes an open popover first, then the modal. The modal keeps
+    // the key to itself so a dialog or sheet underneath stays open.
+    this._el.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || !this._el.classList.contains('open')) return;
+      e.preventDefault(); e.stopPropagation();
+      const pop = this._q('.vm-loop-dl-popover');
+      if (pop && pop.style.display !== 'none') {
+        pop.style.display = 'none';
+        const btn = this._q('.vm-loop-dl-btn');
+        btn?.setAttribute('aria-expanded', 'false');
+        btn?.focus();
+        return;
+      }
+      const row = this._q('.vm-actions-row');
+      if (row?.classList.contains('vm-sheet-open')) {
+        row.classList.remove('vm-sheet-open');
+        this._q('.vm-more-btn')?.focus();
+        return;
+      }
+      this.close();
+    });
     this._q('.vm-close-btn').addEventListener('click', () => this.close());
+    // Phones (sheet layout): "More" opens the secondary actions as a bottom sheet.
+    const row = this._q('.vm-actions-row');
+    const setSheet = (open) => {
+      row.classList.toggle('vm-sheet-open', open);
+      this._q('.vm-more-btn').setAttribute('aria-expanded', String(open));
+    };
+    this._q('.vm-more-btn').addEventListener('click', () => setSheet(!row.classList.contains('vm-sheet-open')));
+    this._q('.vm-act-sheet-close').addEventListener('click', () => setSheet(false));
+    this._q('.vm-act-scrim').addEventListener('click', () => setSheet(false));
+    this._q('.vm-act-sheet').addEventListener('click', (e) => {
+      if (e.target.closest('.vm-action-btn:not(.vm-loop-dl-btn):not(.vm-loop-dl-go)')) setSheet(false);
+    });
 
     if (this._cfg.nav) {
       this._q('.vm-nav-prev')?.addEventListener('click', () => this.navigate(-1));
       this._q('.vm-nav-next')?.addEventListener('click', () => this.navigate(1));
     }
 
-    if (this._cfg.multi) {
-      this._bindMultiControls();
-    } else {
-      this._bindSingleControls();
-    }
+    this._bindSingleControls();
   }
 
   _bindSingleControls() {
@@ -394,29 +530,54 @@ export class VideoModal {
       if (e.target !== this._q('.vm-video-el') && e.target !== this._q('.vm-video-wrap')) return;
       this._togglePlay();
     });
+    // Keyboard play/pause on the focused video area (Space, Enter or K).
+    this._q('.vm-video-wrap').addEventListener('keydown', (e) => {
+      if (e.target !== e.currentTarget) return;
+      if (e.key !== ' ' && e.key !== 'Enter' && e.key !== 'k' && e.key !== 'K') return;
+      e.preventDefault();
+      this._togglePlay();
+    });
 
     video.addEventListener('play',  () => {
+      this._keepOnPlay();
       this._frameTime    = null;
       this._frameSeeking = false;
       this._q('.vm-video-wrap').classList.add('vm-playing');
       this._q('.vm-btn-play').innerHTML = '&#9646;&#9646;';
+      this._q('.vm-btn-play').setAttribute('aria-label', 'Pause');
       this._syncFrameDlBtn(false);
     });
     video.addEventListener('pause', () => {
       this._q('.vm-video-wrap').classList.remove('vm-playing');
       this._q('.vm-btn-play').innerHTML = '&#9654;';
+      this._q('.vm-btn-play').setAttribute('aria-label', 'Play');
       this._syncFrameDlBtn(true);
     });
     video.addEventListener('ended', () => {
       this._q('.vm-video-wrap').classList.remove('vm-playing');
       this._q('.vm-btn-play').innerHTML = '&#9654;';
+      this._q('.vm-btn-play').setAttribute('aria-label', 'Play');
       this._syncFrameDlBtn(true);
     });
     video.addEventListener('error', () => {
-      this._q('.vm-video-loading')?.style && (this._q('.vm-video-loading').style.display = 'none');
-      const err = this._q('.vm-video-err');
-      if (err) err.style.display = 'flex';
-      video.controls = true;
+      const loading = this._q('.vm-video-loading');
+      const showError = () => {
+        if (loading) loading.style.display = 'none';
+        const err = this._q('.vm-video-err');
+        if (err) err.style.display = 'flex';
+        video.controls = true;
+      };
+      // Still being fetched from the station: keep the loading state and
+      // retry when the server says, rather than "Clip not available".
+      const waiting = retryVideoIfPreparing(video, {
+        onWaiting: () => {
+          if (!loading) return;
+          loading.textContent = 'Fetching the clip from the station…';
+          loading.style.display = '';
+        },
+        onGiveUp: showError,
+      });
+      if (!waiting) showError();
     });
     video.addEventListener('seeked', () => {
       if (this._frameTime === null) { this._frameSeeking = false; return; }
@@ -451,6 +612,7 @@ export class VideoModal {
       e.stopPropagation();
       const pop = this._q('.vm-loop-dl-popover');
       if (pop) pop.style.display = pop.style.display === 'none' ? '' : 'none';
+      e.currentTarget.setAttribute('aria-expanded', pop && pop.style.display !== 'none' ? 'true' : 'false');
     });
     this._q('.vm-loop-step-dec')?.addEventListener('click', () => {
       const inp = this._q('.vm-loop-count');
@@ -472,12 +634,20 @@ export class VideoModal {
     });
   }
 
-  _bindMultiControls() {
-    this._q('.vm-multi-pp-btn')?.addEventListener('click', () => this._multiTogglePlay());
-    this._q('.vm-multi-scrubber')?.addEventListener('input', () => this._multiScrubDrag());
-  }
-
   // ── Single-video open ──────────────────────────────────────────────────────
+
+  /**
+   * Signal for the metadata listeners of the clip about to load, aborting
+   * those of the previous one. The <video> is reused, so a clip that never
+   * reached its metadata (still being prepared, or skipped with prev/next)
+   * would otherwise leave `once` listeners that run first on the next clip
+   * and replace its trim with the whole duration.
+   */
+  _metaSignal() {
+    this._metaAbort?.abort();
+    this._metaAbort = new AbortController();
+    return this._metaAbort.signal;
+  }
 
   _openSingle(opts) {
     const video = this._q('.vm-video-el');
@@ -495,9 +665,15 @@ export class VideoModal {
     video.src = '';
     video.load();
     const _stackImgReset = this._q('.vm-stack-img');
-    if (_stackImgReset) _stackImgReset.src = '';
+    if (_stackImgReset) {
+      _stackImgReset.src = '';
+      delete _stackImgReset.dataset.full;
+    }
     const _loadingEl = this._q('.vm-video-loading');
-    if (_loadingEl) _loadingEl.style.display = '';
+    if (_loadingEl) {
+      _loadingEl.textContent = 'Loading video…';
+      _loadingEl.style.display = '';
+    }
     video.controls = false;
     video.playbackRate = 1.0;
     this._q('.vm-btn-slow')?.classList.remove('vm-btn-slow-active');
@@ -537,20 +713,23 @@ export class VideoModal {
     // Load video (skipped when opening directly in stack view — deferred to "Back to video")
     const loadingEl = _loadingEl;   // already shown in reset block above
     if (!this._videoDeferred) {
+      const signal = this._metaSignal();
+      video._prepTries = 0;
       video.src = opts.src || '';
       video.load();
       video.addEventListener('loadedmetadata', () => {
         const dur = video.duration || this._trim.duration;
         this._trim.duration = dur;
         if (opts.trimEnd == null) this._trim.end = dur;
+        else this._trim.end = Math.min(this._trim.end, dur);
         this._trimDraw();
         this._durLabel();
         if (this._trim.start > 0) video.currentTime = this._trim.start;
         video.play().catch(() => {});
-      }, { once: true });
+      }, { once: true, signal });
       video.addEventListener('loadeddata', () => {
         if (loadingEl) loadingEl.style.display = 'none';
-      }, { once: true });
+      }, { once: true, signal });
     }
 
     // Detection marker / rewind-to-det button
@@ -575,14 +754,25 @@ export class VideoModal {
       this._q('.vm-stitch-row').style.display = 'none';
     }
 
-    // Download button
-    const dlBtn = this._q('.vm-download-btn');
-    if (dlBtn) {
-      if (opts.download?.onClick) {
-        dlBtn.style.display = '';
-        dlBtn.onclick = () => opts.download.onClick();
-      } else {
-        dlBtn.style.display = 'none';
+    // Download buttons: "Download clip" hands out the original file when the
+    // caller knows where it lives (download.originalUrl); the trim-aware cut
+    // (download.onClick) is then the separate "Download trimmed". Callers
+    // without an original keep the cut on the main button.
+    this._wireDownloadButtons();
+
+    // "Open station" / "Open in Video DB" whenever the clip's station, camera
+    // and night are known.
+    const links = vmOpenLinks({
+      station: opts.station, camera: opts.camera, date: opts.date,
+      filename: opts.filename, detOffset: opts.detOffset,
+    });
+    const linksEl = this._q('.vm-open-links');
+    if (linksEl) {
+      linksEl.style.display = links ? '' : 'none';
+      if (links) {
+        this._q('.vm-open-station').href = links.stationUrl;
+        this._q('.vm-open-vdb').href = links.vdbUrl;
+        this._q('.vm-open-grid').href = links.gridUrl;
       }
     }
 
@@ -594,35 +784,74 @@ export class VideoModal {
     if (loopWrap) loopWrap.style.display = opts.loopDlPath ? '' : 'none';
     if (loopPop)  loopPop.style.display  = 'none';
 
-    // Stack — stackDl only revealed when in stack view (_toggleStack)
+    // Stack — Download stack sits in the action row whenever a stack exists
+    // (not gated behind "Show stack" first); the anon gate below hides it for
+    // public visitors. Show stack still toggles the inline preview.
+    //
+    // The primary stack is the BW FF/max-pixel meteor stack, which exists for
+    // EVERY detection clip. stackUrlFor() honours an explicit opts.stack.url and
+    // otherwise DERIVES it from the clip identity (via /stack/… with its
+    // station→archive→FF-thumbnail fallback), so Download stack is present on
+    // every detection modal — events/archive included — not only when the caller
+    // happened to pass a stack URL. Stash the resolved URL so _toggleStack and
+    // the anon-gate restore logic can read it back.
+    const stackUrl = stackUrlFor(opts);
+    const stackDownloadUrl = stackDownloadUrlFor(opts);
+    this._stackUrl = stackUrl;
+    // The stack VIEW fills the modal, so it swaps the thumbnail for this
+    // full-res image once it has loaded (see _showFullResStack).
+    this._stackFullUrl = fullResStackUrl(stackUrl);
     const showBtn  = this._q('.vm-stack-show-btn');
     const stackDl  = this._q('.vm-stack-dl-btn');
     const stackImg = this._q('.vm-stack-img');
-    if (opts.stack?.url) {
-      if (stackImg) stackImg.src = opts.stack.url;
+    if (stackUrl) {
+      if (stackImg) stackImg.src = stackUrl;
       if (showBtn)  showBtn.style.display = '';
       if (stackDl) {
-        stackDl.style.display = 'none';
-        stackDl.href = opts.stack.url;
-        stackDl.setAttribute('download', opts.stack.url.split('/').pop() || 'stack');
+        stackDl.style.display = '';
+        // Preview uses the fast thumbnail; download hands out the branded
+        // full-res stack (stackDownloadUrl), never the un-branded thumbnail.
+        stackDl.href = stackDownloadUrl || stackUrl;
+        stackDl.setAttribute(
+          'download', decodeURIComponent((stackDownloadUrl || stackUrl).split('?')[0].split('/').pop() || 'stack'));
       }
     } else {
       if (showBtn)  showBtn.style.display = 'none';
       if (stackDl)  stackDl.style.display = 'none';
     }
 
+    // Color stack — the processed/color composite, offered IN ADDITION to the
+    // BW FF stack when the caller supplies one (opts.colorStack.url). The BW
+    // stack above always works even when this is absent.
+    const colorStackDl = this._q('.vm-color-stack-dl-btn');
+    if (colorStackDl) {
+      if (opts.colorStack?.url) {
+        colorStackDl.style.display = '';
+        colorStackDl.href = opts.colorStack.url;
+        colorStackDl.setAttribute(
+          'download',
+          decodeURIComponent(opts.colorStack.url.split('?')[0].split('/').pop() || 'color_stack'));
+      } else {
+        colorStackDl.style.display = 'none';
+      }
+    }
+
     // Open directly in stack view — show stack image, defer video to "Back to video"
-    if (opts.startInStack && opts.stack?.url) {
+    if (opts.startInStack && stackUrl) {
       this._videoDeferred = true;
       this._stackVisible  = true;
       video.style.display = 'none';
       if (loadingEl) loadingEl.style.display     = 'none';
       if (stackImg)  stackImg.style.display       = 'block';
+      this._showFullResStack(stackImg);
       if (showBtn)   showBtn.style.display        = 'none';
       if (stackDl && stackDl.href) stackDl.style.display = '';
       this._q('.vm-backvideo-btn').style.display  = '';
       this._q('.vm-controls-row').style.display   = 'none';
-      if (dlBtn)     dlBtn.style.display          = 'none';
+      for (const sel of ['.vm-download-btn', '.vm-download-trim-btn']) {
+        const b = this._q(sel);
+        if (b) b.style.display = 'none';
+      }
       if (frameDlBtn) frameDlBtn.style.display    = 'none';
       if (loopWrap)  loopWrap.style.display       = 'none';
     }
@@ -650,10 +879,95 @@ export class VideoModal {
 
     // Anonymous public visitors get playback only — hide every operator-only
     // action (download / crop / loop+frame download / stack download+show).
-    // Runs LAST so it overrides the per-control visibility set above, and the
-    // matching multi-mode gate lives in _openMulti. Server-side these actions
-    // are already gated; this just stops us painting dead controls.
+    // Runs LAST so it overrides the per-control visibility set above.
+    // Server-side these actions are already gated; this just stops us
+    // painting dead controls.
     this._applyAnonControlGate();
+
+    // Add-to-Hall-of-Fame toggle — admin-only, and only for a single clip with
+    // a resolvable identity. wireHofButton hides itself for non-admins / clips
+    // without camera+date+filename (e.g. an external GMN clip). Runs after
+    // the anon gate so it owns this button's final visibility. This is what
+    // makes a clip featurable from ANY section that opens the modal.
+    wireHofButton(this._q('.vm-hof-btn'), {
+      camera:             opts.camera,
+      date:               opts.date,
+      filename:           opts.filename,
+      stack:              stackUrl
+                            ? decodeURIComponent(stackUrl.split('?')[0].split('/').pop())
+                            : null,
+      shower:             opts.detection?.shower,
+      peak_magnitude:     opts.detection?.mag_apparent,
+      duration_s:         opts.detection?.duration_s,
+      time_utc:           opts.detection?.time_utc,
+      station_label:      opts.detection?.station,
+      detection_offset_s: opts.detOffset,
+      // Not archived yet: lock it on its station, which re-encodes and uploads
+      // it, so the Hall of Fame add can follow. Station surfaces only.
+      lockForUpload: (opts.station && /\.mkv$/i.test(opts.filename || '')) ? async () => {
+        const data = await lockClip(opts.station, opts.camera, opts.date, opts.filename);
+        wireLockButton(this._q('.vm-lock-btn'), {
+          host: opts.station, camera: opts.camera, date: opts.date, filename: opts.filename,
+          locked: true, lockType: 'manual',
+        });
+        opts.onLocked?.(data);
+      } : null,
+    });
+
+    // Add-to-basket toggle — any signed-in account, same self-gating shape
+    // as wireHofButton (hides for anon sessions / clips without a full
+    // identity). This is what lets a clip be collected for the one-zip
+    // download from ANY section that opens the modal. getTrim is read at
+    // click time, so a sub-range picked with the trim handles rides along
+    // and checkout delivers only those seconds.
+    wireBasketButton(this._q('.vm-basket-btn'), {
+      camera:        opts.camera,
+      date:          opts.date,
+      filename:      opts.filename,
+      stack:         stackUrl
+                       ? decodeURIComponent(stackUrl.split('?')[0].split('/').pop())
+                       : null,
+      station_label: opts.detection?.station,
+      getTrim:       () => this.getTrimState(),
+    });
+
+    // Lock toggle — lets an operator lock a clip from any section that opens
+    // the modal (VDB, RMS, Events, Archive) instead of SSHing to the station.
+    // wireLockButton self-gates: hides for anon / non-owning sessions and for
+    // clips without a full identity, so it slots in harmlessly everywhere.
+    wireLockButton(this._q('.vm-lock-btn'), {
+      host:     opts.station,
+      camera:   opts.camera,
+      date:     opts.date,
+      filename: opts.filename,
+      locked:   opts.locked,
+      lockType: opts.lockType,
+      onLocked: opts.onLocked,
+    });
+
+    // Process-clip button — clip-scoped station action (lock if unlocked +
+    // re-encode + archive upload of THIS chunk). Replaces the old whole-night
+    // process action in the modal: the modal always shows a single clip, so
+    // its process control is clip-scoped; whole-night reruns stay on the
+    // events-page station header and the sysadmin RMS table.
+    // wireProcessClipButton self-gates (admin with a full .mkv identity), so
+    // it slots in harmlessly everywhere the modal opens.
+    wireProcessClipButton(this._q('.vm-process-btn'), {
+      host:      opts.station,
+      camera:    opts.camera,
+      date:      opts.date,
+      filename:  opts.filename,
+      processed: opts.processed,
+    });
+
+    // Hide as a false positive — any signed-in account except a magic-link
+    // session (wireHideButton self-gates on state.CAN_HIDE), and only for a
+    // clip that names a detection.
+    const hideOpts = opts.hide !== undefined ? opts.hide
+      : (opts.camera && opts.detection?.time_utc
+        ? { target: hideTarget(opts.detection, opts.camera), hidden: !!opts.detection.hidden }
+        : null);
+    wireHideButton(this._q('.vm-hide-btn'), hideOpts);
 
     // Detection info section
     const infoSec = this._q('.vm-info-section');
@@ -677,6 +991,89 @@ export class VideoModal {
     }
   }
 
+  /** Show / wire "Download clip" and "Download trimmed" for the open clip. */
+  _wireDownloadButtons() {
+    const dl = this._opts?.download || {};
+    const dlBtn = this._q('.vm-download-btn');
+    const trimBtn = this._q('.vm-download-trim-btn');
+    if (dlBtn) dlBtn.style.display = (dl.originalUrl || dl.onClick) ? '' : 'none';
+    if (trimBtn) trimBtn.style.display = (dl.originalUrl && dl.onClick) ? '' : 'none';
+    this._syncDownloadButtons();
+  }
+
+  /** Label and wire the two download buttons for the current selection.
+   *  Once the viewer has dragged the trim handles to part of the clip, the
+   *  main button downloads that selection and the second one the whole clip;
+   *  before, "Download clip" ignored a moved selection and handed out the whole
+   *  20 s chunk. Untouched, the main button is the whole clip and the second
+   *  one the preset window. A crop owns the main button while it is set. */
+  _syncDownloadButtons() {
+    if (this._cropActive && this._cropBox) return;
+    const dl = this._opts?.download || {};
+    const dlBtn = this._q('.vm-download-btn');
+    const trimBtn = this._q('.vm-download-trim-btn');
+    const sel = dl.onClick ? this._selectionSeconds() : null;
+    if (dlBtn) {
+      if (sel != null) {
+        dlBtn.textContent = `\u2193 Download selection (${sel.toFixed(1)} s)`;
+        dlBtn.title = 'The part between the trim handles';
+        dlBtn.onclick = () => dl.onClick(dlBtn);
+      } else {
+        dlBtn.textContent = '\u2193 Download clip';
+        dlBtn.title = dl.originalUrl ? 'The whole clip at full resolution (MP4)'
+          : 'The part between the trim handles';
+        dlBtn.onclick = dl.originalUrl ? () => this._downloadOriginal(dlBtn)
+          : (dl.onClick ? () => dl.onClick(dlBtn) : null);
+      }
+    }
+    if (trimBtn) {
+      if (!(dl.originalUrl && dl.onClick)) {
+        trimBtn.onclick = null;
+      } else if (sel != null) {
+        trimBtn.textContent = '\u2193 Download whole clip';
+        trimBtn.title = 'The whole clip at full resolution (MP4)';
+        trimBtn.onclick = () => this._downloadOriginal(trimBtn);
+      } else {
+        trimBtn.textContent = '\u2193 Download trimmed';
+        trimBtn.title = 'Only the part between the trim handles (re-encoded)';
+        trimBtn.onclick = () => dl.onClick(trimBtn);
+      }
+    }
+  }
+
+  /** Length in seconds of the viewer's trim selection when they dragged a
+   *  handle to part of the clip, else null. */
+  _selectionSeconds() {
+    const ts = this._trim;
+    if (!ts || !ts.touched) return null;
+    const dur = ts.duration || 0;
+    const inside = ts.start > 0.05 || (dur > 0 && ts.end < dur - 0.05);
+    return inside ? Math.max(0.1, ts.end - ts.start) : null;
+  }
+
+  /** Download the whole clip (download.originalUrl, an MP4 of the original
+   *  frames) under the server's name, with a toast instead of a saved error
+   *  page on failure. A clip still being pulled from the station is waited
+   *  for. */
+  async _downloadOriginal(button) {
+    const url = this._opts?.download?.originalUrl;
+    if (!url) return;
+    const btn = button || this._q('.vm-download-btn');
+    const label = btn ? btn.innerHTML : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Downloading…'; }
+    try {
+      const fallback = this._trim?.filename || decodeURIComponent(url.split('?')[0].split('/').pop() || 'clip');
+      const resp = await saveDownload(url, fallback, {
+        onWait: () => { if (btn) btn.textContent = 'Preparing…'; },
+      });
+      if (resp.status !== 200) _toast(downloadFailedText(resp.status), 'error');
+    } catch (e) {
+      _toast('Download failed', 'error');
+    } finally {
+      if (btn) { btn.disabled = false; btn.innerHTML = label; }
+    }
+  }
+
   /**
    * Hide operator-only single-video controls for an anonymous visitor.
    * No-op for logged-in operators — they keep the full action set. Called at
@@ -686,11 +1083,19 @@ export class VideoModal {
     if (!_vmIsAnon()) return;
     for (const sel of [
       '.vm-download-btn',      // Download clip
+      '.vm-download-trim-btn', // Download trimmed
+      '.vm-open-links',        // Open station / Video DB (station pages need a login)
       '.vm-frame-dl-btn',      // Download frame
       '.vm-loop-dl-wrap',      // Download loop (+ popover)
       '.vm-crop-btn',          // Crop
-      '.vm-stack-dl-btn',      // Download stack
+      '.vm-stack-dl-btn',      // Download stack (BW FF)
+      '.vm-color-stack-dl-btn',// Download color stack
       '.vm-stack-show-btn',    // Show stack
+      '.vm-hof-btn',           // Add to Hall of Fame (admin-only anyway)
+      '.vm-basket-btn',        // Add to basket (signed-in-only anyway)
+      '.vm-lock-btn',          // Lock clip (operator-only anyway)
+      '.vm-process-btn',       // Process clip (admin-only anyway)
+      '.vm-hide-btn',          // Hide as a false positive (signed-in only anyway)
     ]) {
       const el = this._q(sel);
       if (el) el.style.display = 'none';
@@ -702,188 +1107,22 @@ export class VideoModal {
     if (cropCanvas) cropCanvas.style.display = 'none';
   }
 
-  // ── Multi-video open ───────────────────────────────────────────────────────
-
-  _openMulti(opts) {
-    const WIN = opts.windowSec ?? 5;
-    this._multiWinPre  = WIN;
-    this._multiWinPost = WIN;
-    this._multiVideos  = [];
-
-    this._q('.vm-title').textContent = opts.title || '';
-    this._q('.vm-multi-bar').style.display = 'none';
-    const status = this._q('.vm-multi-status');
-    status.textContent = 'Loading videos…';
-    status.className = 'vm-multi-status';
-    this._q('.vm-multi-grid').innerHTML = '';
-
-    // Badges
-    const badges = this._q('.vm-multi-badges');
-    const dlBtns = this._q('.vm-multi-dl-btns');
-    if (badges) badges.style.display = '';
-    if (dlBtns) dlBtns.style.display = '';
-    if (badges) badges.innerHTML = '';
-    if (dlBtns) dlBtns.innerHTML = '';
-
-    const videos = opts.videos || [];
-    // Entries with no URL are rendered as placeholder tiles but don't count
-    // toward the metadata/seek synchronisation barrier.
-    const count = videos.filter(w => w.url).length;
-
-    if (count > 1 && badges) {
-      const stations = new Set(videos.filter(w => w.url).map(v => v.station));
-      badges.innerHTML =
-        `<span class="vm-badge">${count} cameras</span>` +
-        `<span class="vm-badge">${stations.size} station${stations.size !== 1 ? 's' : ''}</span>`;
-    }
-
-    // Scrubber setup
-    const scrubber = this._q('.vm-multi-scrubber');
-    if (scrubber) {
-      scrubber.min   = -WIN * 100;
-      scrubber.max   =  WIN * 100;
-      scrubber.value = -WIN * 100;
-    }
-    this._multiSetT(-WIN);
-
-    // Tick marks
-    const ticks = this._q('.vm-multi-scrubber-ticks');
-    if (ticks) {
-      const marks = [];
-      for (let t = -WIN; t <= WIN; t++) marks.push(t === 0 ? '0' : (t > 0 ? '+' : '') + t + 's');
-      ticks.innerHTML = marks.map(m => `<span>${m}</span>`).join('');
-    }
-
-    // Per-witness download / stack-download buttons in header — operator-only.
-    // Anonymous visitors get synchronized multi-camera playback but no
-    // download controls (server-side downloads are gated regardless).
-    const _anon = _vmIsAnon();
-    for (const w of videos) {
-      if (_anon) break;
-      if (w.downloadUrl && dlBtns) {
-        const btn = document.createElement('button');
-        btn.className = 'vm-action-btn secondary';
-        btn.style.cssText = 'font-size:11px;padding:3px 9px';
-        btn.textContent = '⤓ ' + w.cam;
-        btn.title = 'Download ' + w.cam;
-        btn.addEventListener('click', () => this._multiDownload(btn, w));
-        dlBtns.appendChild(btn);
-      }
-      if (w.stackUrl && dlBtns) {
-        const a = document.createElement('a');
-        a.className = 'vm-action-btn secondary';
-        a.style.cssText = 'font-size:11px;padding:3px 9px';
-        a.textContent = '⊟ ' + w.cam;
-        a.href = w.stackUrl;
-        a.download = '';
-        dlBtns.appendChild(a);
-      }
-    }
-
-    // Grid columns + video max-height by witness count
-    const cols = count === 1 ? 1 : count <= 4 ? 2 : 3;
-    const maxH = count === 1 ? '520px' : count === 2 ? '400px' : count <= 4 ? '300px' : '220px';
-    const grid = this._q('.vm-multi-grid');
-    grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-
-    // Coordination counters
-    const total = count;
-    let metaDone = 0, seekDone = 0;
-
-    const onSeeked = () => {
-      seekDone++;
-      status.textContent = `Buffering… ${seekDone}/${total}`;
-      if (seekDone < total) return;
-      status.className = 'vm-multi-status ready';
-      status.textContent = 'Ready';
-      this._q('.vm-multi-bar').style.display = 'flex';
-      setTimeout(() => { status.className = 'vm-multi-status hidden'; }, 1500);
-      this._multiPlay();
-    };
-
-    const onMeta = () => {
-      metaDone++;
-      if (metaDone < total) return;
-      this._multiRecomputeBounds();
-      const startT = -this._multiWinPre;
-      this._multiSetT(startT);
-      for (const v of this._multiVideos) {
-        if (!isFinite(v.el.duration)) { onSeeked(); continue; }
-        v.el.addEventListener('seeked', onSeeked, { once: true });
-        v.el.currentTime = Math.max(0, v.offset + startT);
-      }
-    };
-
-    for (const w of videos) {
-      const offset = w.offset ?? 0;
-      const cell  = document.createElement('div');
-      cell.className = 'vm-multi-cell';
-
-      const lbl = document.createElement('div');
-      lbl.className = 'vm-multi-cell-label';
-      let lblText = w.cam;
-      if (w.label) lblText += ' · ' + w.label;
-      if (offset !== 0) lblText += ' · @' + offset.toFixed(1) + 's';
-      lbl.textContent = lblText;
-
-      if (!w.url) {
-        // Placeholder tile for cameras with no matching chunk — no countdown.
-        const d = document.createElement('div');
-        d.className = 'vm-multi-cell-empty';
-        d.textContent = 'No clip in window';
-        cell.appendChild(d);
-        cell.appendChild(lbl);
-        grid.appendChild(cell);
-        continue;
-      }
-
-      const video = document.createElement('video');
-      video.src     = w.url;
-      video.preload = 'auto';
-      video.controls = true;
-      video.style.maxHeight = maxH;
-      video.addEventListener('click', () => this._multiTogglePlay());
-      video.onerror = () => {
-        const d = document.createElement('div');
-        d.style.cssText = 'display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;height:80px';
-        d.textContent = 'Video unavailable';
-        cell.appendChild(d);
-        onMeta(); // count as ready even on error
-      };
-      this._multiVideos.push({ el: video, offset });
-
-      cell.appendChild(video);
-      cell.appendChild(lbl);
-      grid.appendChild(cell);
-
-      if (video.readyState >= 1) onMeta();
-      else video.addEventListener('loadedmetadata', onMeta, { once: true });
-    }
-  }
-
-  async _multiDownload(btn, w) {
-    const origText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = '…';
-    try {
-      const resp = await fetch(w.downloadUrl);
-      if (!resp.ok) { _toast('Download failed', 'error'); return; }
-      const blob = await resp.blob();
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = (w.filename || w.cam + '.mp4').replace(/\.mkv$/, '.mp4');
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-    } catch (_) {
-      _toast('Download failed', 'error');
-    } finally {
-      btn.disabled = false;
-      btn.textContent = origText;
-    }
-  }
-
   // ── Single-video playback ──────────────────────────────────────────────────
+
+  /** Keep the open clip once it plays (keepClip: kept on the Storage Box and
+   *  locked on its station), and show the lock it now has. */
+  _keepOnPlay() {
+    const o = this._opts;
+    if (!o) return;
+    keepClip(o.station, o.camera, o.date, o.filename).then(data => {
+      if (!data?.locked || this._opts !== o) return;
+      wireLockButton(this._q('.vm-lock-btn'), {
+        host: o.station, camera: o.camera, date: o.date, filename: o.filename,
+        locked: true, lockType: data.lock_type,
+      });
+      o.onLocked?.(data);
+    });
+  }
 
   _togglePlay() {
     const v = this._q('.vm-video-el');
@@ -901,7 +1140,9 @@ export class VideoModal {
     if (!v) return;
     this._slowActive = !this._slowActive;
     v.playbackRate = this._slowActive ? 0.5 : 1.0;
-    this._q('.vm-btn-slow')?.classList.toggle('vm-btn-slow-active', this._slowActive);
+    const slowBtn = this._q('.vm-btn-slow');
+    slowBtn?.classList.toggle('vm-btn-slow-active', this._slowActive);
+    slowBtn?.setAttribute('aria-pressed', this._slowActive ? 'true' : 'false');
   }
 
   _rewind() {
@@ -968,12 +1209,7 @@ export class VideoModal {
       const filename = t?.filename || t?.videoSrc?.split('/').pop() || 'frame';
       const base     = filename.replace(/\.[^.]+$/, '');
       const sec      = (this._frameTime ?? v.currentTime).toFixed(2).replace('.', 's');
-      const a        = document.createElement('a');
-      a.href         = URL.createObjectURL(blob);
-      a.download     = `${base}_${sec}.jpg`;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      saveBlob(blob, `${base}_${sec}.jpg`);
     }, 'image/jpeg', 0.92);
   }
 
@@ -996,13 +1232,8 @@ export class VideoModal {
       const resp = await fetch(url);
       if (!resp.ok) { _toast('Frame download failed', 'error'); return; }
       const blob = await resp.blob();
-      const a    = document.createElement('a');
-      a.href     = URL.createObjectURL(blob);
       const sec  = frameTime.toFixed(2).replace('.', 's');
-      a.download = (fn.replace(/\.[^.]+$/, '') || 'crop') + `_crop_${sec}.jpg`;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      saveBlob(blob, (fn.replace(/\.[^.]+$/, '') || 'crop') + `_crop_${sec}.jpg`);
     } catch (_) {
       _toast('Frame download failed', 'error');
     } finally {
@@ -1012,7 +1243,9 @@ export class VideoModal {
 
   _toggleLoop() {
     this._loopActive = !this._loopActive;
-    this._q('.vm-btn-loop')?.classList.toggle('vm-btn-loop-active', this._loopActive);
+    const loopBtn = this._q('.vm-btn-loop');
+    loopBtn?.classList.toggle('vm-btn-loop-active', this._loopActive);
+    loopBtn?.setAttribute('aria-pressed', this._loopActive ? 'true' : 'false');
     // If loop just activated and video is past trim end, rewind to trim start
     if (this._loopActive) {
       const v = this._q('.vm-video-el');
@@ -1039,13 +1272,7 @@ export class VideoModal {
         _toast(data.detail || 'Loop download failed', 'error');
         return;
       }
-      const blob = await resp.blob();
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = ts.filename.replace(/\.[^.]+$/, '') + `_loop${loops}x.mp4`;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      saveBlob(await resp.blob(), ts.filename.replace(/\.[^.]+$/, '') + `_loop${loops}x.mp4`);
       const pop = this._q('.vm-loop-dl-popover');
       if (pop) pop.style.display = 'none';
     } catch (_) {
@@ -1082,6 +1309,7 @@ export class VideoModal {
     }
     if (cur) cur.textContent = this._fmtTime(v?.currentTime ?? 0);
     if (tot) tot.textContent = this._fmtTime(dur);
+    this._syncSeekAria(v?.currentTime ?? 0, dur);
 
     // Loop: when active, wrap back to trim start when we hit trim end
     if (this._loopActive && v && !v.paused) {
@@ -1089,6 +1317,15 @@ export class VideoModal {
       const start = this._trim?.start ?? 0;
       if (v.currentTime >= end) v.currentTime = start;
     }
+  }
+
+  /** Mirror the playhead position onto the trackbar's slider semantics. */
+  _syncSeekAria(t, dur) {
+    const bar = this._q('.vm-trackbar');
+    if (!bar) return;
+    bar.setAttribute('aria-valuemax', (dur || 0).toFixed(1));
+    bar.setAttribute('aria-valuenow', (t || 0).toFixed(1));
+    bar.setAttribute('aria-valuetext', `${(t || 0).toFixed(1)} s of ${(dur || 0).toFixed(1)} s`);
   }
 
   _fmtTime(s) {
@@ -1111,6 +1348,13 @@ export class VideoModal {
     const eh = this._q('.vm-trackbar-end-handle');
     if (sh) sh.style.left = pct(ts.start);
     if (eh) eh.style.left = pct(ts.end);
+    for (const [h, val] of [[sh, ts.start], [eh, ts.end]]) {
+      if (!h) continue;
+      h.setAttribute('aria-valuemin', '0');
+      h.setAttribute('aria-valuemax', ts.duration.toFixed(1));
+      h.setAttribute('aria-valuenow', val.toFixed(1));
+      h.setAttribute('aria-valuetext', `${val.toFixed(1)} s`);
+    }
 
     const det = this._q('.vm-trackbar-det-marker');
     if (det) {
@@ -1145,12 +1389,41 @@ export class VideoModal {
     const bar   = this._q('.vm-trackbar');
     const video = this._q('.vm-video-el');
 
-    // Click on empty bar to seek
-    bar.addEventListener('pointerdown', (e) => {
-      if (e.target !== bar && e.target !== this._q('.vm-trackbar-fill')) return;
+    // Keyboard seek: arrows step 0.5 s (Shift: 5 s), Home/End jump to the
+    // trim points. Stops propagation so page-level arrow shortcuts (VDB
+    // prev/next clip) do not fire while the seek bar has focus.
+    bar.addEventListener('keydown', (e) => {
+      if (e.target !== bar) return;
+      const dur = this._trim?.duration || video.duration || 0;
+      if (!dur) return;
+      const step = e.shiftKey ? 5 : 0.5;
+      let t = null;
+      if (e.key === 'ArrowRight' || e.key === 'ArrowUp') t = video.currentTime + step;
+      else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') t = video.currentTime - step;
+      else if (e.key === 'Home') t = this._trim?.start ?? 0;
+      else if (e.key === 'End') t = this._trim?.end ?? dur;
+      if (t === null) return;
       e.preventDefault(); e.stopPropagation();
+      video.currentTime = Math.max(0, Math.min(dur, t));
+      this._rafTick();
+    });
+
+    // Press anywhere on the bar (its hit zone reaches well above and below
+    // the 6 px track, see .vm-trackbar::before) to seek there, and keep
+    // dragging to scrub. The handles and the playhead have their own drags.
+    const seekTo = (clientX) => {
       const { left, width } = bar.getBoundingClientRect();
-      video.currentTime = Math.max(0, Math.min(1, (e.clientX - left) / width)) * (this._trim?.duration || 0);
+      video.currentTime = Math.max(0, Math.min(1, (clientX - left) / width)) * (this._trim?.duration || 0);
+    };
+    bar.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.vm-trackbar-start-handle, .vm-trackbar-end-handle, .vm-trackbar-playhead')) return;
+      e.preventDefault(); e.stopPropagation();
+      seekTo(e.clientX);
+      bar.setPointerCapture?.(e.pointerId);
+      bar.onpointermove = (ev) => seekTo(ev.clientX);
+      bar.onpointerup = bar.onpointercancel = () => {
+        bar.onpointermove = null; bar.onpointerup = null; bar.onpointercancel = null;
+      };
     });
 
     // Playhead drag
@@ -1167,6 +1440,26 @@ export class VideoModal {
 
     if (!this._cfg.trim) return;
 
+    // Keyboard trim: arrows move a handle 0.1 s (Shift: 1 s).
+    for (const [sel, key] of [['.vm-trackbar-start-handle','start'],['.vm-trackbar-end-handle','end']]) {
+      this._q(sel)?.addEventListener('keydown', (e) => {
+        const ts = this._trim;
+        if (!ts?.duration) return;
+        const step = e.shiftKey ? 1 : 0.1;
+        let d = 0;
+        if (e.key === 'ArrowRight' || e.key === 'ArrowUp') d = step;
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') d = -step;
+        else return;
+        e.preventDefault(); e.stopPropagation();
+        if (key === 'start') ts.start = Math.max(0, Math.min(ts.start + d, ts.end - 0.1));
+        else                  ts.end   = Math.min(ts.duration, Math.max(ts.end + d, ts.start + 0.1));
+        ts.touched = true;
+        this._trimDraw();
+        this._durLabel();
+        this._syncDownloadButtons();
+      });
+    }
+
     // Trim handle drags
     for (const [sel, key] of [['.vm-trackbar-start-handle','start'],['.vm-trackbar-end-handle','end']]) {
       const handle = this._q(sel);
@@ -1181,8 +1474,10 @@ export class VideoModal {
           if (!ts) return;
           if (key === 'start') ts.start = Math.min(t, ts.end   - 0.1);
           else                  ts.end   = Math.max(t, ts.start + 0.1);
+          ts.touched = true;   // the viewer's own selection from here on
           this._trimDraw();
           this._durLabel();
+          this._syncDownloadButtons();
         };
         handle.onpointerup = () => { handle.onpointermove = null; handle.onpointerup = null; };
       });
@@ -1190,6 +1485,21 @@ export class VideoModal {
   }
 
   // ── Stack toggle ───────────────────────────────────────────────────────────
+
+  /** Swap the stack view's 480 px thumbnail for the full-res stack. The
+   *  thumbnail stays up until the big image has loaded, and a load that lands
+   *  after the modal moved on to another clip is dropped. */
+  _showFullResStack(img) {
+    const want = this._stackFullUrl;
+    if (!img || !want || want === this._stackUrl || img.dataset.full === want) return;
+    const pre = new Image();
+    pre.onload = () => {
+      if (this._stackFullUrl !== want) return;
+      img.src = want;
+      img.dataset.full = want;
+    };
+    pre.src = want;
+  }
 
   _toggleStack() {
     const video     = this._q('.vm-video-el');
@@ -1208,6 +1518,7 @@ export class VideoModal {
       if (ctrlRow)   ctrlRow.style.display   = 'none';
       if (stitchRow) stitchRow.style.display = 'none';
       if (img)       img.style.display       = 'block';
+      this._showFullResStack(img);
       if (showBtn)   showBtn.style.display   = 'none';
       if (backBtn)   backBtn.style.display   = '';
       if (stackDl && stackDl.href) stackDl.style.display = '';
@@ -1216,6 +1527,7 @@ export class VideoModal {
         actRow.querySelector('.vm-frame-dl-btn').style.display  = 'none';
         actRow.querySelector('.vm-loop-dl-wrap').style.display  = 'none';
         actRow.querySelector('.vm-download-btn').style.display  = 'none';
+        actRow.querySelector('.vm-download-trim-btn').style.display = 'none';
         actRow.querySelector('.vm-crop-btn').style.display = 'none';
       }
       // Deactivate crop when switching to stack
@@ -1232,10 +1544,13 @@ export class VideoModal {
       if (img)       img.style.display       = 'none';
       if (showBtn)   showBtn.style.display   = '';
       if (backBtn)   backBtn.style.display   = 'none';
-      if (stackDl)   stackDl.style.display   = 'none';
-      // Restore download-clip and crop buttons
-      const dlBtn = this._q('.vm-download-btn');
-      if (dlBtn && this._opts?.download?.onClick) dlBtn.style.display = '';
+      // Download stack stays in the action row after leaving stack view.
+      if (stackDl)   stackDl.style.display   = this._stackUrl ? '' : 'none';
+      const colorStackDl = this._q('.vm-color-stack-dl-btn');
+      if (colorStackDl) colorStackDl.style.display = this._opts?.colorStack?.url ? '' : 'none';
+      // Restore download-clip and crop buttons (entering the stack view
+      // already switched any crop off).
+      this._wireDownloadButtons();
       const cropBtn = this._q('.vm-crop-btn');
       if (cropBtn) cropBtn.style.display = '';
       if (this._videoDeferred) {
@@ -1243,7 +1558,9 @@ export class VideoModal {
         this._videoDeferred = false;
         const loadingEl = this._q('.vm-video-loading');
         if (loadingEl) loadingEl.style.display = '';
-        video.src = this._opts?.src || '';
+        const signal = this._metaSignal();
+        video._prepTries = 0;
+      video.src = this._opts?.src || '';
         video.load();
         video.addEventListener('loadedmetadata', () => {
           const dur = video.duration || this._trim?.duration;
@@ -1255,10 +1572,10 @@ export class VideoModal {
           this._durLabel();
           if (this._trim?.start > 0) video.currentTime = this._trim.start;
           video.play().catch(() => {});
-        }, { once: true });
+        }, { once: true, signal });
         video.addEventListener('loadeddata', () => {
           if (loadingEl) loadingEl.style.display = 'none';
-        }, { once: true });
+        }, { once: true, signal });
       } else {
         video.play().catch(() => {});
       }
@@ -1274,10 +1591,14 @@ export class VideoModal {
     const btn  = this._q('.vm-info-expand-btn');
     if (!full) return;
     full.classList.toggle('expanded', expand);
-    if (btn) btn.innerHTML = expand ? '&#9650; Collapse info' : '&#9660; Expand info';
+    if (btn) {
+      btn.innerHTML = expand ? '&#9650; Collapse info' : '&#9660; Expand info';
+      btn.setAttribute('aria-expanded', expand ? 'true' : 'false');
+    }
     if (expand) {
       setTimeout(() => {
-        this._el?.scrollTo({ top: this._el.scrollHeight, behavior: 'smooth' });
+        const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+        this._el?.scrollTo({ top: this._el.scrollHeight, behavior: reduce ? 'auto' : 'smooth' });
       }, 260);
     }
   }
@@ -1292,12 +1613,22 @@ export class VideoModal {
     };
 
     const shower = det.shower && det.shower !== 'SPO' ? det.shower : 'Sporadic';
+    const traj = det.trajectory || null;
 
     // Collapsed 1-line summary
     const sumParts = [];
     if (det.mag_apparent != null) sumParts.push('Mag ' + fmtMag(det.mag_apparent));
     sumParts.push(shower);
     if (det.duration_s != null) sumParts.push(fmt(det.duration_s, 1) + 's');
+    if (traj) {
+      // The one fact worth carrying in the collapsed line: this meteor has a
+      // real trajectory, so there is an orbit waiting behind "Expand info".
+      // The entry speed, as on the cards; the geocentric Vg (which drops
+      // below 11.2 km/s for slow meteoroids) is in the expanded grid.
+      sumParts.push(traj.velocity_init_km_s != null
+        ? 'entry ' + fmt(traj.velocity_init_km_s, 1) + ' km/s · orbit'
+        : 'orbit');
+    }
     this._q('.vm-info-summary-text').textContent = sumParts.join(' · ');
 
     const fmtTime = t => t ? t.replace('T', ' ').substring(0, 19) + ' UTC' : null;
@@ -1328,14 +1659,90 @@ export class VideoModal {
           + (det.radiant_elev != null ? ' · elev ' + fmt(det.radiant_elev,0) + '°' : '')
         : null],
       ['Solar lon.',    det.solar_lon != null ? fmt(det.solar_lon,3) + '°' : null],
+      ...this._trajectoryRows(traj, fmt, fmtMag, fmtRD),
     ].filter(([, v]) => v != null);
 
     const grid = this._q('.vm-info-grid');
     if (grid) {
-      grid.innerHTML = rows.map(([k, v]) =>
-        `<span class="vm-info-label">${k}</span><span>${v}</span>`
+      grid.innerHTML = rows.map(([k, v]) => k === _INFO_HEADING
+        ? `<span class="vm-info-head">${escHtml(v)}</span>`
+        : `<span class="vm-info-label">${k}</span><span>${escHtml(v)}</span>`
       ).join('');
     }
+  }
+
+  /** Rows describing the multi-station GMN solution this detection fed into.
+   *
+   *  Empty when the meteor was seen by one camera only, or when GMN has not
+   *  published the night yet (it runs 4-15 days behind), which is the normal
+   *  state for anything recent — the panel simply stops after the
+   *  single-station block rather than showing a wall of dashes.
+   */
+  _trajectoryRows(traj, fmt, fmtMag, fmtRD) {
+    if (!traj) return [];
+
+    // Velocities: what it entered at, what it averaged, and the geocentric
+    // value the orbit is derived from. Any subset may be missing.
+    const vel = [
+      traj.velocity_init_km_s != null ? 'entry ' + fmt(traj.velocity_init_km_s, 1) : null,
+      traj.velocity_avg_km_s  != null ? 'mean '  + fmt(traj.velocity_avg_km_s, 1)  : null,
+      traj.velocity_geo_km_s  != null ? 'geo '   + fmt(traj.velocity_geo_km_s, 1)  : null,
+    ].filter(Boolean);
+
+    // Heights read as a path (begin → peak → end). A stage GMN did not solve
+    // drops out of both the numbers and the caption rather than leaving a dash
+    // in the middle of the arrow chain.
+    const ht = [
+      ['begin', traj.altitude_begin_km],
+      ['peak',  traj.altitude_peak_km],
+      ['end',   traj.altitude_end_km],
+    ].filter(([, v]) => v != null);
+    const htStr = ht.length
+      ? ht.map(([, v]) => fmt(v, 1)).join(' → ') + ' km'
+        + (ht.length > 1 ? ` (${ht.map(([k]) => k).join('/')})` : '')
+      : null;
+
+    const orbit = [
+      traj.orbit_a_au != null ? 'a ' + fmt(traj.orbit_a_au, 3) + ' AU' : null,
+      traj.orbit_e    != null ? 'e ' + fmt(traj.orbit_e, 3)            : null,
+      traj.orbit_i_deg!= null ? 'i ' + fmt(traj.orbit_i_deg, 2) + '°'  : null,
+    ].filter(Boolean);
+    const angles = [
+      traj.orbit_peri_deg != null ? 'ω ' + fmt(traj.orbit_peri_deg, 2) + '°' : null,
+      traj.orbit_node_deg != null ? 'Ω ' + fmt(traj.orbit_node_deg, 2) + '°' : null,
+    ].filter(Boolean);
+    const dist = [
+      traj.orbit_q_au     != null ? 'q ' + fmt(traj.orbit_q_au, 3) + ' AU'     : null,
+      traj.orbit_q_aph_au != null ? 'Q ' + fmt(traj.orbit_q_aph_au, 3) + ' AU' : null,
+    ].filter(Boolean);
+
+    const stations = Array.isArray(traj.stations) && traj.stations.length
+      ? traj.stations.join(', ')
+      : (traj.station_count != null ? traj.station_count + ' stations' : null);
+
+    return [
+      [_INFO_HEADING, 'Multi-station solution · GMN'
+        + (traj.station_count != null ? ` · ${traj.station_count} cameras` : '')],
+      ['Cameras',        stations],
+      ['Radiant (geo)',  traj.ra_geo_deg != null || traj.dec_geo_deg != null
+        ? fmtRD(traj.ra_geo_deg, traj.dec_geo_deg) : null],
+      ['Velocity',       vel.length ? vel.join(' · ') + ' km/s' : null],
+      ['Heliocentric V', traj.velocity_hel_km_s != null
+        ? fmt(traj.velocity_hel_km_s, 1) + ' km/s' : null],
+      ['Height',         htStr],
+      ['Peak mag (abs)', traj.peak_absolute_magnitude != null
+        ? fmtMag(traj.peak_absolute_magnitude) : null],
+      ['Mass',           fmtMass(traj.mass_kg)],
+      ['Orbit',          orbit.length  ? orbit.join(' · ')  : null],
+      ['Node/peri',      angles.length ? angles.join(' · ') : null],
+      ['q / Q',          dist.length   ? dist.join(' · ')   : null],
+      ['Tisserand',      traj.tisserand != null ? fmt(traj.tisserand, 2) : null],
+      // Convergence angle is the solution's quality knob: below ~15° the
+      // intersecting-planes geometry is shallow and the orbit is soft.
+      ['Convergence',    traj.convergence_angle_deg != null
+        ? fmt(traj.convergence_angle_deg, 1) + '°' : null],
+      ['Trajectory ID',  traj.trajectory_id || null],
+    ];
   }
 
   // ── Crop box ───────────────────────────────────────────────────────────────
@@ -1364,12 +1771,15 @@ export class VideoModal {
     if (dlBtn)   dlBtn.textContent   = cropped ? '⬇ Download cropped clip' : '⬇ Download clip';
     if (frameDl) frameDl.textContent = cropped ? '⬇ Download cropped frame' : '⬇ Download frame';
     if (loopBtn) loopBtn.textContent = cropped ? '⬆ Download cropped loop' : '⬆ Download loop';
-    // Wire onclick for download button
+    // Wire onclick for download button. A crop replaces both downloads with
+    // the cropped cut; without one the original/trimmed pair comes back.
     if (dlBtn) {
       if (cropped) {
         dlBtn.onclick = () => this._downloadCropped();
+        const trimBtn = this._q('.vm-download-trim-btn');
+        if (trimBtn) trimBtn.style.display = 'none';
       } else {
-        dlBtn.onclick = () => this._opts?.download?.onClick?.();
+        this._wireDownloadButtons();
       }
     }
   }
@@ -1505,13 +1915,7 @@ export class VideoModal {
       const url  = `/download_cropped/${ts.station}/${ts.camera}/${ts.date}/${encodeURIComponent(fn)}?${params}`;
       const resp = await fetch(url);
       if (!resp.ok) { _toast('Crop download failed', 'error'); return; }
-      const blob = await resp.blob();
-      const a    = document.createElement('a');
-      a.href     = URL.createObjectURL(blob);
-      a.download = (fn.replace(/\.[^.]+$/, '') || 'crop') + '_crop.mp4';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      saveBlob(await resp.blob(), (fn.replace(/\.[^.]+$/, '') || 'crop') + '_crop.mp4');
     } catch (_) {
       _toast('Crop download failed', 'error');
     } finally {
@@ -1538,13 +1942,7 @@ export class VideoModal {
       const url  = `/cropped_loop_clip/${ts.station}/${ts.camera}/${ts.date}/${encodeURIComponent(fn)}?${params}`;
       const resp = await fetch(url);
       if (!resp.ok) { _toast('Crop loop download failed', 'error'); return; }
-      const blob = await resp.blob();
-      const a    = document.createElement('a');
-      a.href     = URL.createObjectURL(blob);
-      a.download = (fn.replace(/\.[^.]+$/, '') || 'crop') + `_crop_loop${loops}x.mp4`;
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      saveBlob(await resp.blob(), (fn.replace(/\.[^.]+$/, '') || 'crop') + `_crop_loop${loops}x.mp4`);
       const pop = this._q('.vm-loop-dl-popover');
       if (pop) pop.style.display = 'none';
     } catch (_) {
@@ -1562,125 +1960,65 @@ export class VideoModal {
     list.innerHTML = '';
     for (const w of witnesses) {
       const btn = document.createElement('button');
+      btn.type = 'button';
       btn.className = 'vm-witness-btn';
       btn.textContent = '▶ ' + (w.label || w.cam);
       btn.title = [w.station, w.time].filter(Boolean).join(' · ');
       btn.addEventListener('click', () => {
         const video = this._q('.vm-video-el');
-        if (video) { video.src = w.url; video.load(); video.play().catch(() => {}); }
+        if (!video) return;
+
+        // Rebuild modal state for the witness clip so the trackbar, detection
+        // marker, duration label and download/frame/crop handlers all track the
+        // new source instead of the original clip.
+        this._stopRaf();
+        this._trim = {
+          start:    0,
+          end:      20,
+          duration: 20,
+          detOffset: null,
+          stitched: false,
+          stitchAt: null,
+          filename2: null,
+          stitchAdjIsLater: false,
+          station:  w.station || '',
+          camera:   w.cam     || '',
+          date:     '',
+          filename: (w.url || '').split('/').pop() || '',
+          videoSrc: w.url || '',
+        };
+
+        // Reset loading/error overlays so stale states from the previous clip
+        // don't leak into the witness view.
+        const loadingEl = this._q('.vm-video-loading');
+        if (loadingEl) loadingEl.style.display = '';
+        this._q('.vm-video-err').style.display = 'none';
+        video.controls = false;
+
+        this._trimDraw();
+        this._durLabel();
+        this._startRaf();
+
+        video.pause();
+        const signal = this._metaSignal();
+        video._prepTries = 0;
+        video.src = w.url;
+        video.load();
+        video.addEventListener('loadedmetadata', () => {
+          const dur = video.duration || this._trim.duration;
+          this._trim.duration = dur;
+          this._trim.end = dur;
+          this._trimDraw();
+          this._durLabel();
+          video.play().catch(() => {});
+        }, { once: true, signal });
+        video.addEventListener('loadeddata', () => {
+          if (loadingEl) loadingEl.style.display = 'none';
+        }, { once: true, signal });
+
         this._q('.vm-title').textContent = w.label || w.cam;
       });
       list.appendChild(btn);
-    }
-  }
-
-  // ── Multi-video playback ───────────────────────────────────────────────────
-
-  _multiGetT()  {
-    const s = this._q('.vm-multi-scrubber');
-    return s ? parseInt(s.value, 10) / 100 : 0;
-  }
-
-  _multiSetT(t) {
-    const s   = this._q('.vm-multi-scrubber');
-    const lbl = this._q('.vm-multi-pos-label');
-    if (s)   s.value = Math.round(t * 100);
-    if (lbl) lbl.textContent = (t >= 0 ? '+' : '') + t.toFixed(1) + 's';
-  }
-
-  _multiScrubDrag() {
-    const t = this._multiGetT();
-    this._multiSetT(t);
-    this._multiSeekAll(t);
-  }
-
-  _multiSeekAll(t) {
-    for (const v of this._multiVideos) {
-      const target = Math.max(0, v.offset + t);
-      if (isFinite(v.el.duration) && target <= v.el.duration) v.el.currentTime = target;
-    }
-  }
-
-  _multiPlay() {
-    this._multiPlaying = true;
-    const btn = this._q('.vm-multi-pp-btn');
-    if (btn) btn.innerHTML = '&#9646;&#9646;';
-    const t = this._multiGetT();
-    for (const v of this._multiVideos) {
-      // Only start clips whose reference point has been reached (offset + t >= 0).
-      // Late clips (negative offset, start after reference) are woken by the RAF.
-      if (v.offset + t >= 0) v.el.play().catch(() => {});
-    }
-    this._multiStartRaf();
-  }
-
-  _multiPause() {
-    this._multiPlaying = false;
-    const btn = this._q('.vm-multi-pp-btn');
-    if (btn) btn.innerHTML = '&#9654;';
-    for (const v of this._multiVideos) v.el.pause();
-    this._multiStopRaf();
-  }
-
-  _multiTogglePlay() {
-    if (this._multiPlaying) {
-      this._multiPause();
-    } else {
-      if (this._multiGetT() >= this._multiWinPost) {
-        this._multiSetT(-this._multiWinPre);
-        this._multiSeekAll(-this._multiWinPre);
-      }
-      this._multiPlay();
-    }
-  }
-
-  _multiStartRaf() {
-    if (this._multiRaf) cancelAnimationFrame(this._multiRaf);
-    const tick = () => {
-      if (!this._multiPlaying) return;
-      // Leader = earliest-starting clip with known duration.
-      let leader = null;
-      for (const v of this._multiVideos) {
-        if (isFinite(v.el.duration) && (!leader || v.offset > leader.offset)) leader = v;
-      }
-      if (leader) {
-        const t = leader.el.currentTime - leader.offset;
-        this._multiSetT(t);
-        if (t >= this._multiWinPost) { this._multiPause(); return; }
-        // Wake late clips (negative offset) when global time reaches their start.
-        for (const v of this._multiVideos) {
-          const local = v.offset + t;
-          if (v.el.paused && local >= 0 && local < (isFinite(v.el.duration) ? v.el.duration : Infinity)) {
-            v.el.currentTime = local;
-            v.el.play().catch(() => {});
-          }
-        }
-      }
-      this._multiRaf = requestAnimationFrame(tick);
-    };
-    this._multiRaf = requestAnimationFrame(tick);
-  }
-
-  _multiStopRaf() {
-    if (this._multiRaf) { cancelAnimationFrame(this._multiRaf); this._multiRaf = null; }
-  }
-
-  _multiRecomputeBounds() {
-    const WIN = this._opts?.windowSec ?? 5;
-    let minPre = Infinity, minPost = Infinity;
-    for (const v of this._multiVideos) {
-      if (!isFinite(v.el.duration)) continue;
-      // Clips with negative offset start after the reference — they contribute
-      // no pre-reference content (clamp to 0) but their full duration is post.
-      minPre  = Math.min(minPre,  Math.max(0, v.offset));
-      minPost = Math.min(minPost, v.el.duration - v.offset);
-    }
-    this._multiWinPre  = Math.min(WIN, isFinite(minPre)  ? minPre  : WIN);
-    this._multiWinPost = Math.min(WIN, isFinite(minPost) ? minPost : WIN);
-    const s = this._q('.vm-multi-scrubber');
-    if (s) {
-      s.min = Math.round(-this._multiWinPre  * 100);
-      s.max = Math.round( this._multiWinPost * 100);
     }
   }
 }

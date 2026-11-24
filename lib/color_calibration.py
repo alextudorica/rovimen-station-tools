@@ -197,7 +197,7 @@ def build_ffmpeg_vf_string(camera_id, rotate=True, color_filter="lutrgb"):
 
     Args:
         camera_id: camera identifier to look up gains
-        rotate: whether to include 180-degree rotation (True for all except Raul)
+        rotate: whether to include 180-degree rotation (True for all except one station)
 
     Returns:
         Filter string like "rotate=PI,lutrgb=r=val*0.620:g=val:b=val*1.250"

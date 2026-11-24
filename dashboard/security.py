@@ -21,6 +21,7 @@ from __future__ import annotations
 import atexit
 import base64
 import io
+import ipaddress
 import json
 import logging
 import os
@@ -80,18 +81,117 @@ def audit(event: str, **fields: Any) -> None:
 
 
 def _client_ip() -> str:
-    """Best-effort real client IP.
+    """Real client IP: the key of every per-IP rate limit and the audit
+    log's ``ip``.
 
-    Cloudflare sets ``CF-Connecting-IP`` for tunnel traffic, but we only
-    trust that header when Cloudflare Access is actually configured
-    (``ROVIMEN_CF_AUD`` is set). Without CF Access any Tailscale peer
-    could spoof the header to bypass per-IP rate limits.
+    ProxyFix (``x_for=1``) has already set ``remote_addr`` to the address
+    nginx saw. Anything but loopback is the client itself (a tailnet peer
+    talking to nginx directly), and its headers are ignored. Loopback means a
+    local proxy forwarded the request (cloudflared or Tailscale Serve, then
+    nginx), and the client is:
 
-    ProxyFix populates ``remote_addr`` from the first ``X-Forwarded-For``
-    hop (Tailscale serve / nginx). Falls back to the immediate TCP peer.
+    1. the rightmost ``X-Forwarded-For`` entry that is not an internal hop:
+       the address Cloudflare or Tailscale Serve recorded, which a client
+       cannot forge because anything it sends sits further left;
+    2. else ``CF-Connecting-IP`` (Cloudflare traffic with no usable
+       ``X-Forwarded-For``);
+    3. else ``remote_addr`` (a process on the VPS).
+
+    ``CF-Connecting-IP`` comes second because Tailscale Serve passes it
+    through as the client sent it: a tailnet peer could rotate it to dodge
+    per-IP limits, but Serve always records the peer's own address in
+    ``X-Forwarded-For``. Before 2026-11-22 this returned ``remote_addr``, so
+    on the VPS every per-IP limit was one bucket shared by all clients.
     """
-    if os.environ.get("ROVIMEN_CF_AUD") and request.headers.get("CF-Connecting-IP"):
-        return request.headers["CF-Connecting-IP"]
+    remote = request.remote_addr
+    if not _is_loopback(remote):
+        return remote or "-"
+    hop = _rightmost_client_hop(request.headers.get("X-Forwarded-For") or "")
+    if hop:
+        return hop
+    cf = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if cf:
+        return cf
+    return remote or "-"
+
+
+def _is_loopback(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        return ipaddress.ip_address(value).is_loopback
+    except ValueError:
+        return False
+
+
+# Tailscale CGNAT range. Kept as an explicit constant (not ``is_private``)
+# because the stdlib classification of 100.64.0.0/10 differs across Python
+# versions — private on 3.12-, un-classified on 3.13+. A tailnet peer IS a
+# real client (for rate limits and analytics), so it must never be skipped
+# as an "internal hop".
+_TAILSCALE_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+# Tailscale's IPv6 tailnet range: a ULA, so ``is_private``, but a peer
+# reached over it is a real client just like one on the CGNAT range.
+_TAILSCALE_ULA = ipaddress.ip_network("fd7a:115c:a1e0::/48")
+
+
+def _is_internal_hop(value: str) -> bool:
+    """True when an X-Forwarded-For entry is an infrastructure hop (or
+    garbage) rather than a plausible client address.
+
+    Loopback / RFC1918 / link-local / multicast / unspecified entries are
+    what nginx and cloudflared append for each other on the VPS — never a
+    visitor. Unparseable entries are treated as internal (skipped) so a
+    spoofed junk header can't put arbitrary strings in the analytics log.
+    """
+    try:
+        addr = ipaddress.ip_address(value)
+    except ValueError:
+        return True
+    if isinstance(addr, ipaddress.IPv4Address) and addr in _TAILSCALE_CGNAT:
+        return False  # tailnet peer — a real client (see constant above)
+    if isinstance(addr, ipaddress.IPv6Address) and addr in _TAILSCALE_ULA:
+        return False  # tailnet peer over IPv6
+    return (
+        addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _rightmost_client_hop(xff: str) -> str | None:
+    """The last ``X-Forwarded-For`` entry not appended by our own proxies."""
+    for hop in reversed([h.strip() for h in xff.split(",") if h.strip()]):
+        if not _is_internal_hop(hop):
+            return hop
+    return None
+
+
+def _analytics_ip() -> str:
+    """Best-effort real client IP for ANALYTICS records only.
+
+    NOT for rate limiting: it trusts ``CF-Connecting-IP`` first and on any
+    request, which a tailnet peer can set to anything (see
+    :func:`_client_ip`). Analytics can afford the trust: a spoofed value
+    only pollutes a report.
+
+    Behind the production double hop (cloudflared → nginx → gunicorn)
+    ProxyFix ``x_for=1`` resolves ``remote_addr`` to the innermost hop
+    (127.0.0.1), so header inspection is the only way to see the visitor:
+
+    1. ``CF-Connecting-IP`` when present (every Cloudflare-ingress request);
+    2. else the rightmost ``X-Forwarded-For`` entry that is not an internal
+       hop — the last value NOT appended by our own proxies;
+    3. else ``remote_addr`` (direct / Tailscale Serve traffic).
+    """
+    cf = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if cf:
+        return cf
+    hop = _rightmost_client_hop(request.headers.get("X-Forwarded-For") or "")
+    if hop:
+        return hop
     return request.remote_addr or "-"
 
 
@@ -303,60 +403,158 @@ _ACTIVITY_SKIP_PREFIXES = (
     "/api/vitals/all",
     # SSE / long-poll streams — log once on connect, not every event
     "/api/events/status",
-    # Thumbnails / media: huge volume, rarely insightful
-    "/thumbnail/",
-    "/video/",
-    "/timelapse/",
-    "/stream/",
+    # Machinery, not a view: the thumbnail cache is served to the dashboard's
+    # own rendering path, so it says nothing about what a person looked at.
     "/internal/thumb_cache/",
+    # The client-event beacon writes its own records (client_events.py); the
+    # POST carrying them is not a view.
+    "/api/client-event",
+)
+
+# NOT skipped, deliberately: /thumbnail/, /video/, /timelapse/ and /stream/
+# used to sit in the list above as "huge volume, rarely insightful". They are
+# neither. Measured against a full day of nginx logs (2026-09-18, 307,433
+# requests): /timelapse/ 25, /stream/ 10, /thumbnail/ and /video/ under 2 — and
+# they are the only record of a product actually being watched rather than
+# listed. Excluding them made the timelapse play count unanswerable: the
+# dashboard player fetches /timelapse/<host>/<cam>/<date>/<file>, so a report
+# could only ever see the 6 explicit downloads and reported near-zero usage for
+# a tab that was opened 584 times in 25 days.
+#
+# The real volume lives elsewhere and stays out: /api/ingest/v1 is 281,796 of
+# those 307,433 requests (92%), and it is stations pushing telemetry, not a
+# person looking at anything. The timer polls above are excluded for the same
+# reason — a browser refreshing status on an interval is not a view.
+
+
+# Top-level HTML pages an anonymous visitor can land on. Anonymous traffic
+# is logged ONLY for successful GETs of these — never for API calls, media,
+# or assets — so opening up anon logging can't flood the file the way the
+# authenticated skip-prefix model guards against.
+_PAGE_VIEW_PATHS = frozenset({
+    "/", "/map", "/stations", "/events", "/highlights", "/live",
+    "/showers", "/wiki", "/build", "/social", "/login",
+})
+_PAGE_VIEW_PREFIXES = ("/station/", "/wiki/")
+
+# Case-insensitive UA substrings that mark obvious crawlers / scanners.
+# Matching records are still LOGGED, tagged ``bot: true`` — bot volume is
+# a real signal (scanner sweeps, indexing) but must be separable from
+# human traffic in every report.
+_BOT_UA_MARKERS = (
+    "bot", "spider", "crawl", "python-requests", "curl",
+    "zgrab", "censys", "expanse",
 )
 
 
-def log_request_activity(response):
-    """``after_request`` hook: append one JSON line per authenticated hit.
+def _is_page_view(path: str) -> bool:
+    return path in _PAGE_VIEW_PATHS or path.startswith(_PAGE_VIEW_PREFIXES)
 
-    Skips static assets, high-frequency polls, and unauthenticated traffic
-    so the file stays human-readable. The login page, /api/* endpoints
-    (other than the high-volume polls), and per-station tabs all get
-    captured — enough to answer "what was alex looking at this afternoon."
+
+def _is_bot_ua(ua: str) -> bool:
+    low = ua.lower()
+    return any(marker in low for marker in _BOT_UA_MARKERS)
+
+
+def _build_activity_record(response) -> dict[str, Any] | None:
+    """Build the activity-log record for the current request, or ``None``
+    when the request should not be logged.
+
+    Must be called inside a request context. Split out of
+    :func:`log_request_activity` so the record-shaping policy (who gets
+    logged, which fields) is unit-testable without draining the writer
+    queue.
+
+    Authenticated requests: everything except the skip-prefixes.
+    Anonymous requests: only successful top-level HTML page GETs
+    (``user: null``), with obvious crawlers tagged ``bot: true``.
+    """
+    from flask import session
+    user = session.get("user")
+    path = request.path or ""
+    if user:
+        if any(path == p or (p.endswith("/") and path.startswith(p))
+               for p in _ACTIVITY_SKIP_PREFIXES):
+            return None
+    else:
+        # Anonymous: page views only, and only ones that rendered.
+        if request.method != "GET":
+            return None
+        if not _is_page_view(path):
+            return None
+        if response.status_code >= 400:
+            return None
+    record = _base_activity_record(user, path, response)
+    if not user and record.get("ua") and _is_bot_ua(record["ua"]):
+        record["bot"] = True
+    return record
+
+
+def _base_activity_record(user: str | None, path: str, response) -> dict[str, Any]:
+    return {
+        "ts":     datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "user":   user or None,
+        "method": request.method,
+        "path":   path[:200],
+        "status": response.status_code,
+        # Analytics-grade IP: trusts CF-Connecting-IP / X-Forwarded-For
+        # (see _analytics_ip). _client_ip() stays authoritative for rate
+        # limiting, where header trust would be a spoofing hole.
+        "ip":     _analytics_ip(),
+        # 2-letter country from the Cloudflare edge; absent (null) on
+        # tailnet-direct requests, which never traverse Cloudflare.
+        "country": (request.headers.get("Cf-Ipcountry") or "").strip() or None,
+        "ua":     (request.headers.get("User-Agent") or "")[:120] or None,
+        "ref":    (request.headers.get("Referer") or "")[:120] or None,
+    }
+
+
+def log_request_activity(response):
+    """``after_request`` hook: append one JSON line per logged hit.
+
+    Authenticated: skips static assets and high-frequency polls so the file
+    stays human-readable; the login page, /api/* endpoints (other than the
+    high-volume polls), and per-station tabs all get captured — enough to
+    answer "what was a user looking at this afternoon."
+
+    Anonymous: successful top-level HTML page GETs only (``user: null``),
+    so public reach is measurable without logging the anonymous API/media
+    firehose. Obvious crawlers carry ``bot: true`` rather than being
+    dropped — bot volume stays visible but separable.
 
     The actual file write is handed off to a background daemon via a
     bounded queue; if the writer can't keep up the record is dropped
     silently — activity logging must never block a request.
     """
     try:
-        from flask import session
-        user = session.get("user")
-        if not user:
-            return response  # only log authenticated activity
-        path = request.path or ""
-        if any(path == p or (p.endswith("/") and path.startswith(p))
-               for p in _ACTIVITY_SKIP_PREFIXES):
+        record = _build_activity_record(response)
+        if record is None:
             return response
-        record = {
-            "ts":     datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "user":   user,
-            "method": request.method,
-            "path":   path[:200],
-            "status": response.status_code,
-            "ip":     _client_ip(),
-            "ref":    (request.headers.get("Referer") or "")[:120] or None,
-        }
-        _ensure_activity_writer()
-        if _activity_shutdown.is_set():
-            # Process is shutting down — don't grow the queue past the
-            # records we already committed to flushing. Counts as a
-            # drop for observability.
-            _note_activity_drop()
-            return response
-        try:
-            _activity_queue.put_nowait(record)
-        except queue.Full:
-            _note_activity_drop()
+        enqueue_activity_record(record)
     except Exception:
         # Activity logging must never break a request. Swallow + move on.
         logger.exception("activity log enqueue failed")
     return response
+
+
+def enqueue_activity_record(record: dict[str, Any]) -> bool:
+    """Hand one record to the activity-log writer without blocking.
+
+    Returns False when it was dropped (shutdown in progress or the bounded
+    queue is full); both count as drops for ``activity_log_stats``.
+    """
+    _ensure_activity_writer()
+    if _activity_shutdown.is_set():
+        # Process is shutting down — don't grow the queue past the
+        # records we already committed to flushing.
+        _note_activity_drop()
+        return False
+    try:
+        _activity_queue.put_nowait(record)
+    except queue.Full:
+        _note_activity_drop()
+        return False
+    return True
 
 
 # ── TOTP MFA ──────────────────────────────────────────────────────────
@@ -613,6 +811,13 @@ def init_limiter(app: Flask):
         storage_uri=storage_uri,
         default_limits=[],
         strategy="fixed-window",
+        # Fail open. A limiter whose storage errors must not 500 the route it
+        # guards: on 2026-09-22 a full root disk put Redis in MISCONF and every
+        # rate-limited route (station heartbeats, blob ingest, the public API)
+        # returned 500 until it cleared. Counters fall back to per-worker
+        # memory and move back to Redis once its health check passes.
+        swallow_errors=True,
+        in_memory_fallback_enabled=bool(redis_url),
     )
     return limiter
 
@@ -662,14 +867,6 @@ _AUTH_GATE_PUBLIC_PREFIXES = (
     # same rationale as /api/public/v1/. The per-station key can only forge one
     # station's telemetry; it opens no shell and reads nothing.
     "/api/ingest/v1/",
-    # Reversed-HTTP push command channel (docs/reversed_http_push_design.md §3).
-    # The station-key GET (poll) + POST /ack routes authenticate with the same
-    # per-station key as ingest and must be reachable without a login session, so
-    # the prefix bypasses the login gate. The admin *enqueue* POST on the same
-    # prefix carries its own @require_admin decorator — the real gate — so an
-    # anonymous enqueue is 403'd there, not silently admitted. A per-station key
-    # can only read/ack its own station's commands; it opens no shell.
-    "/api/fleet/",
     # One-click magic-login links: /l/<token>. The route itself validates
     # the bearer token and establishes the session, so it must be reachable
     # before a session exists — same rationale as /login.
@@ -874,7 +1071,7 @@ def exempt_api_routes_from_csrf(app: Flask, csrf) -> None:
 
 # ── Origin / Sec-Fetch-Site enforcement (CSRF Phase 1) ────────────────
 #
-# Phase 1 of the CSRF hardening from docs/audit-2026-05-24.md (P1-3).
+# Phase 1 of the CSRF hardening from the 2026-05 security audit (P1-3).
 # Phase 2 will layer a real CSRF token on top of every mutating route;
 # until then we lean on browser headers that a cross-site attacker cannot
 # spoof from a top-level ``<form action=...>`` POST.
@@ -899,6 +1096,11 @@ def exempt_api_routes_from_csrf(app: Flask, csrf) -> None:
 # (astromania.org and other read-only consumers, gated by API key).
 
 _CSRF_PUBLIC_API_PREFIX = "/api/public/v1/"
+# Station ingest surface: X-Station-Key bearer auth, non-browser push agents, no
+# session cookie — CSRF (which rides the session cookie a browser auto-attaches)
+# structurally cannot apply. Exempt like the public API, else the headerless
+# interim guard rejects the octet-stream blob upload.
+_CSRF_INGEST_PREFIX = "/api/ingest/v1/"
 _CSRF_STATE_CHANGING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 
 
@@ -951,6 +1153,12 @@ def install_csrf_origin_check(app: Flask) -> None:
             return None
         # Public, key-authenticated, deliberately cross-origin surface.
         if path.startswith(_CSRF_PUBLIC_API_PREFIX):
+            return None
+        # Station ingest: X-Station-Key bearer auth, non-browser push agents, no
+        # session cookie — CSRF cannot apply (a browser can't attach the key).
+        # Blob uploads are octet-stream, which the headerless guard below would
+        # otherwise wrongly reject.
+        if path.startswith(_CSRF_INGEST_PREFIX):
             return None
 
         origin = (request.headers.get("Origin") or "").strip()

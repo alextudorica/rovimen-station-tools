@@ -1,20 +1,35 @@
 <!DOCTYPE html>
-<html lang="ro">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>ROVIMEN — Raport Social Media</title>
+<meta name="theme-color" content="#161b22">
+<title>ROVIMEN — Social Media Report</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
 <script type="importmap">
 {
   "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
+    "/static/dashboard-video-modal.js": "{{ url_for('static', filename='dashboard-video-modal.js', v=build_version) }}",
     "/static/dashboard-common.js": "{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"
   }
 }
 </script>
 <script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
-<script type="module" src="{{ url_for('static', filename='dashboard-social.js', v=build_version) }}"></script>
 <style>
 .soc-wrap {
   max-width: 860px;
@@ -22,6 +37,7 @@
   padding: 2rem 1.5rem 4rem;
 }
 .soc-heading {
+  font-family: var(--ui-font);
   font-size: 1rem;
   font-weight: 600;
   letter-spacing: .06em;
@@ -41,15 +57,18 @@
   border: 1px solid var(--border);
   color: var(--text);
   padding: .35rem .85rem;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: .82rem;
-  font-family: inherit;
+  font-family: var(--ui-font);
+  touch-action: manipulation;
   transition: border-color .15s, color .15s;
 }
 .soc-week-nav button:hover { border-color: var(--blue); color: var(--blue); }
 .soc-week-nav button:disabled { opacity: .45; cursor: default; border-color: var(--border); color: var(--muted); }
 .soc-week-label {
+  font-family: var(--mono-font, monospace);
+  font-variant-numeric: tabular-nums;
   font-size: .88rem;
   color: var(--muted);
   min-width: 180px;
@@ -60,15 +79,16 @@
   color: #000;
   border: none;
   padding: .38rem 1.1rem;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: .83rem;
   font-weight: 600;
-  font-family: inherit;
+  font-family: var(--ui-font);
   margin-left: auto;
   transition: opacity .15s;
 }
-.soc-generate:disabled { opacity: .5; cursor: default; }
+.soc-generate:hover:not(:disabled) { opacity: .85; }
+.soc-generate:disabled { opacity: .5; cursor: progress; }
 .soc-body {
   display: grid;
   grid-template-columns: 1fr 240px;
@@ -88,14 +108,13 @@
   border: 1px solid var(--border);
   border-radius: 6px;
   color: var(--text);
-  font-family: monospace;
+  font-family: var(--mono-font, monospace);
   font-size: .82rem;
   line-height: 1.7;
   padding: 1rem;
-  outline: none;
-  transition: border-color .15s;
+  transition: border-color .15s, box-shadow .15s;
 }
-.soc-textarea:focus { border-color: var(--blue); }
+.soc-textarea:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px rgba(88,166,255,.35); }
 .soc-actions {
   display: flex;
   gap: .55rem;
@@ -107,10 +126,11 @@
   border: 1px solid var(--border);
   color: var(--text);
   padding: .36rem .9rem;
-  border-radius: 4px;
+  border-radius: 6px;
   cursor: pointer;
   font-size: .82rem;
-  font-family: inherit;
+  font-family: var(--ui-font);
+  touch-action: manipulation;
   transition: border-color .15s, color .15s;
 }
 .soc-btn:hover { border-color: var(--blue); color: var(--blue); }
@@ -122,10 +142,13 @@
   min-height: 1.2em;
 }
 .soc-status.error { color: var(--red); }
-.soc-sidebar {}
+.soc-week-nav button:focus-visible, .soc-btn:focus-visible {
+  outline: 2px solid var(--blue); outline-offset: 2px;
+}
+.soc-generate:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .soc-image-wrap {
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 10px;
   overflow: hidden;
   background: var(--card);
   aspect-ratio: 4/3;
@@ -159,85 +182,77 @@
 }
 .soc-metric:last-child { border-bottom: none; }
 .soc-metric-label { color: var(--muted); }
-.soc-metric-value { color: var(--text); font-variant-numeric: tabular-nums; }
+.soc-metric-value { color: var(--text); font-family: var(--mono-font, monospace); font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) {
+  .soc-week-nav button, .soc-generate, .soc-textarea, .soc-btn { transition: none; }
+}
 </style>
 </head>
 <body>
 
 <div class="ov-header">
-  <a href="/" class="nav-logo">ROVIMEN</a>
-  <nav class="main-nav">
-    <a href="/" class="nav-tab">Stations</a>
-    <a href="/events" class="nav-tab">Detections</a>
-    <a href="/highlights" class="nav-tab">Highlights</a>
-    <a href="/showers" class="nav-tab">Showers</a>
-    <a href="/social" class="nav-tab active">Social</a>
-    <a href="/admin" class="nav-tab nav-tab-admin" id="logo-dd-admin" style="display:none">Admin</a>
-  </nav>
-  <div style="margin-left:auto;display:flex;align-items:center;gap:14px">
-    <span id="utc-clock" class="hdr-clock"></span>
-    <div id="ov-auth"></div>
-  </div>
+  {% set nav_active = 'social' %}{% include "_nav.html" %}
 </div>
 
-<div class="soc-wrap">
-  <p class="soc-heading">Raport Social Media</p>
+<main class="soc-wrap">
+  <h1 class="soc-heading">Social Media Report</h1>
 
   <div class="soc-week-nav">
-    <button id="soc-prev">&#8592; Săptămâna anterioară</button>
-    <span class="soc-week-label" id="soc-week-label">—</span>
-    <button id="soc-next" disabled>Săptămâna următoare &#8594;</button>
-    <button class="soc-generate" id="soc-generate">Generează</button>
+    <button type="button" id="soc-prev"><span aria-hidden="true">&#8592;</span> Previous week</button>
+    <span class="soc-week-label" id="soc-week-label" aria-live="polite">—</span>
+    <button type="button" id="soc-next" disabled>Next week <span aria-hidden="true">&#8594;</span></button>
+    <button type="button" class="soc-generate" id="soc-generate">Generate</button>
   </div>
 
   <div class="soc-body">
     <div>
-      <textarea class="soc-textarea" id="soc-text" spellcheck="false"
-        placeholder="Apasă Generează pentru a pre-completa raportul săptămânal..."></textarea>
+      <textarea class="soc-textarea" id="soc-text" spellcheck="false" autocomplete="off"
+        aria-label="Weekly report text"
+        placeholder="Press Generate to pre-fill the weekly report…"></textarea>
       <div class="soc-actions">
-        <button class="soc-btn soc-btn-primary" id="soc-copy">Copiază text</button>
-        <button class="soc-btn" id="soc-download-zip">Descarcă ZIP</button>
+        <button type="button" class="soc-btn soc-btn-primary" id="soc-copy">Copy text</button>
+        <button type="button" class="soc-btn" id="soc-download-zip">Download ZIP</button>
       </div>
-      <p class="soc-status" id="soc-status"></p>
+      <p class="soc-status" id="soc-status" role="status" aria-live="polite"></p>
     </div>
 
     <div class="soc-sidebar">
       <div class="soc-image-wrap" id="soc-image-wrap">
-        <p class="soc-image-placeholder" id="soc-image-placeholder">Imaginea highlight-ului va apărea după generare.</p>
-        <img id="soc-image" style="display:none" alt="Highlight meteor stack">
+        <p class="soc-image-placeholder" id="soc-image-placeholder">The highlight image will appear after generating.</p>
+        <img id="soc-image" style="display:none" alt="Highlight meteor stack" decoding="async">
       </div>
 
       <div class="soc-metrics" id="soc-metrics" style="display:none">
         <div class="soc-metric">
-          <span class="soc-metric-label">Detecții totale</span>
+          <span class="soc-metric-label">Total detections</span>
           <span class="soc-metric-value" id="m-detections">—</span>
         </div>
         <div class="soc-metric">
-          <span class="soc-metric-label">Multi-stație</span>
+          <span class="soc-metric-label">Multi-station events</span>
           <span class="soc-metric-value" id="m-multistation">—</span>
         </div>
         <div class="soc-metric">
-          <span class="soc-metric-label">Nopți senine</span>
+          <span class="soc-metric-label">Clear nights</span>
           <span class="soc-metric-value" id="m-nights">—</span>
         </div>
         <div class="soc-metric">
-          <span class="soc-metric-label">Orbite calculate</span>
+          <span class="soc-metric-label">Orbits computed</span>
           <span class="soc-metric-value" id="m-orbits">—</span>
         </div>
         <div class="soc-metric">
-          <span class="soc-metric-label">Stații / camere</span>
+          <span class="soc-metric-label">Stations / cameras</span>
           <span class="soc-metric-value" id="m-stations">—</span>
         </div>
       </div>
     </div>
   </div>
-</div>
+</main>
 
-<div id="app-panel" class="app-panel" onclick="appPanelClose(event)">
+<div id="app-panel" class="app-panel" role="dialog" aria-modal="true" aria-hidden="true" onclick="appPanelClose(event)">
   <div class="app-panel-inner">
     <div class="app-panel-header">
       <span id="app-panel-title" class="app-panel-title"></span>
-      <button class="cam-modal-close" onclick="appPanelClose(null)">&#x2715;</button>
+      <button class="cam-modal-close" aria-label="Close panel" onclick="appPanelClose(null)">&#x2715;</button>
     </div>
     <div id="app-panel-body"></div>
   </div>
@@ -245,7 +260,7 @@
 
 <script>
 (function () {
-  const MONTHS_RO = ['ian','feb','mar','apr','mai','iun','iul','aug','sep','oct','nov','dec'];
+  const DAY_MONTH = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short' });
 
   // weekOffset: 0 = last full Mon–Sun, -1 = the one before, etc.
   let weekOffset = 0;
@@ -263,9 +278,13 @@
     return { start: mon, end: sun };
   }
 
-  function toISO(d) { return d.toISOString().slice(0, 10); }
+  // Local calendar date: toISOString() would shift local midnight to the
+  // previous UTC day east of Greenwich and send Sunday-Saturday.
+  function toISO(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
 
-  function fmtDate(d) { return `${d.getDate()} ${MONTHS_RO[d.getMonth()]}`; }
+  function fmtDate(d) { return DAY_MONTH.format(d); }
   function fmtBounds(b) { return `${fmtDate(b.start)} – ${fmtDate(b.end)} ${b.end.getFullYear()}`; }
 
   function updateLabel() {
@@ -298,22 +317,22 @@
     const params = new URLSearchParams({ start: toISO(bounds.start), end: toISO(bounds.end) });
 
     btnGenerate.disabled = true;
-    btnGenerate.textContent = 'Se generează...';
-    setStatus('Se calculează datele din arhivă. Poate dura 20–30 de secunde...', false);
+    btnGenerate.textContent = 'Generating…';
+    setStatus('Computing from the archive. This can take 20–30 seconds…', false);
 
     try {
       const resp = await fetch('/api/social/weekly?' + params);
-      if (!resp.ok) throw new Error(`Eroare server ${resp.status}`);
+      if (!resp.ok) throw new Error(`Server error ${resp.status}`);
       const data = await resp.json();
 
       txtArea.value = data.text;
 
       const m = data.metrics;
-      document.getElementById('m-detections').textContent   = m.total_detections.toLocaleString('ro-RO');
-      document.getElementById('m-multistation').textContent = m.multistation.toLocaleString('ro-RO');
+      document.getElementById('m-detections').textContent   = m.total_detections.toLocaleString('en-US');
+      document.getElementById('m-multistation').textContent = m.multistation.toLocaleString('en-US');
       document.getElementById('m-nights').textContent       = `${m.clear_nights} / ${m.total_nights}`;
-      document.getElementById('m-orbits').textContent       = m.total_orbits.toLocaleString('ro-RO');
-      document.getElementById('m-stations').textContent     = `${m.active_stations} stații · ${m.active_cameras} camere`;
+      document.getElementById('m-orbits').textContent       = m.total_orbits.toLocaleString('en-US');
+      document.getElementById('m-stations').textContent     = `${m.active_stations} stations · ${m.active_cameras} cameras`;
       metricsEl.style.display = '';
 
       if (data.stack_url) {
@@ -323,38 +342,39 @@
       } else {
         imageEl.style.display = 'none';
         placeholderEl.style.display = '';
-        placeholderEl.textContent = 'Nicio imagine găsită pentru această săptămână.';
+        placeholderEl.textContent = 'No image found for this week.';
       }
 
-      setStatus('Generat. Textul poate fi editat înainte de postare.', false);
+      setStatus('Generated. You can edit the text before posting.', false);
     } catch (e) {
-      setStatus('Eroare: ' + e.message, true);
+      setStatus('Error: ' + e.message, true);
     } finally {
       btnGenerate.disabled = false;
-      btnGenerate.textContent = 'Generează';
+      btnGenerate.textContent = 'Generate';
     }
   }
 
   btnGenerate.addEventListener('click', generate);
 
   document.getElementById('soc-copy').addEventListener('click', async () => {
-    if (!txtArea.value) { setStatus('Generează mai întâi raportul.', true); return; }
+    if (!txtArea.value) { setStatus('Generate the report first.', true); return; }
     try {
       await navigator.clipboard.writeText(txtArea.value);
-      setStatus('Copiat în clipboard.', false);
+      setStatus('Copied to clipboard.', false);
     } catch {
       txtArea.select();
       document.execCommand('copy');
-      setStatus('Copiat.', false);
+      setStatus('Copied.', false);
     }
   });
 
   document.getElementById('soc-download-zip').addEventListener('click', () => {
-    if (!lastBounds) { setStatus('Generează mai întâi raportul.', true); return; }
+    if (!lastBounds) { setStatus('Generate the report first.', true); return; }
     const params = new URLSearchParams({ start: toISO(lastBounds.start), end: toISO(lastBounds.end) });
     window.location.href = '/api/social/weekly/zip?' + params;
   });
 })();
 </script>
+  {% include "_license_footer.html" %}
 </body>
 </html>

@@ -4,6 +4,13 @@ Thanks for your interest in ROVIMEN Station Tools. This is tooling for GMN
 meteor camera stations; contributions that make it more useful to other
 operators are very welcome.
 
+## How changes reach this repository
+
+This repository is published from the maintainers' private development
+repository as periodic snapshots. A pull request here is reviewed as usual; once
+accepted, it is applied in the development repository and arrives here with the
+next snapshot, so the PR itself is closed rather than merged.
+
 ## Ground rules
 
 - **Never commit secrets or real network config.** `dashboard_config.yaml`,
@@ -24,7 +31,7 @@ npm ci                  # JS toolchain
 
 ```bash
 npm test                                                       # vitest (JS units)
-uv run pytest tests/ -v                                        # pytest (Python)
+uv run pytest tests/ -n auto --dist loadfile                   # pytest (Python)
 npx playwright test --config tests/e2e/playwright.config.js    # Playwright E2E
 ```
 
@@ -33,6 +40,9 @@ CI runs all three on every pull request.
 ## Conventions
 
 - Python 3.13+, type hints on all functions (`list[str]`, `str | None`).
+- `rovimen-scripts/` must still import on Python 3.8 (some stations run it):
+  `from __future__ import annotations` at the top and no 3.9+ syntax evaluated
+  at import time. `tests/test_station_py38_imports.py` checks this.
 - Pydantic models for configuration and data validation.
 - `logging` module (`logger = logging.getLogger(__name__)`), not `print`.
 - No hard-coded station IPs, camera codes, hostnames, or paths — everything

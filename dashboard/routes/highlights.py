@@ -1,4 +1,4 @@
-"""Highlights API routes -- top-10 meteors, aggregation, and media serving."""
+"""Highlights API routes -- brightest events, fireball reports, aggregation and media serving."""
 
 import logging
 import re
@@ -6,10 +6,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
-from flask import Flask, abort, jsonify, request, send_file
+from flask import Flask, Response, abort, jsonify, request, send_file
 
+import hidden_detections
 from http_caching import _json_cached
 from security import public_route
 
@@ -19,7 +19,10 @@ logger = logging.getLogger(__name__)
 def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
 
     # Lazy-import siblings that live in the same dashboard package dir.
+    import fireball_reports
     import gmn_data
+    import highlight_events as hl_events
+    from routes.detections import compute_detections_payload
 
     # ``limiter`` is stashed on the app by create_app().
     limiter = app._limiter  # type: ignore[attr-defined]
@@ -34,20 +37,10 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         (PR #628). Logged-in accounts keep fleet-wide read access. Fails
         closed: an unknown camera code (no owner in the registry) is 404'd for
         anon, matching ``station_is_public_for_request``'s unknown-key rule."""
-        from auth import _host_keys_for_camera, is_anonymous, \
-            station_is_public_for_request
+        from auth import is_anonymous, public_camera_codes
 
-        if not is_anonymous():
-            return
-        owners = _host_keys_for_camera(config, camera)
-        if not owners or not any(
-            station_is_public_for_request(config, hk) for hk in owners
-        ):
+        if is_anonymous() and camera.upper() not in public_camera_codes(config):
             abort(404)
-
-    # _compute_detections_payload is a closure defined in create_app() and
-    # stashed on the app object so extracted route modules can reach it.
-    _compute_detections_payload = app._compute_detections_payload  # type: ignore[attr-defined]
 
     # Endpoint-level cache for the (start, end) aggregation.  The per-date
     # detections payload is already cached, but this route additionally re-runs
@@ -67,6 +60,91 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return 1800 if end_str < today_iso else 120
 
+    # ── Fireball research reports ────────────────────────────────────────
+
+    def _station_for_camera(camera: str):
+        from auth import camera_owner
+        return camera_owner(config, camera)
+
+    def _camera_visible(camera: str, anon: bool) -> bool:
+        from auth import camera_owner_visible
+        return camera_owner_visible(config, camera, anon)
+
+    def _visible_reports(anon: bool) -> list:
+        """Reports newest first that show at least one camera this visitor
+        may see; the same rule the report page applies before a 404."""
+        reports = sorted(fireball_reports.all_reports().values(),
+                         key=lambda r: r.event_id, reverse=True)
+        return [r for r in reports
+                if any(_camera_visible(c, anon) for c in r.cameras)]
+
+    @app.route("/api/highlights/reports")
+    @public_route(page="highlights")
+    def highlights_reports():
+        """Every fireball research report with the clips and stacks of all
+        its cameras, for the Highlights research gallery.
+
+        An anonymous visitor gets only the cameras of ``public: true``
+        stations (``/fireball/<id>`` applies the same rule), and the media
+        URLs go through the highlights archive routes, which re-check it."""
+        import public_api as _pub
+        from auth import is_anonymous
+
+        anon = is_anonymous()
+        out = []
+        for rep in _visible_reports(anon):
+            event_time = (f"{rep.event_id[:4]}-{rep.event_id[4:6]}-{rep.event_id[6:8]}T"
+                          f"{rep.event_id[9:11]}:{rep.event_id[11:13]}:{rep.event_id[13:15]}")
+            witnesses = []
+            for clip in rep.clips:
+                if not _camera_visible(clip.camera, anon):
+                    continue
+                hk, st = _station_for_camera(clip.camera)
+                stack = _pub._derive_stack_name(clip.filename)
+                witnesses.append({
+                    "camera":             clip.camera,
+                    "host_key":           hk,
+                    "station_label":      st.label if st else None,
+                    "filename":           clip.filename,
+                    "date":               clip.date,
+                    "time_utc":           event_time,
+                    "detection_offset_s": hl_events.detection_offset(clip.filename, event_time),
+                    "clip_url":           f"/api/highlights/clip/{clip.camera}/{clip.date}/{clip.filename}",
+                    "stack_url":          (f"/api/highlights/stack/{clip.camera}/{clip.date}/{stack}"
+                                           if stack else None),
+                })
+            cameras = [c for c in rep.cameras if _camera_visible(c, anon)]
+            places = []
+            for c in cameras:
+                _, st = _station_for_camera(c)
+                if st is not None and st.label and st.label not in places:
+                    places.append(st.label)
+            # The first still figure stands in when the clips have no
+            # archived stack (reports from before per-clip colour stacks).
+            stills = list(dict.fromkeys(fig.poster or fig.file for sec in rep.sections
+                                        for fig in sec.figures if fig.poster or not fig.is_video))
+            cover = stills[0] if stills else None
+            out.append({
+                "event_id":   rep.event_id,
+                "cover_url":  rep.figure_url(cover) if cover else None,
+                # Every still figure of the report in reading order (video
+                # figures by their poster): the card's slideshow.
+                "slides":     [rep.figure_url(f) for f in stills],
+                "url":        rep.url,
+                "title":      rep.title,
+                "status":     rep.status,
+                "time_utc":   event_time,
+                "local_time": rep.local_time,
+                "analysed":   rep.analysed.isoformat(),
+                "updated":    rep.updated.isoformat() if rep.updated else None,
+                "summary":    rep.summary[0] if rep.summary else "",
+                "facts":      [f.model_dump() for f in rep.facts[:6]],
+                "cameras":    cameras,
+                "places":     places,
+                "witnesses":  witnesses,
+            })
+        return _json_cached({"reports": out}, max_age=60)
+
     # ── Highlights data endpoint ─────────────────────────────────────────
 
     @app.route("/api/highlights/data")
@@ -75,18 +153,20 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         """Aggregate detections + events + orbits across an arbitrary date range.
 
         Query params: start=YYYY-MM-DD, end=YYYY-MM-DD (inclusive).
-        Returns stats summary + top-10 most impressive meteors.
+        Returns stats summary + the brightest events of the range, each with
+        every ROVIMEN camera that recorded it (``highlight_events``) and the
+        fireball report that covers it, if any.
 
         Public under the "highlights" page toggle: the payload is aggregate
-        network stats plus a curated top-10 of GMN-confirmed multi-station
-        meteors (time, station label, camera code, shower, magnitude,
-        duration, and clip/stack URLs). No station IPs, cam_ip, host paths,
+        network stats plus the brightest multi-station events (time, station
+        label, camera code, shower, magnitude, duration, and clip/stack
+        URLs). No station IPs, cam_ip, host paths,
         or per-user data — every field is already surfaced on the public
         media/detection surface, so anon exposure adds nothing sensitive.
         """
         import coverage as coverage_mod
         import platepar_store as platepar_store_mod
-        from auth import is_anonymous
+        from auth import is_anonymous, public_camera_codes
 
         start_str = request.args.get("start", "")
         end_str   = request.args.get("end", "")
@@ -108,28 +188,27 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         # fails closed (dropped). The cache key includes ``anon`` so an admin
         # payload (full fleet) can never be served to an anonymous caller.
         anon = is_anonymous()
-        _public_cams: set[str] | None = None
-        if anon:
-            _public_cams = {
-                c.code.upper()
-                for hk, st in config.stations.items()
-                if st.public
-                for c in st.cameras
-            }
+        _public_cams: set[str] | None = public_camera_codes(config) if anon else None
 
         def _visible_to_request(det: dict) -> bool:
             if not anon:
                 return True
-            cam = (det.get("camera") or "").upper()
+            cam = (det.get("cam") or det.get("camera") or "").upper()
             return bool(cam) and cam in (_public_cams or set())
 
+        # Detections a user hid as false positives are left out of the
+        # events (``hidden_detections``); a signed-in caller may ask for them
+        # marked. The counts above the events (total detections, showers,
+        # months) are network statistics and still include them.
+        hidden_snap = hidden_detections.snapshot()
+        show_hidden = hidden_detections.wants_hidden(request.args.get("show_hidden"), anon)
         ttl = _highlights_browser_max_age(end_str)
-        cache_key = (start_str, end_str, anon)
+        cache_key = (start_str, end_str, anon, show_hidden, hidden_snap.version)
         now_mono = time.monotonic()
         with _highlights_lock:
             hit = _highlights_cache.get(cache_key)
             if hit is not None and now_mono < hit[0]:
-                return _json_cached(hit[1], max_age=ttl)
+                return _json_cached(hit[1], max_age=ttl if anon else 0)
 
         # Build chronological date list
         dates = []
@@ -138,150 +217,60 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
             dates.append(cur)
             cur += timedelta(days=1)
 
-        all_dets       = []   # formatted detection dicts
+        # Only each night's best events (highlight_events.TOP_EVENTS) are
+        # kept, plus running counts. Holding every formatted detection across
+        # a wide range (365 days x thousands/night) spiked worker RSS by
+        # multiple GB; the page never needed the rest.
+        candidates: list[dict] = []
+        total_detections = 0  # running count (not the full list)
         dual_events    = 0
         shower_counts  = {}
         monthly_det    = {}   # YYYY-MM -> int
         monthly_ev     = {}   # YYYY-MM -> int
 
-        # Matches HHMMSS in filenames like RO000M_20260601_221530_color.mkv or _221530.mp4
-        _CHUNK_TIME_RE = re.compile(r"_(\d{6})(?:_|\.)")
-
-        def _fmt_det(det, date_iso):
-            cam      = det.get("cam") or det.get("camera")
-            filename = det.get("filename")
-            if not (cam and filename):
-                return None
-            rms       = det.get("rms") or {}
-            stack     = det.get("stack")
-            peak_mag  = rms.get("mag_apparent")
-            if peak_mag is None:
-                peak_mag = rms.get("mag_absolute")
-            # Use internal routes -- no public-station gate, auth-protected by before_request
-            clip_url  = f"/api/highlights/clip/{cam}/{date_iso}/{filename}"
-            stack_url = f"/api/highlights/stack/{cam}/{date_iso}/{stack}" if stack else None
-
-            # Compute detection offset within clip from filename chunk-time + meteor_time
-            detection_offset_s = None
-            mt_str = det.get("meteor_time")
-            m = _CHUNK_TIME_RE.search(filename)
-            if m and mt_str:
-                try:
-                    chk = m.group(1)
-                    chk_secs = int(chk[:2]) * 3600 + int(chk[2:4]) * 60 + int(chk[4:6])
-                    mt = datetime.fromisoformat(mt_str.replace(" ", "T"))
-                    mt_secs = mt.hour * 3600 + mt.minute * 60 + mt.second + mt.microsecond / 1e6
-                    diff = mt_secs - chk_secs
-                    if diff < -43200:
-                        diff += 86400
-                    detection_offset_s = round(max(0.0, diff), 2)
-                except (ValueError, AttributeError):
-                    pass
-
-            return {
-                "time_utc":            mt_str,
-                "station_label":       det.get("station_label"),
-                "camera":              cam,
-                "filename":            filename,
-                "date":                date_iso,
-                "shower":              rms.get("shower"),
-                "peak_magnitude":      peak_mag,
-                "duration_s":          rms.get("duration_s"),
-                "detection_offset_s":  detection_offset_s,
-                "clip_url":            clip_url,
-                "stack_url":           stack_url,
-                "thumbnail_url":       stack_url,
-            }
-
-        def _norm_time(ts: str) -> str:
-            """Normalize ISO/space-separated timestamp to 19-char YYYY-MM-DDTHH:MM:SS."""
-            return ts.replace(" ", "T")[:19] if ts else ""
-
-        def _time_diff_s(t1: str, t2: str) -> float:
-            try:
-                d1 = datetime.fromisoformat(t1)
-                d2 = datetime.fromisoformat(t2)
-                return abs((d1 - d2).total_seconds())
-            except (ValueError, TypeError):
-                return float("inf")
+        def _visible_witness(w: dict) -> bool:
+            if not anon:
+                return True
+            return (w.get("camera") or "").upper() in (_public_cams or set())
 
         def fetch_date(d):
             date_yyyymmdd = d.strftime("%Y%m%d")
             date_iso      = d.strftime("%Y-%m-%d")
             month_str     = d.strftime("%Y-%m")
-            payload = _compute_detections_payload(date_yyyymmdd)
+            # Aggregate view: serve every night (incl. today) from the index /
+            # archive, never the per-camera station HTTP fan-out — keeps a wide
+            # range fast and off the storage box.
+            payload = compute_detections_payload(date_yyyymmdd, allow_live=False)
             raw     = payload.get("detections", []) or []
-            fmted   = [r for r in (_fmt_det(det, date_iso) for det in raw)
-                       if r and _visible_to_request(r)]
+            visible = [det for det in raw if _visible_to_request(det)]
+            showers = [((det.get("rms") or {}).get("shower") or "").upper()
+                       for det in visible]
 
-            # GMN trajectory data -- multi-station events with magnitude/shower/duration
-            gmn     = gmn_data.events_for_date(date_iso)
-            ev_cnt  = 0
-            # station_code -> [(norm_time, peak_mag, duration_s, shower)]
-            gmn_lookup: dict[str, list[tuple]] = {}
-            for e in (gmn.get("events") or []):
-                stations = e.get("stations") or []
-                if len(stations) >= 2:
-                    ev_cnt += 1
-                ev_t = _norm_time(e.get("time", ""))
-                for sta in stations:
-                    gmn_lookup.setdefault(sta, []).append(
-                        (ev_t, e.get("peak_mag"), e.get("duration_s"), e.get("shower"))
-                    )
-
-            # Enrich detections with GMN trajectory values and mark confirmed ones.
-            # GMN magnitude is the calculated absolute magnitude (multi-station),
-            # more reliable than apparent magnitude from a single camera.
-            for r in fmted:
-                cam = r.get("camera") or ""
-                mt  = _norm_time(r.get("time_utc") or "")
-                r["gmn_confirmed"] = False
-                for ev_t, peak_mag, dur, shower in gmn_lookup.get(cam, []):
-                    if mt and _time_diff_s(mt, ev_t) <= 3:
-                        r["gmn_confirmed"]  = True
-                        r["peak_magnitude"] = peak_mag   # authoritative absolute mag
-                        r["duration_s"]     = dur
-                        if shower is not None:
-                            r["shower"] = shower
-                        # Propagate GMN event time if the archive lock had no meteor_time
-                        if not r.get("time_utc"):
-                            r["time_utc"] = ev_t
-                        # Derive detection_offset_s from GMN event time when archive
-                        # lock didn't carry meteor_time (older lock format)
-                        if r.get("detection_offset_s") is None and ev_t:
-                            fname = r.get("filename", "")
-                            m2 = _CHUNK_TIME_RE.search(fname)
-                            if m2:
-                                try:
-                                    chk = m2.group(1)
-                                    chk_secs = (int(chk[:2]) * 3600 + int(chk[2:4]) * 60
-                                                + int(chk[4:6]))
-                                    gmt = datetime.fromisoformat(ev_t)
-                                    gmt_secs = (gmt.hour * 3600 + gmt.minute * 60
-                                                + gmt.second + gmt.microsecond / 1e6)
-                                    diff = gmt_secs - chk_secs
-                                    if diff < -43200:
-                                        diff += 86400
-                                    r["detection_offset_s"] = round(max(0.0, diff), 2)
-                                except (ValueError, AttributeError):
-                                    pass
-                        break
-
-            return month_str, fmted, ev_cnt
+            gmn_events = gmn_data.events_for_date(date_iso).get("events") or []
+            ev_cnt = sum(1 for e in gmn_events if len(e.get("stations") or []) >= 2)
+            # Marked, never dropped here: night_events applies the event rule.
+            marked = hidden_detections.apply_payload(payload, hidden_snap, True)
+            night = hl_events.night_events(
+                [det for det in marked.get("detections") or [] if _visible_to_request(det)],
+                gmn_events, marked.get("events") or [], date_iso,
+                visible=_visible_witness, show_hidden=show_hidden,
+            )
+            return month_str, len(visible), showers, ev_cnt, night
 
         with ThreadPoolExecutor(max_workers=10) as pool:
             futures = {pool.submit(fetch_date, d): d for d in dates}
             for fut in as_completed(futures):
                 try:
-                    month_str, fmted, ev_cnt = fut.result()
+                    month_str, n_det, showers, ev_cnt, night = fut.result()
                 except Exception:
+                    logger.exception("highlights: night %s failed", futures[fut])
                     continue
-                all_dets.extend(fmted)
+                total_detections += n_det
+                candidates.extend(night)
                 dual_events += ev_cnt
-                monthly_det[month_str] = monthly_det.get(month_str, 0) + len(fmted)
+                monthly_det[month_str] = monthly_det.get(month_str, 0) + n_det
                 monthly_ev[month_str]  = monthly_ev.get(month_str, 0) + ev_cnt
-                for det in fmted:
-                    sh = (det.get("shower") or "").upper()
+                for sh in showers:
                     if sh:
                         shower_counts[sh] = shower_counts.get(sh, 0) + 1
 
@@ -341,18 +330,9 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         elif shower_counts:
             main_shower = max(shower_counts, key=shower_counts.get)
 
-        # Top 10: GMN-confirmed multi-station only (absolute magnitude, clip + stack required)
-        candidates = [
-            d for d in all_dets
-            if d.get("gmn_confirmed")
-            and d.get("clip_url")
-            and (d.get("stack_url") or d.get("thumbnail_url"))
-        ]
-        candidates.sort(key=lambda d: (
-            d["peak_magnitude"] if d["peak_magnitude"] is not None else float("inf"),
-            -(d.get("duration_s") or 0),
-        ))
-        top10 = candidates[:10]
+        candidates.sort(key=hl_events.rank_key)
+        top_events = candidates[:hl_events.TOP_EVENTS]
+        hl_events.attach_reports(top_events, _visible_reports(anon))
 
         monthly_totals = [
             {
@@ -366,7 +346,7 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         payload = {
             "start":                 start_str,
             "end":                   end_str,
-            "total_detections":      len(all_dets),
+            "total_detections":      total_detections,
             "dual_station_events":   dual_events,
             "new_orbits":            new_orbits,
             "orbits_month_to_date":  orbits_month_to_date,
@@ -375,7 +355,9 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
             "active_locations":      active_stations,
             "coverage_90km":         coverage_90km,
             "monthly_totals":        monthly_totals,
-            "top10":                 top10,
+            "events":                top_events,
+            # Lets the page merge a range it fetched in chunks.
+            "shower_counts":         shower_counts,
         }
 
         with _highlights_lock:
@@ -388,7 +370,7 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
                     _highlights_cache.pop(next(iter(_highlights_cache)), None)
             _highlights_cache[cache_key] = (time.monotonic() + ttl, payload)
 
-        return _json_cached(payload, max_age=ttl)
+        return _json_cached(payload, max_age=ttl if anon else 0)
 
     # ── Media serving endpoints ──────────────────────────────────────────
 
@@ -399,10 +381,12 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         """Trim and serve a clip from the archive for the highlights page.
 
         Query params: ss=<seek_seconds> t=<duration_seconds>
-        Returns an MP4 attachment via ffmpeg stream copy from storagebox.
+        Returns an MP4 attachment cut by ``archive.trim_clip_response``: on the
+        shared 2-lane media executor with its 24 s cap, never on the request
+        thread, and the seek capped at 300 s like /api/archive/shortclip.
         """
-        import subprocess as _sp, tempfile as _tf, os as _os
         import public_api as _pub
+        from routes.archive import trim_clip_response
 
         if not re.match(r"^[A-Z0-9]{1,16}$", camera, re.IGNORECASE):
             abort(400)
@@ -422,28 +406,9 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         except ValueError:
             abort(400)
 
-        fd, tmp = _tf.mkstemp(suffix=".mp4")
-        _os.close(fd)
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-ss", f"{ss:.3f}", "-i", str(src),
-            "-t", f"{t:.3f}",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
-            "-an", "-movflags", "+faststart",
-            "-y", tmp,
-        ]
-        try:
-            result = _sp.run(cmd, timeout=120)
-        except _sp.TimeoutExpired:
-            _os.unlink(tmp)
-            abort(504)
-        if result.returncode != 0:
-            _os.unlink(tmp)
+        resp = trim_clip_response(src, min(ss, 300.0), t, filename)
+        if resp is None:
             abort(500)
-        stem = Path(filename).stem.replace("_color", "")
-        resp = send_file(tmp, mimetype="video/mp4", as_attachment=True,
-                         download_name=f"{stem}_clip.mp4")
-        resp.call_on_close(lambda: _os.unlink(tmp) if _os.path.exists(tmp) else None)
         return resp
 
     @app.route("/api/highlights/clip/<camera>/<date>/<filename>")
@@ -464,11 +429,47 @@ def register_highlights_routes(app: Flask, config, cache, tunnels) -> None:
         if not re.match(r"^[A-Za-z0-9._-]+\.(mkv|mp4)$", filename):
             abort(400)
         _abort_if_camera_not_public_for_anon(camera)
+        # ?download=1 hands the clip out as an attachment (the modal's
+        # "Download clip"): the same MP4 the player gets, unless ?format=mkv.
+        as_attachment = request.args.get("download") == "1"
+        if filename.endswith(".mkv") and request.args.get("format") != "mkv":
+            # Safari and iOS cannot play MKV, and this modal is the only
+            # consumer, so play the stream-copied MP4: hot cache, archived
+            # .mp4 sibling, else a bounded remux (?format=mkv for the original).
+            import clip_cache
+
+            def _as_download(resp: Response) -> Response:
+                if as_attachment:
+                    resp.headers["Content-Disposition"] = (
+                        f'attachment; filename="{filename[:-4]}.mp4"')
+                return resp
+
+            hot = clip_cache.serve_hot_mp4(camera, date.replace("-", ""), filename)
+            if hot is not None:
+                return _as_download(hot)
+            sibling = _pub._resolve_media_path(camera, date, filename[:-4] + ".mp4", "meteors")
+            if sibling is not None:
+                resp = send_file(sibling, mimetype="video/mp4", conditional=True)
+                resp.headers["Accept-Ranges"] = "bytes"
+                resp.headers["Cache-Control"] = "private, max-age=3600"
+                return _as_download(resp)
+            src = _pub._resolve_media_path(camera, date, filename, "meteors")
+            if src is None:
+                abort(404)
+            try:
+                return _as_download(_pub._serve_as_mp4(src, filename))
+            except _pub._RemuxBusy:
+                busy = jsonify({"error": "remux_busy", "retry_after_seconds": 5})
+                busy.status_code = 503
+                busy.headers["Retry-After"] = "5"
+                return busy
         path = _pub._resolve_media_path(camera, date, filename, "meteors")
         if path is None:
             abort(404)
         mime = "video/x-matroska" if filename.endswith(".mkv") else "video/mp4"
-        resp = send_file(path, mimetype=mime, conditional=True)
+        resp = send_file(path, mimetype=mime, conditional=True,
+                         as_attachment=as_attachment,
+                         download_name=filename if as_attachment else None)
         resp.headers["Accept-Ranges"] = "bytes"
         resp.headers["Cache-Control"] = "private, max-age=3600"
         return resp

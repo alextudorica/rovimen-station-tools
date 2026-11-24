@@ -2,7 +2,7 @@
 
 These tests load the REAL config file (not a fixture) so that CI catches
 config drift the moment a bad edit is committed. The stale Iasi IP
-(100.64.0.5 surviving long after the physical machine was decommissioned
+(100.64.0.10 surviving long after the physical machine was decommissioned
 on 2026-06-18) is the canonical example of the class of bug these guard
 against.
 """
@@ -16,12 +16,7 @@ import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-# Validate the live config when present (private deployment repo); fall back to
-# the shipped example (public repo, where the real config is gitignored). The
-# invariants are structural, so they hold for either.
-_LIVE_CONFIG = REPO_ROOT / "dashboard" / "dashboard_config.yaml"
-_EXAMPLE_CONFIG = REPO_ROOT / "dashboard" / "dashboard_config.example.yaml"
-CONFIG_PATH = _LIVE_CONFIG if _LIVE_CONFIG.exists() else _EXAMPLE_CONFIG
+CONFIG_PATH = REPO_ROOT / "dashboard" / "dashboard_config.example.yaml"
 
 VALID_STATUSES = {"active", "commissioning", "offline"}
 # Tailscale assigns IPs in 100.64.0.0/10 (CGNAT range), which maps to
@@ -69,28 +64,98 @@ class TestCameraCodeUniqueness:
 
 
 class TestCameraIpUniquenessWithinStation:
-    """No two cameras within the same station may share a cam_ip (unless empty)."""
+    """No two cameras on the same HOST may share a cam_ip (unless empty).
 
-    def test_no_duplicate_cam_ips_within_station(self, stations: dict):
+    The scope is the host, not the station: a station split across two boxes
+    (per-camera ``host`` override) has two independent camera LANs, and both
+    operators' boxes hand out the same private addresses. gmnro17 (Câmpenița)
+    is two Raspberry Pis that are each the .1 of their own 192.168.42.0/24
+    with the camera at .10 — two cameras, one cam_ip, no conflict, because
+    nothing ever resolves that address on the same box. Sharing a cam_ip
+    within ONE host is still a real misconfiguration and stays forbidden.
+    """
+
+    def test_no_duplicate_cam_ips_within_host(self, stations: dict):
         violations: list[str] = []
         for station_id, station in stations.items():
-            seen_ips: dict[str, str] = {}  # ip -> first code that claimed it
+            station_ip = station.get("ip", "")
+            # (host, ip) -> first code that claimed it
+            seen_ips: dict[tuple[str, str], str] = {}
             for cam in station.get("cameras", []):
-                ip = cam.get("cam_ip", "").strip()
+                ip = (cam.get("cam_ip") or "").strip()
                 code = cam.get("code", "<unknown>")
                 if not ip:
                     # Empty ip is allowed (camera not yet connected)
                     continue
-                if ip in seen_ips:
+                host = (cam.get("host") or "").strip() or station_ip
+                key = (host, ip)
+                if key in seen_ips:
                     violations.append(
                         f"{station_id}: {code!r} shares cam_ip {ip!r} "
-                        f"with {seen_ips[ip]!r}"
+                        f"with {seen_ips[key]!r} on host {host!r}"
                     )
                 else:
-                    seen_ips[ip] = code
+                    seen_ips[key] = code
         assert not violations, (
-            "Cameras within the same station must not share cam_ip:\n"
+            "Cameras on the same host must not share cam_ip:\n"
             + "\n".join(f"  - {v}" for v in violations)
+        )
+
+
+class TestCameraHostOverride:
+    """Per-camera ``host`` overrides must be routable and well-formed."""
+
+    def test_camera_hosts_are_tailscale_ips(self, stations: dict):
+        bad: list[str] = []
+        for station_id, station in stations.items():
+            for cam in station.get("cameras", []):
+                host = (cam.get("host") or "").strip()
+                if not host:
+                    continue
+                if not _TAILSCALE_RE.match(host):
+                    bad.append(
+                        f"{station_id}/{cam.get('code', '<unknown>')}: "
+                        f"host {host!r} is not a Tailscale 100.x address"
+                    )
+        assert not bad, (
+            "Camera host overrides must be Tailscale addresses:\n"
+            + "\n".join(f"  - {b}" for b in bad)
+        )
+
+    def test_camera_host_differs_from_station_ip(self, stations: dict):
+        """An override equal to the station ip is dead weight — it means the
+        camera is NOT on a second box and the field should be empty."""
+        redundant: list[str] = []
+        for station_id, station in stations.items():
+            for cam in station.get("cameras", []):
+                host = (cam.get("host") or "").strip()
+                if host and host == station.get("ip", ""):
+                    redundant.append(
+                        f"{station_id}/{cam.get('code', '<unknown>')}: "
+                        f"host {host!r} equals the station ip; leave it empty"
+                    )
+        assert not redundant, (
+            "Redundant camera host overrides:\n"
+            + "\n".join(f"  - {r}" for r in redundant)
+        )
+
+    def test_split_host_stations_have_no_jump_hosts(self, stations: dict):
+        """A jump-hosted station is reached through an SSH tunnel that
+        forwards to ``ip`` only, so a second box behind it is unreachable.
+        Split stations must be directly routable on the tailnet."""
+        bad: list[str] = []
+        for station_id, station in stations.items():
+            has_override = any(
+                (c.get("host") or "").strip() for c in station.get("cameras", [])
+            )
+            if has_override and station.get("jump_hosts"):
+                bad.append(
+                    f"{station_id}: has a per-camera host override AND "
+                    f"jump_hosts {station['jump_hosts']!r}"
+                )
+        assert not bad, (
+            "Split-host stations cannot be reached through a jump host:\n"
+            + "\n".join(f"  - {b}" for b in bad)
         )
 
 

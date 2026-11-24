@@ -11,7 +11,9 @@ Storage shape (``api_keys.yaml``) — current (hashed) format:
 
     keys:
       - id: astromania-prod
-        secret_hash: "pbkdf2:sha256:600000$...."   # werkzeug password hash
+        secret_hash: "scrypt:32768:8:1$...."   # werkzeug password hash
+        secret_sha256: "3f1c...e9"             # hex sha256 of the secret
+        secret_sha256_for: "a94a8fe5ccb19ba6"  # fingerprint of secret_hash
         label: "astromania.org WordPress plugin"
         created_at: "2026-05-24T13:30:00Z"
         disabled: false
@@ -25,10 +27,23 @@ compatibility, migrated to hashed form on first successful verify:
         secret: 9f7a2b91c4e3d6f5...    # 64 hex chars (256-bit random)
         ...
 
-We hash secrets at rest with ``werkzeug.security.generate_password_hash``
-for consistency with the dashboard user-auth side. The hashes are slow
-by design (pbkdf2 600k iterations), so an in-process LRU short-circuits
-repeat verifications.
+Every row keeps the slow ``werkzeug.security.generate_password_hash``
+hash it was minted with (scrypt). Checking a key against those costs one
+slow hash per enabled key, and a wrong key pays it for every key, so a key's
+first successful slow check records ``secret_sha256`` on its row and later
+checks are one dict lookup by sha256. Secrets are 256-bit random, so the slow
+hash adds nothing over sha256. ``add_key`` writes both. Rows without a
+sha256 (not verified since it was introduced) still get the slow check, so
+no key stops working; the slow hash is never rewritten, so a rollback to code
+that ignores ``secret_sha256`` keeps every key valid.
+
+The sha256 is bound to the slow hash it was recorded against:
+``secret_sha256_for`` is a fingerprint of that ``secret_hash``, and a row
+whose fingerprint does not match its current ``secret_hash`` (re-keyed in
+place by a hand edit, or by code that does not know the field) is checked
+with the slow hash again, so a stale sha256 can never accept the old
+secret. Every writer that sets a slow hash sets the sha256 and fingerprint
+with it (:func:`_secret_fields`).
 
 Writes go through an exclusive ``fcntl.flock`` on a sidecar ``.lock``
 file plus a same-process ``threading.Lock``, write-to-tmp + ``os.replace``
@@ -39,18 +54,22 @@ for atomicity — matching the ``_save_config`` / ``_save_users`` idiom in
 from __future__ import annotations
 
 import fcntl
-import functools
+import hashlib
 import logging
 import os
+import re
 import secrets
 import threading
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from keyfile_io import KeyFileError, KeyFileInvalid, LastGood, read_yaml_strict, write_preserving
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +88,10 @@ REQUIRE_KEY_ENV = "ROVIMEN_API_KEYS_REQUIRED"
 class ApiKey(BaseModel):
     """One row in the keys file.
 
-    Either ``secret_hash`` (preferred, werkzeug pbkdf2 hash) or
+    Either ``secret_hash`` (preferred, werkzeug slow hash) or
     ``secret`` (legacy plaintext, migrated on read) is populated. New
-    rows minted by :func:`add_key` only set ``secret_hash``.
+    rows minted by :func:`add_key` set ``secret_hash`` and
+    ``secret_sha256``, never ``secret``.
     """
 
     id: str
@@ -79,6 +99,12 @@ class ApiKey(BaseModel):
     # ``secret`` until the first successful verify migrates them.
     secret_hash: str = ""
     secret: str = ""
+    # Hex sha256 of the secret: the fast lookup key. Recorded at mint, or
+    # on the first successful slow check of an older row.
+    secret_sha256: str = ""
+    # Fingerprint of the secret_hash the sha256 was recorded against; the
+    # sha256 is only used while it matches the row's current secret_hash.
+    secret_sha256_for: str = ""
     label: str = ""
     created_at: str = ""
     disabled: bool = False
@@ -94,54 +120,125 @@ class _KeysFile(BaseModel):
     keys: list[ApiKey] = Field(default_factory=list)
 
 
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class _Index:
+    """Enabled keys by id and by recorded sha256. ``slow`` holds the enabled
+    rows with no usable sha256 (none yet, or one recorded against a slow
+    hash the row no longer has): only their slow hash (or legacy
+    plaintext) can check a secret against them."""
+
+    by_id: dict[str, ApiKey] = field(default_factory=dict)
+    by_sha256: dict[str, ApiKey] = field(default_factory=dict)
+    slow: tuple[ApiKey, ...] = ()
+
+
+_EMPTY_INDEX = _Index()
+
+
 # ── Cache ──────────────────────────────────────────────────────────
 # Re-reading + parsing the YAML on every request is wasteful. We keep
-# an mtime-keyed cache so a fresh-minted key (which bumps the file's
-# mtime) is picked up on the next request without a service restart.
+# a cache keyed on the file's mtime, inode and size, so a fresh-minted
+# key (every write replaces the file) is picked up on the next request
+# without a service restart.
 _cache_lock = threading.Lock()
-# Tuple shape: (mtime, by_id) — by_id is the only O(1) lookup we can
-# do up-front, since the lookup-by-secret path has to iterate hashed
-# rows and call check_password_hash.
-_cache: tuple[float, dict[str, ApiKey]] | None = None
+_cache: tuple[tuple[int, int, int], _Index] | None = None
+# Slow hash -> sha256 of the secret that verified against it, in this
+# process. Only successful checks land here (at most one per row), so a
+# key whose sha256 could not be written to the file still verifies in
+# O(1) after its first check. Cleared with the cache.
+_verified_digests: dict[str, str] = {}
+# Last successfully loaded keys per file. An unreadable file (OSError) is
+# bridged with them for keyfile_io.STALE_KEYS_WINDOW_S from the first failed
+# reload; an invalid file, or a longer outage, fails closed.
+_last_good: LastGood[ApiKey] = LastGood("api_keys")
 
 # Same-process serialisation for writers (load → mutate → save):
 # pairs with the on-disk fcntl.flock for cross-process safety.
 _write_lock = threading.Lock()
 
 
-# ── Verify-cache ─────────────────────────────────────────────────
-# check_password_hash is intentionally slow (pbkdf2 600k iterations).
-# Re-hashing on every request would make even modest traffic CPU-bound.
-# Keep a small LRU keyed by (hash, plaintext) so that once a consumer
-# has been authenticated, subsequent calls are O(1). Bound at 256
-# entries — a handful of consumers is the realistic ceiling.
-@functools.lru_cache(maxsize=256)
-def _verify_cached(secret_hash: str, plaintext: str) -> bool:
-    if not secret_hash or not plaintext:
-        return False
+def _sha256_hex(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def _check_slow_hash(secret_hash: str, secret: str) -> bool:
     try:
-        return check_password_hash(secret_hash, plaintext)
+        return check_password_hash(secret_hash, secret)
     except Exception:
         return False
 
 
-def _load_raw(path: Path) -> _KeysFile:
-    if not path.exists():
-        return _KeysFile()
-    try:
-        raw = yaml.safe_load(path.read_text()) or {}
-        return _KeysFile.model_validate(raw)
-    except Exception as exc:
-        logger.error("api_keys: failed to load %s: %s", path, exc)
-        return _KeysFile()
+def _hash_fingerprint(secret_hash: str) -> str:
+    return hashlib.sha256(secret_hash.encode("utf-8")).hexdigest()[:16]
 
 
-def _refresh_cache(path: Path) -> dict[str, ApiKey]:
+def _has_bound_sha256(k: ApiKey) -> bool:
+    """True when the row's sha256 was recorded against its current slow hash."""
+    return (
+        bool(k.secret_hash)
+        and bool(_SHA256_HEX.match(k.secret_sha256))
+        and k.secret_sha256_for == _hash_fingerprint(k.secret_hash)
+    )
+
+
+def _secret_fields(secret: str) -> dict[str, str]:
+    """Stored form of a new secret: its slow hash, and its sha256 bound to
+    that hash. Every writer that sets a slow hash takes all of these."""
+    secret_hash = generate_password_hash(secret)
+    return {
+        "secret_hash": secret_hash,
+        "secret": "",
+        "secret_sha256": _sha256_hex(secret),
+        "secret_sha256_for": _hash_fingerprint(secret_hash),
+    }
+
+
+def _build_index(by_id: dict[str, ApiKey]) -> _Index:
+    by_sha256: dict[str, ApiKey] = {}
+    slow: list[ApiKey] = []
+    for k in by_id.values():
+        if _has_bound_sha256(k):
+            by_sha256[k.secret_sha256] = k
+        else:
+            slow.append(k)
+    return _Index(by_id=by_id, by_sha256=by_sha256, slow=tuple(slow))
+
+
+def _file_signature(path: Path) -> tuple[int, int, int] | None:
     try:
-        mtime = path.stat().st_mtime
+        st = path.stat()
     except OSError:
-        return {}
-    parsed = _load_raw(path)
+        return None
+    return st.st_mtime_ns, st.st_ino, st.st_size
+
+
+def _load_raw(path: Path) -> _KeysFile:
+    """Parse the keys file; an absent file is an empty store.
+
+    Raises :class:`KeyFileUnreadable` when the file exists but cannot be read
+    and :class:`KeyFileInvalid` when it cannot be parsed or validated (see
+    ``keyfile_io``).
+    """
+    raw = read_yaml_strict(path)
+    try:
+        return _KeysFile.model_validate(raw)
+    except ValidationError as exc:
+        raise KeyFileInvalid(f"cannot validate {path}: {exc}") from exc
+
+
+def _refresh_cache(path: Path) -> _Index:
+    signature = _file_signature(path)
+    if signature is None:
+        return _EMPTY_INDEX
+    try:
+        parsed = _load_raw(path)
+    except KeyFileError as exc:
+        # Unreadable: last good keys for a bounded window. Invalid: none.
+        # Nothing is cached, so the next request retries the read.
+        return _build_index(_last_good.failed(path, exc))
     by_id: dict[str, ApiKey] = {}
     for k in parsed.keys:
         if k.disabled:
@@ -149,22 +246,21 @@ def _refresh_cache(path: Path) -> dict[str, ApiKey]:
         if not k.secret_hash and not k.secret:
             continue
         by_id[k.id] = k
+    index = _build_index(by_id)
     with _cache_lock:
         global _cache
-        _cache = (mtime, by_id)
-    return by_id
+        _cache = (signature, index)
+    _last_good.loaded(path, by_id)
+    return index
 
 
-def _get_indexes(path: Path) -> dict[str, ApiKey]:
-    """Return ``by_id`` for the currently-enabled keys."""
-    if not path.exists():
-        return {}
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return {}
+def _get_indexes(path: Path) -> _Index:
+    """Return the index of the currently-enabled keys."""
+    signature = _file_signature(path)
+    if signature is None:
+        return _EMPTY_INDEX
     with _cache_lock:
-        if _cache and _cache[0] == mtime:
+        if _cache and _cache[0] == signature:
             return _cache[1]
     return _refresh_cache(path)
 
@@ -173,47 +269,44 @@ def _invalidate_cache() -> None:
     with _cache_lock:
         global _cache
         _cache = None
-    _verify_cached.cache_clear()
+    _verified_digests.clear()
 
 
 def _lock_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".lock")
 
 
-def _atomic_write(path: Path, parsed: _KeysFile) -> None:
-    """Atomic, locked write of the keys file.
+def _write_file(path: Path, parsed: _KeysFile) -> None:
+    """Serialise ``parsed`` to ``path`` inside an already-held flock context,
+    keeping the file's owner, group and mode (see ``keyfile_io``)."""
+    payload = yaml.safe_dump(parsed.model_dump(), sort_keys=False, allow_unicode=True)
+    write_preserving(path, payload)
 
-    Mirrors the ``_save_config`` / ``_save_users`` pattern in
-    ``rovimen_dashboard.py``: same-process ``threading.Lock`` +
-    ``fcntl.flock`` sidecar + write-to-tmp + ``os.replace``.
-    """
-    payload = yaml.safe_dump(
-        parsed.model_dump(), sort_keys=False, allow_unicode=True
+
+def _same_row(row: ApiKey, verified: ApiKey) -> bool:
+    return (
+        not row.disabled
+        and row.id == verified.id
+        and row.secret_hash == verified.secret_hash
+        and row.secret == verified.secret
     )
-    lock_path = _lock_path(path)
-    with _write_lock:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(lock_path, "a+") as lf:
-            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(payload)
-            try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
-            os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            logger.warning("api_keys: could not chmod 0600 on %s", path)
-    _invalidate_cache()
 
 
-def _migrate_plaintext_to_hash(path: Path, key_id: str, plaintext: str) -> None:
-    """Rewrite the row for ``key_id`` to drop ``secret`` and store
-    ``secret_hash``. Idempotent — if the row is already migrated this
-    is a no-op."""
+def _record_verified(path: Path, verified: ApiKey, secret: str) -> None:
+    """Record ``sha256(secret)`` on the row ``verified`` was read from,
+    bound to the row's slow hash, so the next check of this key is one dict
+    lookup. A legacy plaintext row also gets its slow hash and loses the
+    plaintext (:func:`_secret_fields`). An existing slow hash is never
+    changed.
+
+    Best effort: a failure is logged and the key still verifies. Only an
+    enabled row with the same id and hashes as the one checked is touched,
+    so a row disabled or re-keyed since the check is left alone. Writers in
+    other workers are serialised by the file lock and each re-reads the
+    file under it (strictly: an unreadable or invalid file is never
+    rewritten), so none drops another's update.
+    """
+    digest = _sha256_hex(secret)
     try:
         with _write_lock:
             lock_path = _lock_path(path)
@@ -221,63 +314,49 @@ def _migrate_plaintext_to_hash(path: Path, key_id: str, plaintext: str) -> None:
             with open(lock_path, "a+") as lf:
                 fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
                 parsed = _load_raw(path)
-                changed = False
-                for k in parsed.keys:
-                    if k.id != key_id:
-                        continue
-                    if k.secret and not k.secret_hash:
-                        k.secret_hash = generate_password_hash(plaintext)
-                        k.secret = ""
-                        changed = True
-                    break
-                if not changed:
+                row = next((k for k in parsed.keys if _same_row(k, verified)), None)
+                if row is None or (_has_bound_sha256(row) and row.secret_sha256 == digest):
                     return
-                payload = yaml.safe_dump(
-                    parsed.model_dump(),
-                    sort_keys=False,
-                    allow_unicode=True,
-                )
-                tmp = path.with_suffix(path.suffix + ".tmp")
-                tmp.write_text(payload)
-                try:
-                    os.chmod(tmp, 0o600)
-                except OSError:
-                    pass
-                os.replace(tmp, path)
-            try:
-                path.chmod(0o600)
-            except OSError:
-                pass
+                if row.secret and not row.secret_hash:
+                    for name, value in _secret_fields(secret).items():
+                        setattr(row, name, value)
+                else:
+                    row.secret_sha256 = digest
+                    row.secret_sha256_for = _hash_fingerprint(row.secret_hash)
+                _write_file(path, parsed)
         _invalidate_cache()
-        logger.info("api_keys: migrated %r from plaintext to hashed", key_id)
+        logger.info("api_keys: recorded the sha256 of key %r", verified.id)
     except Exception:
-        logger.exception("api_keys: migration to hash failed for %r", key_id)
+        logger.exception("api_keys: could not record the sha256 of key %r", verified.id)
 
 
 def validate(secret: str, path: Path = DEFAULT_KEYS_PATH) -> ApiKey | None:
     """Return the enabled ApiKey matching ``secret``, or None.
 
-    Verification walks the in-memory id index, comparing the candidate
-    against each enabled key's hash (cached). Legacy plaintext rows are
-    accepted once on a successful match and rewritten to hashed form on
-    the spot, so existing consumers keep working through the rollover.
+    One sha256 lookup decides it for every row that has ``secret_sha256``.
+    Only enabled rows without one get the slow check; a match records the
+    sha256 on the row (see :func:`_record_verified`). Legacy plaintext rows
+    are compared in constant time and migrated the same way.
     """
     if not secret:
         return None
-    by_id = _get_indexes(path)
-    for key in by_id.values():
+    digest = _sha256_hex(secret)
+    index = _get_indexes(path)
+    key = index.by_sha256.get(digest)
+    if key is not None:
+        return key
+    for key in index.slow:
         if key.secret_hash:
-            if _verify_cached(key.secret_hash, secret):
+            if _verified_digests.get(key.secret_hash) == digest:
                 return key
-        elif key.secret:
-            # Legacy plaintext row — constant-time compare, then
-            # opportunistically migrate to a hash for future requests.
-            if secrets.compare_digest(key.secret, secret):
-                _migrate_plaintext_to_hash(path, key.id, secret)
-                # Return a fresh copy reflecting the migrated state so
-                # the caller doesn't see a stale plaintext field.
-                refreshed = _get_indexes(path).get(key.id)
-                return refreshed or key
+            if _check_slow_hash(key.secret_hash, secret):
+                _verified_digests[key.secret_hash] = digest
+                _record_verified(path, key, secret)
+                return key
+        elif key.secret and secrets.compare_digest(key.secret, secret):
+            _record_verified(path, key, secret)
+            # The migrated row, so the caller doesn't see the plaintext.
+            return _get_indexes(path).by_id.get(key.id) or key
     return None
 
 
@@ -327,26 +406,13 @@ def add_key(
             plaintext = mint_secret()
             new = ApiKey(
                 id=id,
-                secret_hash=generate_password_hash(plaintext),
+                **_secret_fields(plaintext),
                 label=label,
                 created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 rate_limit_override=rate_limit_override,
             )
             parsed.keys.append(new)
-            payload = yaml.safe_dump(
-                parsed.model_dump(), sort_keys=False, allow_unicode=True
-            )
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(payload)
-            try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
-            os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            logger.warning("api_keys: could not chmod 0600 on %s", path)
+            _write_file(path, parsed)
     _invalidate_cache()
     return new, plaintext
 
@@ -372,20 +438,7 @@ def disable_key(id: str, *, path: Path = DEFAULT_KEYS_PATH) -> bool:
                     found = True
             if not found:
                 return False
-            payload = yaml.safe_dump(
-                parsed.model_dump(), sort_keys=False, allow_unicode=True
-            )
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            tmp.write_text(payload)
-            try:
-                os.chmod(tmp, 0o600)
-            except OSError:
-                pass
-            os.replace(tmp, path)
-        try:
-            path.chmod(0o600)
-        except OSError:
-            pass
+            _write_file(path, parsed)
     _invalidate_cache()
     return True
 

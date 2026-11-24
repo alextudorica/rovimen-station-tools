@@ -3,6 +3,7 @@
 import copy
 import fcntl
 import functools
+import hashlib
 import logging
 import os
 import secrets
@@ -17,9 +18,10 @@ import yaml
 from werkzeug.security import check_password_hash
 from flask import Flask, abort, jsonify, redirect, request, session, url_for
 
+from atomic_write import write_atomic
 import cf_access
 import security
-from models import DashboardConfig, UserConfig
+from models import DashboardConfig, StationConfig, UserConfig
 
 logger = logging.getLogger(__name__)
 
@@ -224,15 +226,8 @@ def _save_users(users: dict[str, UserConfig]) -> None:
         data = {"users": {k: v.model_dump() for k, v in users.items()}}
         _check_user_count(len(users))
         _backup_users_file()
-        tmp = USERS_PATH.with_suffix(".tmp")
-        tmp.write_text(
-            yaml.dump(data, default_flow_style=False, allow_unicode=True)
-        )
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
-        tmp.replace(USERS_PATH)
+        write_atomic(USERS_PATH, yaml.dump(data, default_flow_style=False, allow_unicode=True),
+                     tmp=USERS_PATH.with_suffix(".tmp"), chmod=0o600)
     # 0600 on the live file too, in case rename inherited odd perms.
     security.lock_file_perms(USERS_PATH, 0o600)
     _invalidate_users_cache()
@@ -264,15 +259,8 @@ def _update_users(mutator) -> None:
         _check_user_count(len(merged))
         _backup_users_file()
         data = {"users": merged}
-        tmp = USERS_PATH.with_suffix(".tmp")
-        tmp.write_text(
-            yaml.dump(data, default_flow_style=False, allow_unicode=True)
-        )
-        try:
-            os.chmod(tmp, 0o600)
-        except OSError:
-            pass
-        tmp.replace(USERS_PATH)
+        write_atomic(USERS_PATH, yaml.dump(data, default_flow_style=False, allow_unicode=True),
+                     tmp=USERS_PATH.with_suffix(".tmp"), chmod=0o600)
     security.lock_file_perms(USERS_PATH, 0o600)
     _invalidate_users_cache()
 
@@ -280,6 +268,36 @@ def _update_users(mutator) -> None:
 # ---------------------------------------------------------------------------
 # Credential checking
 # ---------------------------------------------------------------------------
+
+# Legacy env-var admin slots. These accounts authenticate purely from the
+# environment and deliberately have no users.yaml row, so every code path that
+# asks "is this a real account?" has to know about them — not just the login
+# check. Keeping the slot range in one place stops the two answers drifting.
+_ENV_ADMIN_SLOTS = (1, 2)
+
+
+def _env_admins() -> list[tuple[int, str, str]]:
+    """Return the configured ``(slot, username, password)`` env-var admins.
+
+    Slots with either half missing are skipped: a half-configured slot is a
+    deployment mistake, not a credential.
+    """
+    found = []
+    for i in _ENV_ADMIN_SLOTS:
+        ev_user = os.environ.get(f"ROVIMEN_ADMIN_USER_{i}")
+        ev_pass = os.environ.get(f"ROVIMEN_ADMIN_PASS_{i}")
+        if ev_user and ev_pass:
+            found.append((i, ev_user, ev_pass))
+    return found
+
+
+def is_env_admin(username: str) -> bool:
+    """True when ``username`` is a legacy env-var admin.
+
+    Such an account is legitimate despite having no users.yaml row, so callers
+    that treat "absent from users.yaml" as "deleted" must exempt it.
+    """
+    return any(ev_user == username for _, ev_user, _ in _env_admins())
 
 
 def _check_credentials(username: str, password: str) -> dict | None:
@@ -318,11 +336,7 @@ def _check_credentials(username: str, password: str) -> dict | None:
     # through the per-username lockout — without this, a distributed brute
     # force against the env-var admin's password evades both the YAML user
     # lockout and any account-enumeration mitigation.
-    for i in (1, 2):
-        ev_user = os.environ.get(f"ROVIMEN_ADMIN_USER_{i}")
-        ev_pass = os.environ.get(f"ROVIMEN_ADMIN_PASS_{i}")
-        if not (ev_user and ev_pass):
-            continue
+    for _, ev_user, ev_pass in _env_admins():
         if ev_user != username:
             continue
         if secrets.compare_digest(ev_pass, password):
@@ -339,6 +353,19 @@ def _session_role() -> str:
     return session.get("role", "guest")
 
 
+def password_fingerprint(password_hash: str) -> str:
+    """Short tag of an account's stored password hash, kept in its sessions.
+
+    Stamped as ``session["pw_fp"]`` at every login; ``revalidate_session``
+    clears a session whose tag no longer matches the account, so a password
+    change ends every other session. The hash carries a random salt, so the
+    tag changes on every password set (even to the same password), and 16 hex
+    chars of SHA-256 over a salted hash give the cookie holder nothing to
+    attack the password with.
+    """
+    return hashlib.sha256(password_hash.encode()).hexdigest()[:16]
+
+
 # Product rule: every signed-in account has fleet-wide READ access to all
 # stations' data and videos. ``host`` station assignment no longer restricts
 # *viewing* — it only scopes *writes* (see _has_station_write_access). Keep
@@ -346,6 +373,10 @@ def _session_role() -> str:
 # account can never be dropped to a 403 by the data-route gate (issues #522,
 # #557). Unknown/guest sessions still fail closed.
 _ACCOUNT_ROLES = ("admin", "host", "visitor", "press")
+
+# A magic-login session is single-factor (the URL token), so it always runs as
+# this read-only role, whatever the account's own role (see magic_login).
+MAGIC_SESSION_ROLE = "visitor"
 
 
 def _has_station_access(host_key: str) -> bool:
@@ -373,6 +404,33 @@ def _has_station_write_access(host_key: str) -> bool:
     return False
 
 
+def _has_lock_access(host_key: str) -> bool:
+    """LOCK gate: any signed-in account may lock a clip on any station.
+
+    Locking only pins a chunk against the retention janitor, so it preserves
+    data instead of mutating station state, and it is granted fleet-wide like
+    reads: whoever spots a fireball can save the witness clip on every station
+    that recorded it before the sweep takes it, without waiting for each owner.
+    Unlocking keeps ``_has_station_write_access`` — that is the direction that
+    hands a clip back to the janitor.
+    """
+    return _has_station_access(host_key)
+
+
+def may_hide_detections() -> bool:
+    """HIDE gate: may this session hide or unhide a detection as a false positive?
+
+    Any signed-in account of any role (a hide only filters what the browsing
+    lists show, for everyone; it never touches a clip). A magic-link session
+    may not: it is single-factor, so it runs as the read-only
+    ``MAGIC_SESSION_ROLE`` and is refused every write that changes what other
+    users see (setting a password, here hiding). The camera check is
+    ``_has_camera_access``, the same one the listing applies.
+    """
+    return (bool(session.get("user")) and not session.get("magic")
+            and _session_role() in _ACCOUNT_ROLES)
+
+
 def _host_keys_for_camera(config: DashboardConfig, cam_code: str) -> list[str]:
     """Return the host_keys that own the given camera code.
 
@@ -386,6 +444,41 @@ def _host_keys_for_camera(config: DashboardConfig, cam_code: str) -> list[str]:
     cu = cam_code.upper()
     return [k for k, st in config.stations.items()
             if any(c.code.upper() == cu for c in st.cameras)]
+
+
+def camera_owner(
+    config: DashboardConfig, cam_code: str,
+) -> tuple[str, StationConfig] | tuple[None, None]:
+    """``(host_key, station)`` of the first station in registry order that
+    owns ``cam_code``, or ``(None, None)`` for a camera no station owns."""
+    owners = _host_keys_for_camera(config, cam_code)
+    if not owners:
+        return None, None
+    return owners[0], config.stations[owners[0]]
+
+
+def camera_owner_visible(config: DashboardConfig, cam_code: str, anonymous: bool) -> bool:
+    """Whether a fireball report may show camera ``cam_code``: its first
+    owning station is ``public: true``, or the visitor is signed in. A camera
+    no station owns is never shown."""
+    _, station = camera_owner(config, cam_code)
+    return station is not None and (station.public or not anonymous)
+
+
+def public_host_keys(config: DashboardConfig) -> set[str]:
+    """Host keys of every ``public: true`` station."""
+    return {hk for hk, st in config.stations.items() if st.public}
+
+
+def public_camera_codes(config: DashboardConfig) -> set[str]:
+    """Upper-cased codes of every camera a ``public: true`` station owns.
+
+    The anonymous filter of the camera-keyed surfaces that fail closed:
+    a camera passes when ANY of its owners is public, and a camera no
+    station owns does not pass (unlike :func:`camera_is_public_for_request`).
+    """
+    return {c.code.upper() for st in config.stations.values() if st.public
+            for c in st.cameras}
 
 
 def _has_camera_access(config: DashboardConfig, cam_code: str) -> bool:
@@ -440,18 +533,24 @@ def station_is_public_for_request(config: DashboardConfig, host_key: str) -> boo
 
 
 def camera_is_public_for_request(config: DashboardConfig, cam_code: str) -> bool:
-    """Camera-code variant of :func:`station_is_public_for_request`.
+    """Whether the CURRENT request may view camera ``cam_code``'s media.
 
-    Logged-in users always pass. For anonymous visitors the camera must
-    belong to at least one ``public: true`` station; unknown cameras fail
-    closed so the public can't enumerate private/commissioning gear.
+    Media is read from the archive by camera code, so a route that checks
+    only the URL's host_key would serve a ``public: false`` station's camera
+    under a public host. Routes taking both call this next to
+    :func:`station_is_public_for_request`.
+
+    Logged-in users always pass. Anonymous visitors are refused a camera that
+    any ``public: false`` station owns. A camera no current station owns
+    (retired, or moved off the registry) passes: its archive stays on the
+    public pages, and the host_key check still applies.
     """
     if not is_anonymous():
         return True
-    owners = _host_keys_for_camera(config, cam_code)
-    if not owners:
-        return False
-    return any(station_is_public_for_request(config, h) for h in owners)
+    return all(
+        station_is_public_for_request(config, h)
+        for h in _host_keys_for_camera(config, cam_code)
+    )
 
 
 def _find_user_by_email(email: str) -> tuple[str, UserConfig] | None:
@@ -534,6 +633,7 @@ def _cf_access_before_request() -> None:
     session["stations"] = u.stations
     session["admin"]    = username if u.role == "admin" else None
     session["session_epoch"] = u.session_epoch
+    session["pw_fp"]    = password_fingerprint(u.password_hash)
     # No TOTP on this account → CF Access *is* the only factor. Record the
     # session's factor honestly so audit/usage can tell CF-bridge sessions
     # apart from password+TOTP ones; never claim "totp" when none was checked.
@@ -597,6 +697,40 @@ def require_station(f):
     return decorated
 
 
+def require_station_lock(f):
+    """Decorator for the clip-lock route. Same 401 rule as ``require_station``.
+
+    Splits the one endpoint by direction instead of by station ownership:
+    locking (``{"locked": true}``, the only request the dashboard sends) is
+    open to every signed-in account on every station via ``_has_lock_access``,
+    while unlocking (``{"locked": false}``) still needs admin or the owning
+    host. The body must be inspected here because both directions share a
+    route; Flask caches the parsed JSON, so the view re-reads it for free.
+    """
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("user"):
+            if request.is_json or request.path.startswith("/api/"):
+                abort(401)
+            return redirect(url_for("login"))
+        host_key = kwargs.get("host_key", "")
+        body = request.get_json(silent=True) or {}
+        # Absent/unparseable body means lock: matches the station API default
+        # (station_api.py `body.get('locked', True)`), so a malformed payload
+        # can never be read as an unlock request that skips the write gate.
+        unlocking = not bool(body.get("locked", True))
+        allowed = (
+            _has_station_write_access(host_key) if unlocking
+            else _has_lock_access(host_key)
+        )
+        if not allowed:
+            if request.is_json or request.path.startswith("/api/"):
+                abort(403)
+            return redirect(url_for("login"))
+        return f(*args, **kwargs)
+    return decorated
+
+
 # ---------------------------------------------------------------------------
 # Session revalidation (privilege-revocation, audit H3)
 # ---------------------------------------------------------------------------
@@ -628,15 +762,20 @@ def revalidate_session() -> None:
 
       * clears the session when the account has been deleted or has passed
         its ``expires_at`` (the user is logged out immediately);
+      * clears the session when the account's password changed since it was
+        minted (its ``pw_fp`` no longer matches ``password_fingerprint``), so
+        a password change ends every other session. The session that made
+        the change re-stamps its own tag. A session with no tag yet (minted
+        before the tag existed) is stamped, not cleared;
       * on a ``session_epoch`` mismatch — bumped by the admin mutators on any
         role/stations/password/expiry change — refreshes ``role``/``stations``
         from users.yaml and re-stamps the epoch, so the *current* privilege
         level (lower or higher) takes effect at once.
 
     ``_load_users()`` is memoised on the file mtime, so the steady-state cost
-    is a single ``stat`` per request. Accounts not present in users.yaml
-    (env-var admins, magic-link guests created elsewhere) are left untouched —
-    there is no file row to compare against.
+    is a single ``stat`` per request. The one account kind with no file row is
+    the legacy env-var admin (``is_env_admin``); it is exempt, because for it
+    "absent from users.yaml" is the normal state rather than a deletion.
     """
     username = session.get("user")
     if not username:
@@ -644,10 +783,41 @@ def revalidate_session() -> None:
     users = _load_users()
     u = users.get(username)
     if u is None:
-        return  # not a users.yaml account (env admin / external) — don't clobber
+        if is_env_admin(username):
+            return  # authenticates from the environment — no file row to compare
+        if not users:
+            # An empty map is never a real users.yaml — _load_users() also
+            # returns {} when the file is missing or unreadable. Treating that
+            # as "everyone was deleted" would log the whole fleet out over a
+            # bad deploy, so fail open here and let the auth gate keep working.
+            logger.error("users.yaml unreadable or empty — skipping revalidation")
+            return
+        # Deleted account. The session cookie is client-side and lives 90 days,
+        # so without this the row can be gone while the holder keeps browsing
+        # on the old snapshot until the cookie expires — deletion has to log
+        # them out now, exactly as an expiry does below.
+        logger.info("session for deleted account %s cleared", username)
+        session.clear()
+        return
     if _account_is_expired(u):
         # Past account expiry — log out now rather than waiting for the next
         # explicit auth attempt. Mirrors the _check_credentials expiry gate.
+        session.clear()
+        return
+    live_fp = password_fingerprint(u.password_hash)
+    session_fp = session.get("pw_fp")
+    if session_fp is None:
+        # Minted before the tag existed. Adopt the live tag only while the
+        # session's epoch is current: every password change bumps the epoch,
+        # so a mismatch means the password may have changed since this session
+        # was minted, and adopting the new tag would let it survive that change.
+        if (session.get("session_epoch") or 0) != (u.session_epoch or 0):
+            logger.info("untagged session for %s cleared: epoch changed", username)
+            session.clear()
+            return
+        session["pw_fp"] = live_fp
+    elif session_fp != live_fp:
+        logger.info("session for %s cleared: password changed", username)
         session.clear()
         return
     live_epoch = u.session_epoch or 0
@@ -655,9 +825,20 @@ def revalidate_session() -> None:
         # Privilege-relevant change since this session was minted. Re-resolve
         # the authoritative role/stations and adopt the new epoch so the
         # check passes on subsequent requests without another file parse.
-        session["role"]          = u.role
+        if session.get("magic"):
+            # A magic session keeps its read-only role: copying the account's
+            # role here would turn a single-factor link session into a host
+            # one on any admin edit. An account promoted to admin loses the
+            # session outright, as magic_login refuses admin accounts.
+            if u.role == "admin":
+                session.clear()
+                return
+            session["role"] = MAGIC_SESSION_ROLE
+            session["admin"] = None
+        else:
+            session["role"]  = u.role
+            session["admin"] = username if u.role == "admin" else None
         session["stations"]      = u.stations
-        session["admin"]         = username if u.role == "admin" else None
         session["session_epoch"] = live_epoch
 
 

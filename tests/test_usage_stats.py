@@ -98,6 +98,39 @@ class TestClassify:
     def test_settings(self):
         assert usage_stats._classify("/api/settings") == "Station Settings"
 
+    def test_live_page(self):
+        assert usage_stats._classify("/live") == "Live View"
+
+    def test_live_view_rule_stays_before_live(self):
+        # Both map to the same label, but /live_view must keep matching its
+        # own (earlier) rule so the pair stays order-safe.
+        rules = usage_stats._FEATURE_RULES
+        assert rules.index(("/live_view", "Live View")) < \
+            rules.index(("/live", "Live View"))
+
+    def test_highlights_page(self):
+        assert usage_stats._classify("/highlights") == "Highlights"
+
+    def test_showers_page(self):
+        assert usage_stats._classify("/showers") == "Showers"
+
+    def test_wiki_pages(self):
+        assert usage_stats._classify("/wiki") == "Build Guide"
+        assert usage_stats._classify("/wiki/de") == "Build Guide"
+
+    def test_build_page(self):
+        assert usage_stats._classify("/build") == "Build Guide"
+
+    def test_social_page(self):
+        assert usage_stats._classify("/social") == "Social"
+
+    def test_station_page(self):
+        assert usage_stats._classify("/station/gmnro03") == "Station dashboard"
+
+    def test_stations_not_swallowed_by_station_prefix(self):
+        # "/stations" must not match the "/station/" rule.
+        assert usage_stats._classify("/stations") != "Station dashboard"
+
 
 # ── _iter_log ────────────────────────────────────────────────────────────
 

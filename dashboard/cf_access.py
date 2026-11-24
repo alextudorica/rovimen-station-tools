@@ -14,7 +14,7 @@ the email claim becomes a hard identity, and exposes a single
 
 Configuration (env on the VPS):
 
-* ``ROVIMEN_CF_TEAM_DOMAIN`` — e.g. ``rovimen.cloudflareaccess.com``
+* ``ROVIMEN_CF_TEAM_DOMAIN`` — e.g. ``example.cloudflareaccess.com``
 * ``ROVIMEN_CF_AUD``        — the Application Audience (AUD) tag shown in
                               the Cloudflare Access app settings.
 

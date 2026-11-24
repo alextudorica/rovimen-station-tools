@@ -30,6 +30,7 @@ Multi-worker scaling (see docs/reversed_http_push_design.md §9):
 
 import logging
 import os
+import threading
 
 logger = logging.getLogger("gunicorn.error")
 
@@ -43,6 +44,34 @@ bind = os.environ.get("GUNICORN_BIND", "127.0.0.1:17777")
 timeout = int(os.environ.get("GUNICORN_TIMEOUT", "120"))
 graceful_timeout = int(os.environ.get("GUNICORN_GRACEFUL_TIMEOUT", "30"))
 accesslog = os.environ.get("GUNICORN_ACCESSLOG", "-")
+
+# ── Worker recycling ────────────────────────────────────────────────────────
+# Reclaim worker RSS on a request cadence. The per-process caches are count-
+# bounded but hold large blobs, and SSHFS reader threads that time out are
+# abandoned (they keep their stack + buffers until the box unblocks) — so a
+# long-lived worker ratchets its RSS upward until the cgroup OOM-kills it.
+# Recycling after a bounded number of requests hands that memory back. This is
+# the piece that was missing when >1 worker walked the box into the OOM killer.
+# 20,000 requests is ~8 h of fleet push traffic per worker (2026-09: ~7,600
+# req/h across 3 workers). Recycling is a backstop again, not the heartbeat of
+# the service: at 500 (the 2026-09-04 ops mitigation for the per-worker GMN
+# and archive-index memory) every worker rebooted every ~4 min and each boot
+# re-parsed ~3 GB of GMN text, re-fetched the shower catalogue and re-scanned
+# SSH host keys, so the dashboard lived permanently in its own boot storm.
+# The boot-time work is now persisted and shared (gmn_data month index, MDC
+# disk cache, keyscan negative cache) and the memory that motivated the low
+# value is gone with it.
+max_requests = int(os.environ.get("GUNICORN_MAX_REQUESTS", "20000"))
+max_requests_jitter = int(os.environ.get("GUNICORN_MAX_REQUESTS_JITTER", "2000"))
+
+# Recycling only reclaims memory if the worker can actually EXIT. Interpreter
+# shutdown joins all non-daemon executor threads, and an SSHFS-blocked scan
+# makes that join outlast the heartbeat ``timeout`` — recycle becomes WORKER
+# TIMEOUT -> SIGKILL -> a 2-minute single-worker blackout (2026-07-06 night).
+# So the gunicorn tiers opt in to the fast-exit hook (worker_exit.py): flush
+# the activity log + logging, then _exit(0) instead of waiting on the box.
+# ``setdefault`` lets a unit env file force "0" to opt out.
+os.environ.setdefault("ROVIMEN_FAST_WORKER_EXIT", "1")
 
 
 def post_worker_init(worker) -> None:  # noqa: ANN001 -- gunicorn worker arg
@@ -64,7 +93,14 @@ def post_worker_init(worker) -> None:  # noqa: ANN001 -- gunicorn worker arg
         wsgi = worker.app.wsgi()
         start = getattr(wsgi, "_start_background_workers", None)
         if callable(start):
-            start()
+            # Spawn OFF the worker boot path. post_worker_init runs before the
+            # worker enters its request loop, and _start_background_workers does
+            # synchronous disk rehydration + serial tunnel/poller setup that can
+            # exceed the deploy restart poll under disk/lock contention -> the
+            # worker never binds /login and the dashboard 504s on restart
+            # (probabilistic wedge). Threading it lets the worker serve
+            # immediately; background startup (and any slowness in it) runs async.
+            threading.Thread(target=start, name="bg-startup", daemon=True).start()
     except Exception:
         # Never let a background-startup hiccup take down a worker that is
         # otherwise ready to serve; the create_app timer fallback still fires.
@@ -94,3 +130,39 @@ def on_starting(server) -> None:  # noqa: ANN001 -- gunicorn server arg
         except Exception:
             logger.warning(msg, workers)
         print("WARNING: " + (msg % workers), flush=True)
+
+
+# ── Control socket (gunicorn >= 25.1) ──────────────────────────────────────
+# gunicorn 25.1 starts an asyncio control-socket server in a background THREAD
+# of the master (gunicorn/ctl/server.py). That thread logs "Control socket
+# listening at ..." concurrently with the very first spawn_workers() fork, so a
+# child forked while the thread holds the stderr/logging lock deadlocks inside
+# its own "Booting worker" log call — before it ever heartbeats. Verified on
+# prod 2026-09-06 with py-spy: 1 of 3 workers sat at PyThread_acquire_lock <-
+# logging.emit <- arbiter.spawn_worker for 35+ min with one thread and 0 CPU,
+# i.e. a third of the fleet's serving capacity was dead. Nothing here uses
+# ``gunicornc``; disable the server so the master stays single-threaded (the
+# only other master threads are jemalloc's, which have proper atfork hooks).
+# Unknown settings are ignored by older gunicorn, so this is safe on every tier.
+control_socket_disable = True
+
+
+def pre_fork(server, worker) -> None:  # noqa: ANN001 -- gunicorn hook args
+    """Stamp a monotonic heartbeat BEFORE fork so a never-booted child is reaped.
+
+    gunicorn's ``WorkerTmp`` creates its heartbeat file with ``mkstemp`` (mtime
+    = wall clock) but ``notify()`` writes ``time.monotonic()``, and the arbiter
+    reaps with ``monotonic() - last_update() <= timeout`` (gunicorn 25.1.0
+    ``arbiter.py:581``). For a child that never reaches its first ``notify()``
+    that difference is monotonic - wallclock, roughly -1.7e9 s: always below
+    ``timeout``, so the arbiter never kills it and the wedge above persists
+    until the next ``systemctl restart``. Writing one monotonic stamp in the
+    master, right before the fork, gives every child a sane baseline: a worker
+    that deadlocks at fork is now SIGABRT/SIGKILLed after ``timeout`` seconds
+    and replaced, instead of sitting as dead capacity for hours.
+    """
+    try:
+        worker.tmp.notify()
+    except Exception:
+        # Best effort: never let the safety net itself abort a spawn.
+        pass

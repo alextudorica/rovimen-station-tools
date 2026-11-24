@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the ROVIMEN spectroscopy pipeline every morning after dawn processing
+
+[Timer]
+# 08:30 UTC: RMS detection + dawn processing and the staggered archive upload
+# window are over on every station, and last night's spectro chunks are still
+# two retention-days away from pruning. Persistent so a host that was down at
+# 08:30 catches up on boot rather than skipping the night.
+OnCalendar=*-*-* 08:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

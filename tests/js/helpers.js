@@ -72,3 +72,17 @@ export function loadBrowserScript(relPath, extraGlobals = {}) {
   }
   return sandbox;
 }
+
+/**
+ * The <body> markup of a dashboard template, for page modules that look up
+ * their elements at import. Jinja tags and <script> blocks are dropped.
+ */
+export function templateBody(name) {
+  const src = readFileSync(resolve(ROOT, 'dashboard/templates', name), 'utf8');
+  const body = src.slice(src.indexOf('<body'), src.lastIndexOf('</body>'));
+  return body
+    .replace(/^<body[^>]*>/, '')
+    .replace(/<script[\s\S]*?<\/script>/g, '')
+    .replace(/\{%[\s\S]*?%\}/g, '')
+    .replace(/\{#[\s\S]*?#\}/g, '');
+}

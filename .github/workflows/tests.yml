@@ -1,11 +1,11 @@
 name: Tests
 
 on:
+  # Pull requests only: a PR must pass `test` to merge (required check), so
+  # main is tested before it lands and deploy-prod.yml does not test it again.
   pull_request:
-    branches: [main, development]
-  push:
-    branches: [main, development]
-  workflow_call:
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -27,8 +27,37 @@ jobs:
       - name: Install dependencies
         run: uv sync --group dev
 
+      # A pinned static ffmpeg, kept in the Actions cache. `apt-get install ffmpeg`
+      # took 49-335 s a run depending on the mirror; a cache hit takes seconds.
+      # The static build has every filter the encoder and stacker use, and the
+      # suite passes on it as it does on Ubuntu's 6.1 and on 8.0. Bump the version
+      # and the checksum together.
+      - name: Restore ffmpeg
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/ffmpeg
+          key: ffmpeg-static-6.0.1-amd64
+
+      - name: Download ffmpeg
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL --retry 3 -o /tmp/ffmpeg.tar.xz \
+            https://johnvansickle.com/ffmpeg/old-releases/ffmpeg-6.0.1-amd64-static.tar.xz
+          echo "28268bf402f1083833ea269331587f60a242848880073be8016501d864bd07a5  /tmp/ffmpeg.tar.xz" | sha256sum -c -
+          mkdir -p ~/.local/ffmpeg
+          tar -xJf /tmp/ffmpeg.tar.xz --strip-components=1 -C ~/.local/ffmpeg --wildcards '*/ffmpeg' '*/ffprobe'
+
+      - name: Put ffmpeg on PATH
+        run: |
+          echo "$HOME/.local/ffmpeg" >> "$GITHUB_PATH"
+          "$HOME/.local/ffmpeg/ffmpeg" -hide_banner -version | head -1
+
+      # Two workers on the 2-core runner; --dist loadfile keeps each file's tests
+      # in one worker, so module-level fixtures and per-file temp trees behave as
+      # they do serially.
       - name: Run Python tests
-        run: uv run pytest tests/ -v --tb=short
+        run: uv run pytest tests/ -n auto --dist loadfile -v --tb=short
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -79,9 +108,9 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
 
-      - name: Install Playwright system deps (cache hit)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: npx playwright install-deps chromium
+      # No `playwright install-deps` on a cache hit: it is an apt-get run that took
+      # about 190 s, and the runner image already carries Google Chrome and the
+      # libraries Chromium needs. A cache miss still installs with --with-deps.
 
       - name: Run Playwright E2E tests
         run: npx playwright test --config tests/e2e/playwright.config.js

@@ -203,3 +203,14 @@ describe('sliderVal <-> HHMM roundtrip', () => {
     }
   });
 });
+
+describe('nightDomain prefers the footage window (sun -9° → -9° + 30 min)', () => {
+  it('uses capture_start_min / capture_end_min when present', () => {
+    const d = tw.nightDomain({ capture_start_min: 15 * 60 + 39, capture_end_min: 5 * 60 + 11,
+                               civil_sunset_min: 1000, civil_sunrise_min: 300 });
+    expect(d).toEqual({ lo: 15 * 60 + 39 - 720, hi: 5 * 60 + 11 + 720 });
+  });
+  it('falls back to civil sunset → sunrise + 30 min without them', () => {
+    expect(tw.nightDomain({ civil_sunset_min: 1140, civil_sunrise_min: 180 })).toEqual({ lo: 420, hi: 930 });
+  });
+});

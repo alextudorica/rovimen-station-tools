@@ -26,10 +26,13 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 import security
 from auth import (
+    MAGIC_SESSION_ROLE,
     _check_credentials,
     _load_users,
     _session_role,
     _update_users,
+    may_hide_detections,
+    password_fingerprint,
 )
 from models import UserConfig
 
@@ -41,7 +44,7 @@ logger = logging.getLogger(__name__)
 # the redeemed session to a read-only role and bound it with an absolute expiry
 # that is re-checked on every request -- independent of, and stricter than, the
 # account-level ``expires_at`` and the app-wide 90-day permanent-session cap.
-_MAGIC_SESSION_ROLE = "visitor"            # read-only; see auth._has_station_write_access
+_MAGIC_SESSION_ROLE = MAGIC_SESSION_ROLE   # read-only; see auth._has_station_write_access
 _MAGIC_SESSION_TTL_SECONDS = 12 * 60 * 60  # absolute cap on a redeemed magic session (12h)
 
 
@@ -99,6 +102,10 @@ def register_auth_routes(app: Flask, config, cache, tunnels) -> None:
         # env-var admins / accounts not in users.yaml → 0, matching the model
         # default so those sessions never spuriously revalidate.
         session["session_epoch"] = u.session_epoch if u is not None else 0
+        # Tag of the password hash: revalidate_session ends this session once
+        # the account's password changes (env-var admins have no row to tag).
+        if u is not None:
+            session["pw_fp"] = password_fingerprint(u.password_hash)
         # Record the factor honestly: only "totp" when a TOTP secret was
         # actually verified to reach this point.
         if u is not None and u.totp_secret:
@@ -326,7 +333,19 @@ def register_auth_routes(app: Flask, config, cache, tunnels) -> None:
         Triggered when the user has `require_totp=True` but no
         `totp_secret` yet. The proposed secret is stashed in the session
         until the user confirms it by entering a valid 6-digit code.
+
+        Only for an account with no secret. The page is reachable with just
+        ``pending_login`` (a correct password, or a Cloudflare identity), so
+        showing or re-confirming a stored secret here would let that one
+        factor read and then pass the second: an enrolled account is sent to
+        /totp/verify (pending login) or home instead. A magic-link session
+        cannot enrol either, because binding an authenticator to the account
+        from a single-factor link would outlive the link.
         """
+        if session.get("magic"):
+            security.audit_request("totp_setup", username=session.get("user") or "?",
+                                   result="magic_refused")
+            return redirect(url_for("index"))
         username = (session.get("pending_login")
                     or session.get("user"))  # also reachable post-login
         if not username:
@@ -336,8 +355,13 @@ def register_auth_routes(app: Flask, config, cache, tunnels) -> None:
         if not u:
             session.clear()
             return redirect(url_for("login"))
+        if u.totp_secret:
+            session.pop("totp_setup_secret", None)
+            if session.get("pending_login"):
+                return redirect(url_for("totp_verify"))
+            return redirect(url_for("index"))
         if request.method == "GET":
-            secret = u.totp_secret or session.get("totp_setup_secret")
+            secret = session.get("totp_setup_secret")
             if not secret:
                 secret = security.generate_totp_secret()
                 session["totp_setup_secret"] = secret
@@ -348,8 +372,11 @@ def register_auth_routes(app: Flask, config, cache, tunnels) -> None:
                 qr_data_uri=security.totp_qr_data_uri(uri),
                 error=None,
             )
-        # POST: verify the code, persist on success.
-        secret = u.totp_secret or session.get("totp_setup_secret") or ""
+        # POST: verify the code against the secret this session was shown,
+        # persist on success.
+        secret = session.get("totp_setup_secret")
+        if not secret:
+            return redirect(url_for("totp_setup"))
         code = (request.form.get("code") or "").strip()
         if not security.verify_totp(secret, code):
             uri = security.totp_provisioning_uri(secret, username)
@@ -365,8 +392,8 @@ def register_auth_routes(app: Flask, config, cache, tunnels) -> None:
 
         def _mutate(users: dict[str, UserConfig]) -> None:
             uu = users.get(username)
-            if uu is None:
-                return
+            if uu is None or uu.totp_secret:
+                return  # deleted, or enrolled meanwhile: never replace a secret
             uu.totp_secret = secret
             uu.require_totp = True
             user_snapshot["role"] = uu.role
@@ -376,10 +403,11 @@ def register_auth_routes(app: Flask, config, cache, tunnels) -> None:
 
         _update_users(_mutate)
         session.pop("totp_setup_secret", None)
-        security.audit_request("totp_setup", username=username, result="ok")
         if not user_snapshot:
+            security.audit_request("totp_setup", username=username, result="refused")
             session.clear()
             return redirect(url_for("login"))
+        security.audit_request("totp_setup", username=username, result="ok")
         if session.get("pending_login") == username:
             u_fresh = _load_users().get(username)
             result = {"role": user_snapshot["role"],
@@ -451,6 +479,10 @@ def register_auth_routes(app: Flask, config, cache, tunnels) -> None:
         session["stations"]  = user_snapshot["stations"]
         session["admin"]     = username if user_snapshot["role"] == "admin" else None
         session["session_epoch"] = user_snapshot["session_epoch"]
+        # This session set the password, so it carries the new tag; every
+        # other session for the account still has the old one and is ended
+        # by revalidate_session on its next request.
+        session["pw_fp"]     = password_fingerprint(pw_hash)
         return redirect(url_for("index"))
 
     # ── /logout ──────────────────────────────────────────────────────────
@@ -477,17 +509,23 @@ def register_auth_routes(app: Flask, config, cache, tunnels) -> None:
         # calls this on every page load) propagates the current assignment back
         # into the session for all subsequent requests. _load_users() is
         # memoised on file mtime, so this is a cheap stat on the hot path.
+        # A magic-link session keeps its read-only role (stations still
+        # refresh): copying the account's role would undo the single-factor
+        # downgrade magic_login applied, on the very next page load.
         username = session.get("user")
         if username:
             u = _load_users().get(username)
             if u is not None:
-                session["role"]     = u.role
+                role = _MAGIC_SESSION_ROLE if session.get("magic") else u.role
+                session["role"]     = role
                 session["stations"] = u.stations
-                session["admin"]    = username if u.role == "admin" else None
+                session["admin"]    = username if role == "admin" else None
         role = _session_role()
         return jsonify({
             "user":     username,
             "role":     role,
             "stations": session.get("stations", []),
             "admin":    role == "admin",
+            # Drives the Hide controls on the detection lists (auth.may_hide_detections).
+            "can_hide": may_hide_detections(),
         })

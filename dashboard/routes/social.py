@@ -10,6 +10,7 @@ import time
 import zipfile
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 from flask import Flask, abort, jsonify, render_template, request, send_file, session
 
@@ -17,6 +18,7 @@ from auth import require_auth
 from cache_store import ARCHIVE_PATH
 from rms_parse import parse_ftpdetectinfo, parse_radiants_txt
 import detection_db
+import hidden_detections
 import gmn_data
 
 logger = logging.getLogger(__name__)
@@ -74,6 +76,20 @@ def _time_from_ff(ff_file: str) -> str | None:
         return dt.strftime("%Y-%m-%dT%H:%M:%S")
     except ValueError:
         return None
+
+
+def _stack_url(cam: str, date_ymd: str, time_iso: str | None) -> str | None:
+    """Archive URL of the stack closest to a detection, or None.
+
+    Uses the file _stack_path actually found: rebuilding the name from the
+    detection time missed FF-timestamped and time-range stacks, and the old
+    /api/archive/<cam>/... form had no route, so the report image never loaded.
+    """
+    result = _stack_path(cam, date_ymd, time_iso)
+    if not result:
+        return None
+    path, subdir = result
+    return f"/api/archive/file/{cam}/{date_ymd}/{subdir}/{quote(path.name)}"
 
 
 def _stack_path(cam: str, date_ymd: str, time_iso: str | None) -> tuple[Path, str] | None:
@@ -200,7 +216,10 @@ def _aggregate_week(dates: list[date], our_cams: frozenset[str]) -> dict:
             # dir in the archive (incl. decommissioned cams' history). Keeping
             # both paths on the same camera set means toggling DB<->SSHFS never
             # shifts the totals.
-            stats = detection_db.aggregate_stats(date_strs)
+            # The brightest/longest picks skip detections a user hid as
+            # false positives; the counts are statistics and keep them.
+            stats = detection_db.aggregate_stats(
+                date_strs, skip=hidden_detections.snapshot().match)
             day_counts = {**day_counts, **stats["per_day"]}
             br = stats.get("brightest")
             if br:
@@ -386,13 +405,7 @@ def register_social_routes(app: Flask, config) -> None:
         stack_url = None
         br = metrics.get("brightest")
         if br and br.get("time_iso") and br.get("cam") and br.get("date_ymd"):
-            result = _stack_path(br["cam"], br["date_ymd"], br["time_iso"])
-            if result:
-                _, subdir = result
-                cam, ymd = br["cam"], br["date_ymd"]
-                dt = datetime.fromisoformat(br["time_iso"])
-                stem = f"{cam}_{dt.strftime('%Y%m%d_%H%M%S')}"
-                stack_url = f"/api/archive/{cam}/{ymd}/{subdir}/{stem}_stack.webp"
+            stack_url = _stack_url(br["cam"], br["date_ymd"], br["time_iso"])
 
         return jsonify({
             "start": start.isoformat(),

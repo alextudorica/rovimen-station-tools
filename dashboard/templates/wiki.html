@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#161b22">
+<title>ROVIMEN — Build a Meteor Camera Station</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
+<meta name="description" content="How to set up a ROVIMEN meteor camera station: get a ready-built camera or build one, what switch and computer to use, how to put it together, and how to join the network with one command.">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-wiki.css', v=build_version) }}">
+<script type="importmap">
+{
+  "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
+    "/static/dashboard-video-modal.js": "{{ url_for('static', filename='dashboard-video-modal.js', v=build_version) }}",
+    "/static/dashboard-common.js": "{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"
+  }
+}
+</script>
+<script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
+<script type="module" src="{{ url_for('static', filename='dashboard-wiki.js', v=build_version) }}"></script>
+</head>
+<body>
+
+<div class="ov-header">
+  {% set nav_active = 'wiki' %}{% include "_nav.html" %}
+</div>
+
+<div class="wk-layout">
+
+  <!-- Table of contents -->
+  <aside class="wk-toc" id="wk-toc" aria-label="Build guide contents">
+    <div class="wk-toc-title">Build Guide</div>
+    <a href="#intro">What a station is</a>
+    <a href="#camera">Get a camera</a>
+    <a href="#build">Build the camera yourself</a>
+    <a href="#equipment">Switch and computer</a>
+    <a href="#setup">Put it together</a>
+    <a href="#install">Install the computer</a>
+    <a href="#join">Join ROVIMEN</a>
+    <a href="#cost">What it costs</a>
+    <a href="#faq">FAQ</a>
+  </aside>
+
+  <main class="wk-main">
+
+    <header class="wk-hero">
+      <div class="wk-langs" role="group" aria-label="Language">
+        <a class="wk-lang wk-lang-on" href="/wiki" hreflang="en" aria-current="page">EN</a>
+        <a class="wk-lang" href="/wiki/ro" hreflang="ro" lang="ro">RO</a>
+      </div>
+      <h1>Build a meteor camera station</h1>
+      <p class="wk-lede">
+        A meteor station is a small camera on your roof and a small computer in your
+        house. This page covers everything you do yourself: getting the camera,
+        choosing the switch and the computer, putting it together, and one command
+        that connects it to ROVIMEN. We set up the rest remotely.
+      </p>
+      <div class="wk-callout wk-callout-tip">
+        A one-camera station comes to <strong>≈ €300 (1580 RON)</strong>, a three-camera
+        station to <strong>≈ €500 (2650 RON)</strong>, both with a used mini-PC.
+        Both are itemised under <a href="#cost">what it costs</a>.
+      </div>
+      <figure class="wk-figure">
+        <div class="wk-photos">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/01_installed_day.jpg', v=build_version) }}"
+               width="1600" height="1200" fetchpriority="high"
+               alt="White camera housings on a wooden cross mounted at the peak of a barn roof, against a blue sky.">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/02_installed_night.jpg', v=build_version) }}"
+               width="1600" height="1205"
+               alt="The same cameras on the roof at night, with stars visible in the sky above them.">
+        </div>
+        <figcaption>A finished station by day and by night: several cameras on one mount, each watching its own part of the sky.</figcaption>
+      </figure>
+    </header>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="intro">
+      <h2>What a station is</h2>
+      <p>
+        Each camera looks at a fixed patch of the night sky and sends its video down a
+        single network cable, which also powers it. Inside, a small computer records
+        the whole night. In the morning it finds the meteors, sends them to the
+        <a href="https://globalmeteornetwork.org/" target="_blank" rel="noopener">Global Meteor Network</a>,
+        and puts the clips and night images on this dashboard. When two stations catch
+        the same meteor, the network works out its path through the atmosphere and its
+        orbit.
+      </p>
+      <p>
+        Nothing on it moves, so once it is set up the station runs on its own for
+        years.
+      </p>
+
+
+      <figure class="wk-figure">
+        <span class="wk-plate">
+          <img src="{{ url_for('static', filename='media/wiki/2_dataflow.svg', v=build_version) }}" width="1440" height="740" loading="lazy" decoding="async"
+               alt="What happens to a night of video: the camera streams all night to the station computer, which records it; at dawn the station detects meteors, calibrates against the stars, and makes the night image, timelapse and one clip per meteor; the full video stays on the station, the results go to the GMN server and the clips and images to the ROVIMEN dashboard.">
+        </span>
+        <figcaption>One night, from dusk to the morning upload. Nobody has to do anything.</figcaption>
+      </figure>
+
+      <h3>Who does what</h3>
+      <div class="wk-table-wrap">
+        <table class="wk-table">
+          <thead><tr><th>You</th><th>We</th></tr></thead>
+          <tbody>
+            <tr><td>Get or build the camera</td><td>Send a ready-built camera, or a printed housing for yours</td></tr>
+            <tr><td>Buy the switch and the computer</td><td>Help you choose, if you ask</td></tr>
+            <tr><td>Install Ubuntu and run the join script</td><td>Send you the join script</td></tr>
+            <tr><td>Mount the camera and turn the lens when we ask</td><td>Install the software, set up the cameras, register them with GMN, calibrate them on the first clear night</td></tr>
+            <tr><td>Keep the computer plugged in</td><td>Keep the station updated and fix problems remotely</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="camera">
+      <h2>Get a camera</h2>
+      <div class="wk-cards">
+        <div class="wk-card wk-card-best">
+          <div class="wk-card-badge">Easiest</div>
+          <h3 class="wk-card-title">We send you one</h3>
+          <p class="wk-price">≈ €80 per camera</p>
+          <p>
+            Ready-built and closed: camera, lens, housing and cable gland. You mount it
+            and plug in the cable.
+          </p>
+        </div>
+        <div class="wk-card">
+          <div class="wk-card-badge wk-badge-alt">Do it yourself</div>
+          <h3 class="wk-card-title">Build it yourself</h3>
+          <p class="wk-price">€55 kit + a cable gland</p>
+          <p>
+            Buy the camera kit, and we send you a printed housing for the cost of
+            transport. The steps are <a href="#build">below</a>.
+          </p>
+        </div>
+      </div>
+      <p>
+        Ask for either through the
+        <button type="button" class="wk-link-btn" onclick="openAppPanel('about')">About</button> panel.
+        Both use the camera most of the network runs: a Sony IMX291 low-light sensor with
+        a 4&nbsp;mm f/0.95 lens, which sees about 88 × 45° of sky.
+      </p>
+
+      <figure class="wk-figure">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/03_ready_cameras.jpg', v=build_version) }}"
+             width="1600" height="1017" loading="lazy" decoding="async"
+             alt="Finished white camera housings with lenses, laid out on a cloth.">
+        <figcaption>Ready-built cameras, waiting to be sent out.</figcaption>
+      </figure>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="build">
+      <h2>Build the camera yourself</h2>
+      <p>
+        You need the
+        <a href="https://www.aliexpress.com/item/1005003139136600.html" target="_blank" rel="noopener">IMX291 camera kit with the 4&nbsp;mm lens</a>
+        (€55 / 292&nbsp;RON shipped, checked 26 July 2026), our printed housing
+        and mounting plate, and one cable gland. Tools: a small screwdriver.
+      </p>
+
+      <figure class="wk-figure">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/04_parts.jpg', v=build_version) }}"
+             width="1600" height="1237" loading="lazy" decoding="async"
+             alt="All the parts on a table: the printed housing with the camera's small connectors coming out of it, the printed mounting plate with four posts, the camera board with its lens, a cable gland, and the white network cable.">
+        <figcaption>Everything that goes into one camera.</figcaption>
+      </figure>
+
+      <ol class="wk-list wk-ol">
+        <li><strong>Take the IR-cut filter out of the lens holder.</strong> It is the
+          small blue-green glass square inside the holder. It blocks infrared light,
+          and taking it out roughly doubles the camera’s sensitivity.</li>
+        <li><strong>Screw the lens holder onto the board</strong>, over the sensor, with
+          its two small screws. Don’t touch the sensor: every mark on it shows in every
+          picture. If dust lands on it, blow it off; never wipe it.</li>
+      </ol>
+      <div class="wk-photos">
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/05_board_and_holder.jpg', v=build_version) }}"
+               width="900" height="672" loading="lazy" decoding="async"
+               alt="The camera board with its sensor exposed, next to the lens holder with the blue-green IR-cut filter still inside it.">
+          <figcaption>The board and the lens holder, IR-cut filter still inside. Photo: Radu Istode.</figcaption>
+        </figure>
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/06_holder_fitted.jpg', v=build_version) }}"
+               width="1600" height="1200" loading="lazy" decoding="async"
+               alt="The lens holder screwed onto the board over the sensor, with the removed blue-green IR-cut filter lying beside it.">
+          <figcaption>Holder on the board, IR-cut filter removed (on the right). Photo: Radu Istode.</figcaption>
+        </figure>
+      </div>
+
+      <ol class="wk-list wk-ol" start="3">
+        <li><strong>Screw the lens in</strong> most of the way. Don’t tighten it: the
+          final focus is done at night, on real stars (see <a href="#setup">put it together</a>).</li>
+      </ol>
+      <div class="wk-photos">
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/07_lens_fitted.jpg', v=build_version) }}"
+               width="1600" height="1195" loading="lazy" decoding="async"
+               alt="The camera board seen from the front, with the lens screwed into the holder.">
+          <figcaption>Lens in, from the front.</figcaption>
+        </figure>
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/08_module_side.jpg', v=build_version) }}"
+               width="1600" height="1200" loading="lazy" decoding="async"
+               alt="The camera board seen from the side, showing the lens at the front and the small white connectors on the back of the board.">
+          <figcaption>From the side: the small sockets on the back take the cable.</figcaption>
+        </figure>
+      </div>
+
+      <ol class="wk-list wk-ol" start="4">
+        <li><strong>Fit the board onto the four posts</strong> of the printed mounting
+          plate, lens facing out.</li>
+        <li><strong>Push the cable through the gland</strong> into the housing, and plug
+          its small connectors into the sockets on the back of the board.</li>
+        <li><strong>Slide the plate into the housing and tighten the gland</strong> until
+          the cable no longer moves. The gland is all the sealing it needs.</li>
+      </ol>
+      <div class="wk-photos">
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/09_gland.jpg', v=build_version) }}"
+               width="1600" height="1205" loading="lazy" decoding="async"
+               alt="A grey plastic cable gland: a cap, a threaded body and a nut.">
+          <figcaption>The cable gland.</figcaption>
+        </figure>
+        <figure class="wk-figure">
+          <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/10_housing_closed.jpg', v=build_version) }}"
+               width="1600" height="1600" loading="lazy" decoding="async"
+               alt="The closed white housing with the cable coming out through the tightened gland, and a brass threaded insert on top.">
+          <figcaption>Closed: the cable comes out through the gland.</figcaption>
+        </figure>
+      </div>
+
+      <div class="wk-callout wk-callout-warn">
+        <strong>Test it on the table before it goes up.</strong> Plug the camera in
+        once your computer has <a href="#join">joined ROVIMEN</a>, and we check the
+        picture and set the camera up remotely. Every problem is ten times easier to
+        fix on the table than on the roof.
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="equipment">
+      <h2>Switch and computer</h2>
+
+      <h3>The PoE switch</h3>
+      <p>
+        The switch is the box that powers the cameras through their network cables, so
+        you need no power socket outside. Plug the cameras and the cable from your
+        router into its ports; it sends power only to the devices that need it.
+      </p>
+      <p>
+        We recommend the
+        <a href="https://www.emag.ro/switch-poe-tp-link-desktop-8-porturi-10-100-1000mbps-poe-62w-buget-poe-ls108gp/pd/D5YGZN3BM/" target="_blank" rel="noopener">TP-Link LS108GP</a>
+        (€43 / 228&nbsp;RON at eMAG): 8 ports, all with PoE, enough for up to seven
+        cameras plus the router. Any PoE switch works; the one in the photo is a smaller
+        4-port model.
+      </p>
+      <figure class="wk-figure">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/12_switch.jpg', v=build_version) }}"
+             width="1600" height="1056" loading="lazy" decoding="async"
+             alt="A small black PoE switch: the router cable plugged into the green LAN port on the left, a camera cable in PoE port 1, ports 2 to 4 free.">
+        <figcaption>A smaller PoE switch: router cable in LAN (left), camera in port 1, three ports free for more cameras.</figcaption>
+      </figure>
+      <p>
+        You also need <strong>one outdoor network cable per camera</strong>, long
+        enough to reach from the switch to the camera, with the plugs already on. For
+        example this
+        <a href="https://www.emag.ro/cablu-de-retea-u-utp-cat6-patch-cord-30m-pentru-exterior-negru-ccgl85900bk300/pd/D7X0LM3BM/" target="_blank" rel="noopener">30&nbsp;m outdoor Cat6 cable from Nedis</a>
+        (€18 / 94&nbsp;RON at eMAG).
+      </p>
+
+      <h3>The computer</h3>
+      <p>
+        A small used office PC is ideal. All night it only records; the heavy work
+        comes in the morning, when it finds the meteors and compresses the night’s
+        video. What to look for:
+      </p>
+      <dl class="wk-kv">
+        <dt>Processor</dt>
+        <dd>Intel Core i5, <strong>8th generation or newer</strong> (the model number
+          starts with i5-8…, i5-9… or higher, for example i5-8500T).</dd>
+        <dt>Memory</dt>
+        <dd>16&nbsp;GB, as on most of our stations; 8&nbsp;GB is enough for one or two
+          cameras.</dd>
+        <dt>Disk</dt>
+        <dd>An SSD. Our stations run one camera on 128&nbsp;GB, two or three on
+          256&nbsp;GB, and five or six on 500&nbsp;GB. Two cameras also fit on 128&nbsp;GB
+          if the station keeps less video.</dd>
+        <dt>Network</dt>
+        <dd>A network socket, connected to your router with a cable.</dd>
+      </dl>
+      <p>
+        Good models: HP ProDesk 400 G4 Mini, Lenovo ThinkCentre M720q or M920q, Dell
+        OptiPlex 5060 Micro, HP EliteDesk 800 G4 Mini, Fujitsu Esprimo Q558. Used, they
+        sell for about <strong>€130–170 (700–900&nbsp;RON)</strong>.
+        <a href="https://diabloscomputer.ro/calculatoare-second-hand-i5?q=Marca-HP/Model+procesor-Core+i5+Gen.12-Core+i5+gen8-Core+i5+gen9-Core+i5+Gen10/Capacitate+memorie+RAM-16+GB" target="_blank" rel="noopener">This search at Diablos Computer</a>
+        lists used HP office PCs with a suitable i5 and 16&nbsp;GB; pick a mini or
+        small model.
+      </p>
+      <p>
+        <strong>Already have a Raspberry Pi 5?</strong> It can run one camera. We don’t
+        recommend buying one for this: a new Pi 5 costs about as much as a used mini-PC,
+        which does more.
+      </p>
+      <div class="wk-callout wk-callout-warn">
+        <strong>Avoid the very cheap boxes</strong> with Celeron, Pentium Silver or
+        Atom processors, and anything with only two cores. They look the same from the
+        outside but cannot keep up with the morning’s work.
+      </div>
+      <p class="wk-fine">
+        Optional: a small UPS (about €57 / 300&nbsp;RON) where the power often goes off.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="setup">
+      <h2>Put it together</h2>
+
+      <h3>Cables</h3>
+      <figure class="wk-figure">
+        <span class="wk-plate">
+          <img src="{{ url_for('static', filename='media/wiki/1_network.svg', v=build_version) }}" width="1440" height="880" loading="lazy" decoding="async"
+               alt="Network schema: internet to the home router, the router into the uplink port of the PoE switch, one outdoor cable from each PoE port to a camera, the station computer on the switch or router, and the station's uploads going out to the GMN server and to the ROVIMEN dashboard.">
+        </span>
+        <figcaption>
+          One cable per camera carries both power and video. Everything sits behind the
+          router you already have; nothing is opened to the internet.
+        </figcaption>
+      </figure>
+      <ul class="wk-list">
+        <li><strong>Router to switch:</strong> a normal network cable from the router to
+          the switch’s LAN port.</li>
+        <li><strong>Computer:</strong> into the router, or into a free port on the
+          switch.</li>
+        <li><strong>Cameras:</strong> one outdoor cable each, into the PoE ports. Leave
+          the addresses to us.</li>
+      </ul>
+
+      <h3>The computer must switch itself back on</h3>
+      <p>
+        Power cuts happen, and nobody is there to press the button. In the computer’s
+        BIOS, find the setting called <strong>After Power Loss</strong>,
+        <strong>Restore on AC Power Loss</strong> or <strong>AC Recovery</strong>, and set
+        it to <strong>Power On</strong>. You reach the BIOS by pressing a key while the
+        computer starts: F10 on HP, F1 on Lenovo, F2 on Dell and Fujitsu.
+      </p>
+      <p>
+        Then test it: with the computer running, pull the power plug, wait ten seconds,
+        and plug it back in. It should start on its own. If it doesn’t, the setting did
+        not take.
+      </p>
+
+      <h3>Mounting and aiming</h3>
+      <ul class="wk-list">
+        <li><strong>Mount it firmly.</strong> The brass thread on top of the housing is
+          the standard 1/4-inch camera thread, so any camera bracket fits, for example
+          <a href="https://www.emag.ro/suport-camera-mozeeda-set-2-buc-montare-fara-gaurire-rotatie-360-negru-m014/pd/D7T2R93BM/" target="_blank" rel="noopener">these Mozeeda mounts</a>
+          (€7 / 36&nbsp;RON for two at eMAG). Screw it to a wall or a beam: the camera
+          must not move in the wind, or its measurements go wrong.</li>
+        <li><strong>Aim it 35–45° above the horizon</strong>, away from streetlights and
+          your neighbours’ lamps.</li>
+        <li><strong>Nothing in view but sky:</strong> no roof edge, no branches.</li>
+        <li><strong>Let the cable hang down</strong> from the gland in a small loop
+          before it goes anywhere, so rain drips off instead of running along it.</li>
+        <li><strong>Several cameras?</strong> Point them in different directions. We help
+          you choose, so they also overlap with the nearest stations.</li>
+      </ul>
+      <figure class="wk-figure wk-figure-half">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/11_mount_thread.jpg', v=build_version) }}"
+             width="1600" height="1205" loading="lazy" decoding="async"
+             alt="Close-up of the brass threaded insert on top of the white housing.">
+        <figcaption>The standard camera thread on top of the housing.</figcaption>
+      </figure>
+
+      <h3>Focus</h3>
+      <p>
+        Focus is done at night, on real stars: without the IR-cut filter, a lens
+        focused in daylight is out of focus at night. On the first clear night we open the
+        camera’s live view and tell you which way to turn the lens until the stars are
+        sharp points. It takes a few minutes and one person at the camera.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="install">
+      <h2>Install the computer</h2>
+      <p>
+        Install <strong>Ubuntu 24.04 LTS Desktop</strong>, a free operating system.
+        Ubuntu’s own
+        <a href="https://ubuntu.com/desktop/docs/en/latest/tutorial/install-ubuntu-desktop/" target="_blank" rel="noopener">step-by-step guide</a>
+        shows how to make the USB stick and run the installer.
+      </p>
+      <ul class="wk-list">
+        <li><strong>Installing erases the computer’s disk.</strong> Use a computer
+          meant only for the station.</li>
+        <li><strong>Choose a user name and a password</strong> and keep the password: you
+          need it once, for the join script.</li>
+        <li><strong>Connect it to the router with a cable</strong> and leave it on.</li>
+      </ul>
+      <p>
+        If you use a Raspberry Pi you already have, install
+        <strong>Raspberry Pi OS (64-bit)</strong> on it with
+        <a href="https://www.raspberrypi.com/software/" target="_blank" rel="noopener">Raspberry Pi Imager</a>.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="join">
+      <h2>Join ROVIMEN</h2>
+      <ol class="wk-list wk-ol">
+        <li><strong>Ask us for your join script</strong> through the
+          <button type="button" class="wk-link-btn" onclick="openAppPanel('about')">About</button> panel.
+          Tell us your town, how many cameras you have, and your name.</li>
+        <li><strong>We send you a small file</strong>, named something like
+          <code>rovimen-onboard-yourname.sh</code>. Save it on the station computer.</li>
+        <li><strong>Open a Terminal in that folder:</strong> open the folder where you
+          saved the file, right-click an empty spot, and choose <em>Open in
+          Terminal</em>. Type:
+          <div class="wk-pre">sudo bash rovimen-onboard-yourname.sh</div>
+          with your file’s real name, then your password. Nothing shows on screen while
+          you type the password; that is normal.</li>
+        <li><strong>Wait a few minutes.</strong> It finishes with a line that starts with
+          <code>Done. Tailscale:</code>. Send us that line.</li>
+      </ol>
+      <figure class="wk-figure wk-figure-screen">
+        <img class="wk-photo" src="{{ url_for('static', filename='media/wiki/photos/13_join_done.png', v=build_version) }}"
+             width="1025" height="686" loading="lazy" decoding="async"
+             alt="A terminal window after the join script has finished, showing the station name, its network address, and the line starting with Done. Tailscale.">
+        <figcaption>The end of the join script, with example values. The line under “Please send this one line back” is the one we need.</figcaption>
+      </figure>
+
+      <h3>What the script does</h3>
+      <ul class="wk-list">
+        <li>Connects the computer to the ROVIMEN private network (Tailscale), so we can
+          reach it without opening anything on your router.</li>
+        <li>Lets us log in to install and maintain the station software. Every login is
+          recorded in the computer’s system log.</li>
+        <li>Sets the clock to UTC, which the whole network uses, stops the computer from
+          going to sleep, and stops system updates from restarting it on their own.</li>
+      </ul>
+
+      <h3>What happens next</h3>
+      <p>
+        We install the meteor software, set up your cameras, register them with the
+        Global Meteor Network, and calibrate each one against the stars on the first
+        clear night. You get a login for this dashboard, where your meteors, clips and
+        night images appear every morning.
+      </p>
+      <div class="wk-callout wk-callout-tip">
+        <strong>From then on, just keep it plugged in.</strong> The station starts at
+        dusk, works through the morning and early afternoon, uploads, and does it all
+        again the next night. It restarts itself once a day in the afternoon; that is
+        normal.
+      </div>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="cost">
+      <h2>What it costs</h2>
+      <p>
+        In euros, with ready-built cameras. Romanian prices are converted at the ECB
+        rate of 1&nbsp;EUR = 5.2788&nbsp;RON (30 September 2026). The switch, cable and
+        mounts are eMAG prices checked on 30 September 2026; the mini-PC is an estimate,
+        so read the totals as within about 15%. Shipping is not included.
+      </p>
+      <div class="wk-cards wk-cards-cost">
+        <div class="wk-card">
+          <h3 class="wk-card-title">A. One camera</h3>
+          <ul class="wk-cost-list">
+            <li><span>Ready-built camera</span><span>80</span></li>
+            <li><span>Outdoor cable, 30&nbsp;m</span><span>18</span></li>
+            <li><span>Camera mounts, set of 2</span><span>7</span></li>
+            <li><span>PoE switch, TP-Link LS108GP</span><span>43</span></li>
+            <li><span>Used mini-PC, i5, 16&nbsp;GB, 256&nbsp;GB SSD</span><span>152</span></li>
+          </ul>
+          <p class="wk-cost-total">€300 (1580 RON)</p>
+          <p class="wk-note">A complete first station. The same computer and switch take more cameras later.</p>
+        </div>
+        <div class="wk-card wk-card-best">
+          <div class="wk-card-badge">Recommended</div>
+          <h3 class="wk-card-title">B. Three cameras</h3>
+          <ul class="wk-cost-list">
+            <li><span>3 × ready-built camera</span><span>240</span></li>
+            <li><span>3 × outdoor cable</span><span>54</span></li>
+            <li><span>2 × camera mounts, set of 2</span><span>14</span></li>
+            <li><span>PoE switch, TP-Link LS108GP</span><span>43</span></li>
+            <li><span>Used mini-PC, i5, 16&nbsp;GB, 256&nbsp;GB SSD</span><span>152</span></li>
+          </ul>
+          <p class="wk-cost-total">€503 (2649 RON)</p>
+          <p class="wk-note">Three directions of sky, and room for four more cameras on the same switch.</p>
+        </div>
+        <div class="wk-card">
+          <h3 class="wk-card-title">C. Adding a camera later</h3>
+          <ul class="wk-cost-list">
+            <li><span>Ready-built camera</span><span>80</span></li>
+            <li><span>Outdoor cable</span><span>18</span></li>
+            <li><span>Camera mounts, set of 2</span><span>7</span></li>
+          </ul>
+          <p class="wk-cost-total">€105 (552 RON)</p>
+          <p class="wk-note">The computer and the switch are shared, so every extra camera is cheap.</p>
+        </div>
+      </div>
+      <p class="wk-fine">
+        Building the cameras yourself: replace each ready-built camera with the
+        €55 (292&nbsp;RON) kit, a cable gland, and the transport for the printed housing.
+      </p>
+    </section>
+
+    <!-- ─────────────────────────────────────────────── -->
+    <section id="faq">
+      <h2>FAQ</h2>
+      <div class="wk-faq">
+        <details>
+          <summary>Do I need to know Linux?</summary>
+          <p>No. You install Ubuntu like any other operating system and type one
+            command. We do everything else.</p>
+        </details>
+        <details>
+          <summary>What happens when it’s cloudy?</summary>
+          <p>Nothing bad. The station records, finds nothing, and carries on. Cloudy
+            nights are useful data too.</p>
+        </details>
+        <details>
+          <summary>How much electricity does it use?</summary>
+          <p>A mini-PC with three cameras uses under 60&nbsp;W, about 1.4&nbsp;kWh a
+            day.</p>
+        </details>
+        <details>
+          <summary>Does it need a fast internet connection?</summary>
+          <p>No. Any home connection works; the station uploads its results once a
+            day. The full video stays on the station.</p>
+        </details>
+        <details>
+          <summary>What can you do on my computer?</summary>
+          <p>The join script lets us log in to install and maintain the station
+            software, over the ROVIMEN private network. Every login is recorded in the
+            computer’s system log. Use a computer meant only for the station.</p>
+        </details>
+        <details>
+          <summary>Can I see my own meteors?</summary>
+          <p>Yes. You get a login for this dashboard with your station’s clips, night
+            images and timelapses, and your data is part of the Global Meteor Network.</p>
+        </details>
+        <details>
+          <summary>How long does the hardware last?</summary>
+          <p>Years. The parts that eventually wear out are the outdoor cable ends and
+            the video disk, which is written to every night.</p>
+        </details>
+      </div>
+      <p class="wk-fine wk-updated">
+        Prices checked 30 September 2026 (the camera kit on 26 July 2026) and converted
+        at the ECB rate of 1&nbsp;EUR = 5.2788&nbsp;RON. Found something wrong? Tell us through the
+        <button type="button" class="wk-link-btn" onclick="openAppPanel('about')">About</button> panel.
+        For the details behind it all, see the
+        <a href="https://globalmeteornetwork.org/wiki/index.php?title=Main_Page" target="_blank" rel="noopener">Global Meteor Network wiki</a>.
+      </p>
+    </section>
+
+  </main>
+</div>
+
+<!-- About panel -->
+<div id="app-panel" class="app-panel" role="dialog" aria-modal="true" aria-hidden="true" onclick="appPanelClose(event)">
+  <div class="app-panel-inner">
+    <div class="app-panel-header">
+      <span id="app-panel-title" class="app-panel-title"></span>
+      <button class="cam-modal-close" aria-label="Close panel" onclick="appPanelClose(null)">&#x2715;</button>
+    </div>
+    <div id="app-panel-body"></div>
+  </div>
+</div>
+
+  {% include "_license_footer.html" %}
+</body>
+</html>

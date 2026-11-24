@@ -20,7 +20,6 @@ SCAN_DIRS = [
     REPO_ROOT / "rovimen-scripts",
     REPO_ROOT / "dashboard",
     REPO_ROOT / "tools",
-    REPO_ROOT / "live_wallpaper",
 ]
 
 # Directories to skip entirely (upstream code, caches).
@@ -78,6 +77,7 @@ IMPORTABLE_MODULES: list[tuple[str, str]] = [
     ("detection_lock", "rovimen-scripts"),
     ("encoder", "rovimen-scripts"),
     ("archive_upload", "rovimen-scripts"),
+    ("ingest_blob", "rovimen-scripts"),
     ("timelapse_build", "rovimen-scripts"),
     # dashboard
     ("models", "dashboard"),
@@ -126,7 +126,7 @@ PUBLIC_API: dict[str, list[str]] = {
         "load", "save", "mark_ready", "lock_chunk", "unlock_chunk",
     ],
     "rovimen_lock": [
-        "lock", "unlock", "is_locked", "get_lock_info",
+        "unlock", "is_locked", "chunk_is_locked", "get_lock_info",
     ],
     "overlay": [
         "build_drawtext_annotations", "measure_text_width",
@@ -138,7 +138,10 @@ PUBLIC_API: dict[str, list[str]] = {
         "process_chunk", "process_night", "_build_cmd", "_cpu_filter_chain",
     ],
     "archive_upload": [
-        "rsync_file", "rsync_batch", "run_night", "run_once",
+        "post_blob", "run_night", "run_once", "upload_chunk", "delete_chunk",
+    ],
+    "ingest_blob": [
+        "post_blob", "post_blob_status", "is_permanent_status", "BlobSender",
     ],
     "detection_lock": [
         "process_night", "_parse_ftpdetectinfo",

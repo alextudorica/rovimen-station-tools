@@ -49,7 +49,7 @@ def rsa_key_pair():
 @pytest.fixture
 def cfg():
     return cf_access.CFAccessConfig(
-        team_domain="rovimen.cloudflareaccess.com",
+        team_domain="example.cloudflareaccess.com",
         audience="test-audience-tag",
     )
 
@@ -58,7 +58,7 @@ def _make_token(
     private_pem: bytes,
     *,
     audience: str = "test-audience-tag",
-    issuer: str = "https://rovimen.cloudflareaccess.com",
+    issuer: str = "https://example.cloudflareaccess.com",
     email: str = "alice@example.com",
     expired: bool = False,
 ) -> str:
@@ -197,7 +197,7 @@ class TestJwksFetchFailure:
         """A requests.RequestException during JWKS fetch must not authenticate."""
         import requests
 
-        monkeypatch.setenv("ROVIMEN_CF_TEAM_DOMAIN", "rovimen.cloudflareaccess.com")
+        monkeypatch.setenv("ROVIMEN_CF_TEAM_DOMAIN", "example.cloudflareaccess.com")
         monkeypatch.setenv("ROVIMEN_CF_AUD", "test-audience-tag")
 
         mock_cache = MagicMock(spec=cf_access._JWKSCache)
@@ -214,7 +214,7 @@ class TestJwksFetchFailure:
 
     def test_jwks_client_error_returns_none(self, monkeypatch):
         """A PyJWKClientError (e.g. key not in JWKS) must not authenticate."""
-        monkeypatch.setenv("ROVIMEN_CF_TEAM_DOMAIN", "rovimen.cloudflareaccess.com")
+        monkeypatch.setenv("ROVIMEN_CF_TEAM_DOMAIN", "example.cloudflareaccess.com")
         monkeypatch.setenv("ROVIMEN_CF_AUD", "test-audience-tag")
 
         mock_cache = MagicMock(spec=cf_access._JWKSCache)
@@ -245,7 +245,7 @@ class TestVerifyRequestToken:
         assert result is None
 
     def test_no_token_returns_none(self, monkeypatch):
-        monkeypatch.setenv("ROVIMEN_CF_TEAM_DOMAIN", "rovimen.cloudflareaccess.com")
+        monkeypatch.setenv("ROVIMEN_CF_TEAM_DOMAIN", "example.cloudflareaccess.com")
         monkeypatch.setenv("ROVIMEN_CF_AUD", "test-audience-tag")
 
         result = cf_access.verify_request_token(headers={}, cookies={})
@@ -253,11 +253,11 @@ class TestVerifyRequestToken:
 
     def test_token_from_cookie_accepted(self, rsa_key_pair, monkeypatch):
         private_pem, public_pem = rsa_key_pair
-        monkeypatch.setenv("ROVIMEN_CF_TEAM_DOMAIN", "rovimen.cloudflareaccess.com")
+        monkeypatch.setenv("ROVIMEN_CF_TEAM_DOMAIN", "example.cloudflareaccess.com")
         monkeypatch.setenv("ROVIMEN_CF_AUD", "test-audience-tag")
 
         cfg = cf_access.CFAccessConfig(
-            team_domain="rovimen.cloudflareaccess.com",
+            team_domain="example.cloudflareaccess.com",
             audience="test-audience-tag",
         )
         token = _make_token(private_pem, audience=cfg.audience, issuer=cfg.issuer)

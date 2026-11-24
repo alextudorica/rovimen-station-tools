@@ -1,0 +1,74 @@
+{#- Shared top nav, included by every page with a header:
+      {% set nav_active = 'events' %}{% include "_nav.html" %}
+    nav_active names the current page (overview, events, highlights, showers,
+    wiki, calibration, social, admin) and marks its tab. "About" is not a page:
+    it opens the About ROVIMEN panel (openAppPanel in dashboard-common.js). nav_show() drops the
+    public tabs an anonymous visitor can't open (see _inject_nav_visibility).
+    The admin-only links render hidden, except on their own page, and
+    setAdminNav() in dashboard-common.js shows them once the page's
+    /api/auth/status says admin. -#}
+{%- set _active = nav_active|default('') -%}
+{%- macro _tab(href, key, label) -%}
+<a href="{{ href }}" class="nav-tab{% if _active == key %} active{% endif %}"{% if _active == key %} aria-current="page"{% endif %}>{{ label }}</a>
+{%- endmacro -%}
+{%- macro _admin_tab(href, key, label, id) -%}
+<a href="{{ href }}" class="nav-tab nav-tab-admin{% if _active == key %} active{% endif %}" id="{{ id }}"{% if _active == key %} aria-current="page"{% else %} style="display:none"{% endif %}>{{ label }}</a>
+{%- endmacro -%}
+{%- macro _links(cls='nav-tab') -%}
+    {#- Station pages and fireball reports pass 'overview': they sit under the network. -#}
+    {% set _nw = _active in ('network', 'overview') %}
+    {% if nav_show('overview') %}<a href="/network" class="{{ cls }}{% if _nw %} active{% endif %}"{% if _nw %} aria-current="page"{% endif %}>Network overview</a>{% endif %}
+    {% if nav_show('events') %}<a href="/events" class="{{ cls }}{% if _active == 'events' %} active{% endif %}"{% if _active == 'events' %} aria-current="page"{% endif %}>Detections</a>{% endif %}
+    {% if nav_show('highlights') %}<a href="/highlights" class="{{ cls }}{% if _active == 'highlights' %} active{% endif %}"{% if _active == 'highlights' %} aria-current="page"{% endif %}>Highlights</a>{% endif %}
+    {% if nav_show('showers') %}<a href="/showers" class="{{ cls }}{% if _active == 'showers' %} active{% endif %}"{% if _active == 'showers' %} aria-current="page"{% endif %}>Showers</a>{% endif %}
+    {% if nav_show('wiki') %}<a href="{{ wiki_href|default('/wiki') }}" class="{{ cls }} nav-tab-guide{% if _active == 'wiki' %} active{% endif %}"{% if _active == 'wiki' %} aria-current="page"{% endif %}>Build guide</a>{% endif %}
+    <button type="button" class="{{ cls }} nav-about" onclick="openAppPanel('about')" aria-haspopup="dialog">About</button>
+{%- endmacro -%}
+<a class="skip-link" href="#main">Skip to content</a>
+<a href="/" class="nav-logo"><img src="{{ url_for('static', filename='img/rovimen_mark.svg', v=build_version) }}" alt="ROVIMEN" width="101" height="26" decoding="async"></a>
+  <nav class="main-nav" id="main-nav" aria-label="Main">
+    {{ _links() }}
+  </nav>
+  <div class="nav-station-jump" id="nav-station-jump">
+    <button type="button" class="nav-station-btn hc" aria-haspopup="listbox" aria-expanded="false" aria-controls="nav-station-menu" aria-label="Find a station" title="Find a station (press /)"><svg class="hc-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4-4"/></svg><span class="hc-lbl">Find a station</span><kbd class="hc-key" aria-hidden="true">/</kbd></button>
+    <div class="nav-station-menu" id="nav-station-menu" hidden>
+      <input type="search" class="nav-station-filter" placeholder="Place, station or camera…" aria-label="Find a station" autocomplete="off" spellcheck="false">
+      <ul class="nav-station-list" role="listbox" aria-label="Stations"></ul>
+    </div>
+  </div>
+  {#- Basket and compilation cart buttons (icon + count) mount here at every
+      width: dashboard-basket-add.js and, on Detections, dashboard-events.js. -#}
+  <div class="nav-carts" id="nav-carts"></div>
+  <div class="nav-right">
+    <details class="nav-tools" id="nav-tools"{% if _active not in ('calibration', 'social', 'admin') %} style="display:none"{% endif %}>
+      <summary class="nav-tools-btn hc{% if _active in ('calibration', 'social', 'admin') %} active{% endif %}">Tools</summary>
+      <div class="nav-tools-menu">
+        {{ _admin_tab('/calibration', 'calibration', 'Calibration', 'logo-dd-calibration') }}
+        {{ _admin_tab('/social', 'social', 'Social', 'logo-dd-social') }}
+        {{ _admin_tab('/admin', 'admin', 'Admin', 'logo-dd-admin') }}
+      </div>
+    </details>
+    <div class="nav-auth" id="nav-auth"></div>
+  </div>
+  <button type="button" class="nav-burger hc" aria-label="Open menu" aria-expanded="false" aria-controls="nav-panel"><span class="nav-burger-ico" aria-hidden="true"></span></button>
+  {#- Tonight strip: the live UTC clock, tonight's sky over a 12:00→12:00 UTC
+      night (the network's night-date convention) with a marker at now, and the
+      RMS capture window. Painted by startUTCClock() in dashboard-common.js. -#}
+  <div class="nav-tonight" title="UTC time and tonight's RMS capture window at the centre of Romania (sun at -6 degrees); each station page shows its own window">
+    <span class="nav-tonight-clock"><span class="nav-star" aria-hidden="true"></span><span id="utc-clock" class="hdr-clock" translate="no">&mdash;</span></span>
+    <span class="nav-sky js-night-bar" aria-hidden="true"><span class="nav-sky-now"></span></span>
+    <span class="nav-rms js-rms-window" translate="no" hidden></span>
+  </div>
+  {#- Phone menu: the pages, operator tools and the account. -#}
+  <div class="nav-panel" id="nav-panel" hidden>
+    <nav class="nav-panel-links" aria-label="Main (menu)">
+      {{ _links('nav-panel-link') }}
+    </nav>
+    <div class="nav-panel-tools" hidden>
+      <p class="nav-panel-heading">Operator tools</p>
+      <a href="/calibration" class="nav-panel-sublink{% if _active == 'calibration' %} active{% endif %}">Calibration</a>
+      <a href="/social" class="nav-panel-sublink{% if _active == 'social' %} active{% endif %}">Social</a>
+      <a href="/admin" class="nav-panel-sublink{% if _active == 'admin' %} active{% endif %}">Admin</a>
+    </div>
+    <div class="nav-panel-auth" id="nav-panel-auth"></div>
+  </div>

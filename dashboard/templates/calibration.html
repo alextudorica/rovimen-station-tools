@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#161b22">
+<title>ROVIMEN — Calibration</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-calibration.css', v=build_version) }}">
+<script type="importmap">
+{
+  "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
+    "/static/dashboard-video-modal.js": "{{ url_for('static', filename='dashboard-video-modal.js', v=build_version) }}",
+    "/static/dashboard-common.js":      "{{ url_for('static', filename='dashboard-common.js',      v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}"
+  }
+}
+</script>
+<script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
+<script type="module" src="{{ url_for('static', filename='dashboard-calibration.js', v=build_version) }}"></script>
+</head>
+<body>
+
+<div class="ov-header">
+  {% set nav_active = 'calibration' %}{% include "_nav.html" %}
+</div>
+
+<main class="cal-main" id="main" tabindex="-1">
+  <div class="cal-topbar">
+    <h1 class="cal-title">Calibration</h1>
+    <div class="cal-summary" id="cal-summary" aria-live="polite">Loading…</div>
+  </div>
+  <div class="cal-grid" id="cal-grid"></div>
+</main>
+
+<div class="cal-modal" id="cal-modal" role="dialog" aria-modal="true" aria-labelledby="cal-modal-title">
+  <div class="cal-modal-head">
+    <span class="cal-modal-title" id="cal-modal-title"></span>
+    <a class="cal-modal-dl" id="cal-modal-dl" href="#" download><span aria-hidden="true">&#8595;</span> Download</a>
+  </div>
+  <div class="cal-modal-imgwrap" id="cal-modal-imgwrap">
+    <img class="cal-modal-img" id="cal-modal-img" alt="" decoding="async">
+    <div class="cal-modal-mask cal-mask-tint" id="cal-modal-mask" style="display:none"></div>
+  </div>
+  <button type="button" class="cal-modal-close" id="cal-modal-close" aria-label="Close">&times;</button>
+</div>
+
+<div class="cal-modal cal-mask-modal" id="cal-mask-modal" role="dialog" aria-modal="true" aria-labelledby="cal-mask-title">
+  <div class="cal-mask-head">
+    <span class="cal-mask-title" id="cal-mask-title"></span>
+    <span class="cal-mask-stats" id="cal-mask-stats" aria-live="polite"></span>
+  </div>
+  <div class="cal-mask-canvaswrap" id="cal-mask-canvaswrap">
+    <img class="cal-mask-stackimg" id="cal-mask-stack" alt="" decoding="async">
+    <canvas class="cal-mask-canvas" id="cal-mask-canvas" aria-label="Mask drawing area: left-drag masks, right-drag clears"></canvas>
+    <div class="cal-mask-ring" id="cal-mask-ring" style="display:none"></div>
+  </div>
+  <div class="cal-mask-toolbar">
+    <span class="cal-mask-label" id="cal-mask-brush-label">Brush</span>
+    <span class="cal-mask-sizeval" id="cal-mask-size"></span>
+    <button type="button" class="cal-mask-preset" aria-label="Small brush">S</button>
+    <button type="button" class="cal-mask-preset" aria-label="Medium brush">M</button>
+    <button type="button" class="cal-mask-preset" aria-label="Large brush">L</button>
+    <button type="button" class="cal-mask-preset" aria-label="Extra large brush">XL</button>
+    <button type="button" id="cal-mask-undo">Undo</button>
+    <button type="button" id="cal-mask-reset">Reset</button>
+    <span class="cal-mask-spacer"></span>
+    <button type="button" id="cal-mask-cancel">Close</button>
+    <button type="button" class="cal-mask-save" id="cal-mask-save">Save mask</button>
+  </div>
+  <div class="cal-mask-status" id="cal-mask-status" role="status" aria-live="polite"></div>
+</div>
+
+<div id="app-panel" class="app-panel" onclick="appPanelClose(event)"
+     role="dialog" aria-modal="true" aria-labelledby="app-panel-title" aria-hidden="true">
+  <div class="app-panel-inner">
+    <div class="app-panel-header">
+      <span id="app-panel-title" class="app-panel-title"></span>
+      <button type="button" class="cam-modal-close" onclick="appPanelClose(null)" aria-label="Close panel">Close</button>
+    </div>
+    <div id="app-panel-body"></div>
+  </div>
+</div>
+  {% include "_license_footer.html" %}
+</body>
+</html>

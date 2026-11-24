@@ -1,6 +1,8 @@
 [Unit]
 Description=ROVIMEN Detection Metadata Indexer
-After=network.target rovimen-station-api.service
+# color-capture in After= is ordering only (no Wants= — some stations run with
+# capture deliberately disabled and it must never be pulled in).
+After=network.target rovimen-station-api.service color-capture.service
 Wants=rovimen-station-api.service
 
 [Service]
@@ -8,6 +10,12 @@ Type=simple
 User=gmn
 Group=gmn
 WorkingDirectory=/home/gmn/rovimen_scripts
+# The RMS venv interpreter, like dawn: FF thumbnails need numpy, and under the
+# system python3 the venv's site-packages for another Python version broke the
+# numpy import (gmnro08 Brașov: system 3.8.10, vRMS 3.12.9, no thumbnails ever).
+# The updater and installer localise this path to the station's venv; where no
+# venv exists the updater falls back to /usr/bin/env python3 (the indexing
+# itself is stdlib-only).
 ExecStart=/home/gmn/RMS/venv/bin/python /home/gmn/rovimen_scripts/detection_indexer.py
 Restart=always
 RestartSec=30

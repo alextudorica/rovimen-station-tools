@@ -1,9 +1,10 @@
 """Tests for encoder.py -- per-chunk MKV re-encoder pure-logic functions.
 
 Covers: _cpu_filter_chain, _build_cmd, _libx264_thread_count, _batch_cfg,
-_night_date, and the COMPRESSION_QP / COMPRESSION_CRF lookup dicts.
+the night rule the encoder uses (rovimen_night.night_of), and the
+COMPRESSION_QP / COMPRESSION_CRF lookup dicts.
 
-Skips process_chunk, process_night, and _check_vaapi (require ffmpeg/VAAPI).
+Skips process_chunk, process_night and the VAAPI probe (require ffmpeg/VAAPI).
 """
 
 from __future__ import annotations
@@ -21,8 +22,8 @@ from encoder import (
     _build_cmd,
     _cpu_filter_chain,
     _libx264_thread_count,
-    _night_date,
 )
+from rovimen_night import night_of as _night_date
 
 
 # ---------------------------------------------------------------------------
@@ -150,17 +151,19 @@ class TestCpuFilterChain:
                                    display_levels=dl)
         assert any('brightness=0.05' in f for f in result)
 
-    def test_display_levels_combined_with_gamma(self):
-        """Gamma and display_levels merge into a single eq= filter."""
+    def test_calibration_and_display_levels_are_separate_eq(self):
+        """Calibration gamma/contrast (shared with the stack) and the
+        video-only display_levels lift live in distinct eq= nodes: calibration
+        first, display second, so the two never entangle."""
         dl = {'contrast': 1.2, 'brightness': 0.1}
         result = _cpu_filter_chain(1.0, 1.0, 1.0, 1.5, rotate=False,
                                    display_levels=dl)
         eq_filters = [f for f in result if f.startswith('eq=')]
-        assert len(eq_filters) == 1
-        eq = eq_filters[0]
-        assert 'gamma=' in eq
-        assert 'contrast=1.2' in eq
-        assert 'brightness=0.1' in eq
+        assert len(eq_filters) == 2
+        calib_eq, display_eq = eq_filters
+        assert 'gamma=' in calib_eq
+        assert 'contrast=1.2' in display_eq
+        assert 'brightness=0.1' in display_eq
 
     def test_ordering_full_range_rotate_gains_gamma_pad_annotation(self):
         """Full filter chain respects the expected ordering."""
@@ -189,6 +192,79 @@ class TestCpuFilterChain:
 
 
 # ---------------------------------------------------------------------------
+# Stack <-> video colour-post consistency (issue #508)
+#
+# The reencoded clip and its stack thumbnail must share one colour-post path:
+# same adaptive gains, same gamma, same color_post.contrast. The stack applies
+# them via color_calibration.apply_calibration_np; the video applies them via
+# _cpu_filter_chain -> color_calibration.build_ffmpeg_filter. These tests pin
+# that both consume identical resolved parameters and the same builder, so the
+# two paths cannot silently drift apart again.
+# ---------------------------------------------------------------------------
+
+
+class TestStackVideoColorPostConsistency:
+
+    def test_video_path_delegates_to_shared_ffmpeg_builder(self):
+        """The video calibration node is exactly what build_ffmpeg_filter emits
+        for the same gains/gamma/contrast — no re-implemented, divergeable
+        inline copy in the encoder."""
+        import color_calibration as cc
+
+        gr, gg, gb, gamma, contrast = 0.57, 0.89, 1.0, 0.75, 1.05
+        chain = _cpu_filter_chain(gr, gg, gb, gamma, rotate=False,
+                                  calib_contrast=contrast)
+        expected = cc.build_ffmpeg_filter(
+            gr, gg, gb, gamma, rotate=False, contrast=contrast,
+        ).split(',')
+        assert chain == expected
+
+    def test_calib_contrast_reaches_the_video_eq(self):
+        """color_post.contrast (the value the stack applies) is folded into the
+        calibration eq of the video path — the pre-fix bug was the encoder
+        dropping it and applying only display_levels."""
+        chain = _cpu_filter_chain(1.0, 1.0, 1.0, 0.75, rotate=False,
+                                  calib_contrast=1.08)
+        calib_eq = next(f for f in chain if f.startswith('eq='))
+        assert 'contrast=1.0800' in calib_eq
+
+    def test_identity_calib_contrast_emits_no_contrast(self):
+        """The fleet default (contrast 1.0) must not inject a contrast term,
+        so cameras without an override are byte-for-byte unchanged."""
+        chain = _cpu_filter_chain(1.0, 1.0, 1.0, 0.75, rotate=False,
+                                  calib_contrast=1.0)
+        assert all('contrast=' not in f for f in chain)
+
+    def test_stack_and_video_resolve_the_same_color_post(self):
+        """Both paths funnel through resolve_color_post/resolve_calibration_from_frame,
+        so a per-camera override lands identically in the stack (numpy) and the
+        video (ffmpeg) — same gains, same gamma, same contrast."""
+        import numpy as np
+
+        import color_calibration as cc
+
+        # A camera with a real color_post override (gamma + contrast).
+        station_cfg = {'color_post': {'gamma': 1.17, 'contrast': 1.05}}
+        post = cc.resolve_color_post(station_cfg)
+
+        rng = np.random.default_rng(7)
+        ref = np.clip(rng.integers(0, 256, (80, 120, 3)), 0, 255).astype(np.uint8)
+        gr, gg, gb, gamma = cc.resolve_calibration_from_frame(ref, station_cfg)
+
+        # Stack path parameters.
+        assert gamma == float(post['gamma'])
+
+        # Video path: build the same filter the encoder would.
+        vf = cc.build_ffmpeg_filter(
+            gr, gg, gb, gamma, rotate=False, contrast=float(post['contrast']),
+        )
+        # gamma is inverted for ffmpeg's eq convention.
+        assert f'gamma={1.0 / gamma:.4f}' in vf
+        assert f'contrast={float(post["contrast"]):.4f}' in vf
+        assert f'rr={gr:.4f}' in vf and f'gg={gg:.4f}' in vf and f'bb={gb:.4f}' in vf
+
+
+# ---------------------------------------------------------------------------
 # _build_cmd
 # ---------------------------------------------------------------------------
 
@@ -206,16 +282,19 @@ class TestBuildCmd:
         dst = tmp_path / "DE001B_20260101_210000_color.mkv.tmp.mkv"
         return src, dst
 
-    def test_compression_level_zero_returns_none(self, paths):
+    @pytest.mark.parametrize("level", [0, 5])
+    def test_levels_outside_1_to_4_are_rejected(self, paths, level):
+        """Level 0 (a plain copy) was unreachable: process_chunk maps any level
+        outside 1-4 to 2 before building a command."""
         src, dst = paths
-        result = _build_cmd(
-            src, dst, compression_level=0,
-            gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
-            rotate=False, overlay_cfg=None, station_id='DE001B',
-            station_cfg={}, chunk_epoch=0,
-            vaapi_device='/dev/dri/renderD128', use_vaapi=True,
-        )
-        assert result is None
+        with pytest.raises(ValueError):
+            _build_cmd(
+                src, dst, compression_level=level,
+                gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
+                rotate=False, overlay_cfg=None, station_id='DE001B',
+                station_cfg={}, chunk_epoch=0,
+                vaapi_device='/dev/dri/renderD128', use_vaapi=True,
+            )
 
     def test_vaapi_path_includes_device_and_codec(self, paths):
         src, dst = paths
@@ -274,8 +353,8 @@ class TestBuildCmd:
         crf_idx = result.index('-crf')
         assert result[crf_idx + 1] == str(COMPRESSION_CRF[level])
 
-    def test_vaapi_no_logo_no_fpn_uses_vf(self, paths):
-        """Without logo and FPN, VAAPI path uses simple -vf (not filter_complex)."""
+    def test_vaapi_no_logo_uses_vf(self, paths):
+        """Without a logo, VAAPI path uses simple -vf (not filter_complex)."""
         src, dst = paths
         result = _build_cmd(
             src, dst, compression_level=2,
@@ -287,8 +366,8 @@ class TestBuildCmd:
         assert '-vf' in result
         assert '-filter_complex' not in result
 
-    def test_cpu_no_logo_no_fpn_uses_vf_or_bare(self, paths):
-        """Without logo and FPN, CPU path uses -vf (or omits it if no filters)."""
+    def test_cpu_no_logo_uses_vf_or_bare(self, paths):
+        """Without a logo, CPU path uses -vf (or omits it if no filters)."""
         src, dst = paths
         result = _build_cmd(
             src, dst, compression_level=2,
@@ -371,17 +450,23 @@ class TestBuildCmd:
             'show_logo': True,
         }
 
-        with patch('encoder.measure_text_width', return_value=100):
-            result = _build_cmd(
-                src, dst, compression_level=2,
-                gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
-                rotate=False, overlay_cfg=overlay_cfg, station_id='DE001B',
-                station_cfg={}, chunk_epoch=1700000000,
-                vaapi_device='/dev/dri/renderD128', use_vaapi=True,
-            )
+        result = _build_cmd(
+            src, dst, compression_level=2,
+            gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
+            rotate=False, overlay_cfg=overlay_cfg, station_id='DE001B',
+            station_cfg={}, chunk_epoch=1700000000,
+            vaapi_device='/dev/dri/renderD128', use_vaapi=True,
+        )
 
         assert '-filter_complex' in result
-        assert 'overlay=' in result[result.index('-filter_complex') + 1]
+        fc = result[result.index('-filter_complex') + 1]
+        assert 'overlay=' in fc
+        # The astromania logo is centred horizontally and BOTTOM-anchored in the
+        # bar — never centred over the video (no (H-h)/2).
+        assert 'overlay=x=(W-w)/2:y=H-h-4' in fc
+        assert '(H-h)/2' not in fc
+        # VAAPI path still uploads the composited frame to the GPU.
+        assert 'hwupload[out]' in fc
 
     @patch('encoder.build_drawtext_annotations',
            return_value=(['drawtext=text=TEST'], 40))
@@ -403,56 +488,61 @@ class TestBuildCmd:
             'show_logo': True,
         }
 
-        with patch('encoder.measure_text_width', return_value=100):
-            result = _build_cmd(
-                src, dst, compression_level=2,
-                gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
-                rotate=False, overlay_cfg=overlay_cfg, station_id='DE001B',
-                station_cfg={}, chunk_epoch=1700000000,
-                vaapi_device='', use_vaapi=False,
-            )
+        result = _build_cmd(
+            src, dst, compression_level=2,
+            gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
+            rotate=False, overlay_cfg=overlay_cfg, station_id='DE001B',
+            station_cfg={}, chunk_epoch=1700000000,
+            vaapi_device='', use_vaapi=False,
+        )
 
         assert '-filter_complex' in result
         assert 'libx264' in result
+        fc = result[result.index('-filter_complex') + 1]
+        assert 'overlay=x=(W-w)/2:y=H-h-4' in fc
+        assert '(H-h)/2' not in fc
+        assert fc.endswith('[out]')
 
-    def test_vaapi_fpn_uses_filter_complex(self, paths, tmp_path):
-        """VAAPI + FPN correction promotes to filter_complex."""
-        src, dst = paths
-        fpn = tmp_path / "correction.png"
-        fpn.write_bytes(b'\x89PNG')
+    @patch('encoder.build_drawtext_annotations',
+           return_value=(['drawtext=text=TEST'], 40))
+    def test_cpu_with_bar_logo_and_gmn_relabels_final_stage(self, mock_ann, tmp_path):
+        """libx264 + both logos: the branding fragment's terminal GMN pad is
+        renamed to [out] via relabel_fragment_output, not string-sliced.
 
-        with patch('encoder._fpn_filter_prefix',
-                    return_value='[0:v]format=rgb24[_main];movie=fpn[_fpn];[_main][_fpn]blend=all_mode=subtract'):
-            result = _build_cmd(
-                src, dst, compression_level=2,
-                gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
-                rotate=False, overlay_cfg=None, station_id='DE001B',
-                station_cfg={}, chunk_epoch=0,
-                vaapi_device='/dev/dri/renderD128', use_vaapi=True,
-                fpn_png_path=fpn,
-            )
+        The last overlay stage is the GMN corner (its output pad is what must
+        become [out]); a stray internal label would produce a dangling graph.
+        """
+        src = tmp_path / "DE001B_20260101_210000_color.mkv"
+        src.touch()
+        dst = tmp_path / "out.mkv"
+        wm = tmp_path / "astromania.png"
+        gmn = tmp_path / "gmn.png"
+        wm.write_bytes(b'\x89PNG\r\n\x1a\n')
+        gmn.write_bytes(b'\x89PNG\r\n\x1a\n')
 
-        assert '-filter_complex' in result
+        overlay_cfg = {
+            'enabled': True, 'font': '/fake/font.ttf', 'font_size': 19,
+            'network': 'ROVIMEN', 'style': 'standard',
+            'logo': str(wm), 'gmn_logo': str(gmn), 'show_logo': True,
+        }
 
-    def test_cpu_fpn_uses_filter_complex(self, paths, tmp_path):
-        """CPU + FPN correction promotes to filter_complex."""
-        src, dst = paths
-        fpn = tmp_path / "correction.png"
-        fpn.write_bytes(b'\x89PNG')
+        result = _build_cmd(
+            src, dst, compression_level=2,
+            gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
+            rotate=False, overlay_cfg=overlay_cfg, station_id='DE001B',
+            station_cfg={}, chunk_epoch=1700000000,
+            vaapi_device='', use_vaapi=False,
+        )
 
-        with patch('encoder._fpn_filter_prefix',
-                    return_value='[0:v]format=rgb24[_main];movie=fpn[_fpn];[_main][_fpn]blend=all_mode=subtract'):
-            result = _build_cmd(
-                src, dst, compression_level=2,
-                gain_r=1.0, gain_g=1.0, gain_b=1.0, gamma=1.0,
-                rotate=False, overlay_cfg=None, station_id='DE001B',
-                station_cfg={}, chunk_epoch=0,
-                vaapi_device='', use_vaapi=False,
-                fpn_png_path=fpn,
-            )
-
-        assert '-filter_complex' in result
-        assert 'libx264' in result
+        fc = result[result.index('-filter_complex') + 1]
+        # Both the bottom-bar astromania logo and the GMN corner are present, and
+        # the graph terminates exactly once at [out] with no leftover [gmn*] pad.
+        assert 'overlay=x=(W-w)/2:y=H-h-4' in fc    # logo centred, bottom-anchored
+        assert '(H-h)/2' not in fc                    # never over the video centre
+        assert 'W-w-14' in fc                         # GMN corner (br, margin 14)
+        assert fc.endswith('[out]')
+        assert fc.count('[out]') == 1
+        assert '[gmn' not in fc                        # no dangling terminal pad
 
     def test_cpu_preset_default_is_fast(self, paths):
         src, dst = paths
@@ -615,7 +705,7 @@ class TestBatchCfg:
 
 
 # ---------------------------------------------------------------------------
-# _night_date
+# Night rule (rovimen_night.night_of, used by the encoder)
 # ---------------------------------------------------------------------------
 
 

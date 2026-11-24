@@ -94,6 +94,19 @@ def app_env():
                              "label": "S", "rotate": False},
                         ],
                     },
+                    "comm_station": {
+                        "ip": "127.0.0.1",
+                        "label": "Commissioning Station",
+                        "ssh_user": "test",
+                        "public": True,
+                        "status": "commissioning",
+                        "lat": 45.1,
+                        "lon": 25.1,
+                        "cameras": [
+                            {"code": "COM001", "cam_ip": "127.0.0.1",
+                             "label": "E", "rotate": False},
+                        ],
+                    },
                 },
             }
         )
@@ -187,7 +200,7 @@ _DATE = "20260101"
 
 
 @pytest.mark.parametrize(
-    "path", ["/", "/events", "/live", "/showers", "/highlights"]
+    "path", ["/", "/network", "/events", "/showers", "/highlights"]
 )
 def test_anon_can_load_public_page_shells(anon, path):
     resp = anon.get(path)
@@ -201,6 +214,8 @@ def test_anon_overview_and_stations_return_200(anon):
 
 def test_anon_shower_reference_is_public(anon):
     assert anon.get("/api/showers").status_code == 200
+    profiles = anon.get("/api/shower-profiles")
+    assert profiles.status_code == 200 and "PER" in profiles.get_json()["showers"]
     assert anon.get("/api/shower-year-counts").status_code == 200
 
 
@@ -287,6 +302,118 @@ def test_logged_in_media_reaches_private_station(admin, tmpl):
     assert resp.status_code not in (301, 302, 401, 403)
 
 
+# The public rule applies to the camera served, not only to the host in the
+# URL: the media layer reads the archive by camera code, so a public host_key
+# with a private station's camera code used to serve that camera's media. A
+# missing file answers the shared "not uploaded yet" JSON 404 from the media
+# layer, which tells "the gate let it through" apart from the gate's own 404.
+
+
+def _reached_media_layer(resp) -> bool:
+    body = resp.get_json(silent=True) or {}
+    return resp.status_code == 404 and body.get("error") == "not_uploaded_yet"
+
+
+@pytest.mark.parametrize("tmpl", _MEDIA_ROUTES)
+def test_anon_media_public_host_private_camera_is_404(anon, tmpl):
+    path = tmpl.format(h="pub_station", c="PRV001", d=_DATE)
+    resp = anon.get(path)
+    assert resp.status_code == 404, path
+    assert not _reached_media_layer(resp), (
+        f"{path}: a private station's camera must 404 at the gate for anon")
+
+
+@pytest.mark.parametrize("tmpl", _MEDIA_ROUTES)
+def test_anon_media_public_host_retired_camera_passes_gate(anon, tmpl):
+    """A camera no current station owns (retired, moved) keeps working on the
+    public pages under a public host."""
+    path = tmpl.format(h="pub_station", c="OLD001", d=_DATE)
+    assert _reached_media_layer(anon.get(path)), path
+
+
+@pytest.mark.parametrize("tmpl", _MEDIA_ROUTES)
+def test_logged_in_media_public_host_private_camera_passes_gate(admin, tmpl):
+    path = tmpl.format(h="pub_station", c="PRV001", d=_DATE)
+    assert _reached_media_layer(admin.get(path)), path
+
+
+@pytest.mark.parametrize("who", ["anon", "admin"])
+def test_fullstack_archive_miss_never_contacts_station(request, who, monkeypatch):
+    """An uploaded stack is served from the archive, never pulled from the
+    station: an archive miss falls through to the thumbnail tiers, whose
+    miss is the shared "not uploaded yet" 404."""
+    import routes.media as media_routes
+
+    contacted: list[str] = []
+
+    def _record(url):
+        contacted.append(url)
+        raise RuntimeError("station contacted")
+    monkeypatch.setattr(media_routes, "_session_for_url", _record)
+    client = request.getfixturevalue(who)
+    resp = client.get(f"/fullstack/pub_station/PUB001/{_DATE}/{_STACK}")
+    assert contacted == []
+    assert _reached_media_layer(resp)
+
+
+def test_anon_cached_video_public_host_private_camera_404(anon):
+    resp = anon.get(f"/api/cached-video/pub_station/PRV001/{_DATE}/{_MKV}")
+    assert resp.status_code == 404
+
+
+def test_anon_cached_video_public_host_retired_camera_redirects(anon):
+    resp = anon.get(f"/api/cached-video/pub_station/OLD001/{_DATE}/{_MKV}")
+    assert resp.status_code == 302
+    assert "/media/v1/clip/OLD001/2026-01-01/" in resp.headers.get("Location", "")
+
+
+_CAMERA_JSON_ROUTES = [
+    "/api/rms/plots/{h}/{c}/" + _DATE,
+    "/api/rms/plots-latest/{h}/{c}",
+    "/api/rms/color-stack-latest/{h}/{c}",
+]
+
+
+@pytest.mark.parametrize("tmpl", _CAMERA_JSON_ROUTES)
+def test_anon_rms_json_public_host_private_camera_404(anon, tmpl):
+    assert anon.get(tmpl.format(h="pub_station", c="PRV001")).status_code == 404
+
+
+@pytest.mark.parametrize("tmpl", _CAMERA_JSON_ROUTES)
+def test_anon_rms_json_public_host_retired_camera_200(anon, tmpl):
+    assert anon.get(tmpl.format(h="pub_station", c="OLD001")).status_code == 200
+
+
+@pytest.mark.parametrize("tmpl", _CAMERA_JSON_ROUTES)
+def test_logged_in_rms_json_public_host_private_camera_200(admin, tmpl):
+    assert admin.get(tmpl.format(h="pub_station", c="PRV001")).status_code == 200
+
+
+def test_anon_plots_latest_batch_drops_private_camera(anon, admin):
+    cams = "pub_station/PUB001,pub_station/PRV001,pub_station/OLD001"
+    data = anon.get(f"/api/rms/plots-latest?cams={cams}").get_json()
+    assert set(data) == {"pub_station/PUB001", "pub_station/OLD001"}
+    data = admin.get(f"/api/rms/plots-latest?cams={cams}").get_json()
+    assert "pub_station/PRV001" in data
+
+
+def test_anon_rms_plot_image_public_host_private_camera_404(anon, admin, monkeypatch, tmp_path):
+    """The plot image is read from the archive by camera: with the file
+    present, anon gets 404 for a private station's camera under a public
+    host, while a logged-in caller gets the image."""
+    import routes.station_ops as station_ops
+
+    plot = tmp_path / "PRV001" / _DATE / "rms" / _PRIV_PLOT_JPG
+    plot.parent.mkdir(parents=True)
+    plot.write_bytes(b"\xff\xd8\xff\xe0 not a real jpeg")
+    monkeypatch.setattr(station_ops, "ARCHIVE_PATH", tmp_path)
+    monkeypatch.setattr(station_ops, "THUMB_CACHE_DIR", tmp_path / "thumb_cache")
+
+    path = f"/api/rms/plot_image/pub_station/PRV001/{_DATE}/{_PRIV_PLOT_JPG}"
+    assert anon.get(path).status_code == 404
+    assert admin.get(path).status_code == 200
+
+
 # ── 4. Sensitive surfaces stay login-gated for anon ───────────────────────
 
 
@@ -294,14 +421,19 @@ _ANON_GATED_GET = [
     "/admin",
     "/config",
     "/social",
-    "/api/live-feed",
+    # /api/live-feed moved to the anon-public set: it now carries
+    # page="live" (the /live PAGE was already anon-eligible but its data
+    # route stayed gated, leaving anonymous visitors a fetch error) and
+    # applies the per-station public filter — see test_hall_of_fame.py
+    # TestLiveFeedAnon for the filtering + toggle coverage.
     "/api/status/pub_station",
     "/api/vitals/pub_station",
     "/api/admin/usage-stats",
+    "/api/admin/traffic",
     "/api/admin/users",
     "/api/config/all",
     "/api/settings/pub_station",
-    "/api/rms/status/pub_station",
+    "/api/station_night/pub_station/20261021",
     # Fleet-map health data is gated unless the "overview" page is enabled;
     # in this default-all fixture it IS enabled, so /api/overview is reachable
     # — but the fleet-map PAGE is served at "/" only for logged-in users.
@@ -315,6 +447,16 @@ def test_anon_sensitive_get_is_gated(anon, path):
     assert resp.status_code in (302, 401, 403), (
         f"{path} must be gated for anon, got {resp.status_code}"
     )
+
+
+def test_traffic_report_is_admin_only(viewer, admin):
+    """/api/admin/traffic: 403 for non-admin sessions, JSON report for admin
+    (same guard pattern as /api/admin/usage-stats)."""
+    assert viewer.get("/api/admin/traffic").status_code == 403
+    resp = admin.get("/api/admin/traffic?days=7")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert "totals" in body and "countries" in body and "daily" in body
 
 
 # ── 4b. Detection data + fleet map are anon-public under their toggles ─────
@@ -347,37 +489,40 @@ def test_anon_detection_feed_reachable_under_events_toggle(anon, path):
 
 
 def test_anon_map_page_reachable_under_overview_toggle(anon):
-    """The fleet map is the landing page for everyone when "overview" is on:
-    anon gets the Leaflet map shell at both "/" and "/map"."""
-    assert anon.get("/map").status_code == 200
-    assert anon.get("/stations").status_code == 200
-    # "/" now serves the fleet-map shell (Leaflet) for anon, with a hero block.
-    root = anon.get("/").get_data(as_text=True)
-    assert "leaflet" in root.lower(), "anon '/' must serve the fleet map now"
+    """With "overview" on, the map is on the Network overview ("/network");
+    the old "/map" and "/stations" redirect there with their query string,
+    and "/" is the home page, without the map."""
+    for path in ("/map", "/stations"):
+        resp = anon.get(path + "?station=pub_station")
+        assert resp.status_code == 302
+        assert resp.headers["Location"].endswith("/network?station=pub_station")
+    assert "leaflet" in anon.get("/network").get_data(as_text=True).lower()
+    assert "leaflet" not in anon.get("/").get_data(as_text=True).lower()
 
 
-def test_anon_root_renders_map_hero_and_nav(anon):
-    """The anon landing at "/" carries the hero/intro copy, a map element, and
-    the top-nav links to the other public pages."""
+def test_anon_root_renders_hero_plots_and_nav(anon):
+    """The anon landing at "/" carries the hero/intro copy, the latest plots,
+    and the top-nav links to the other public pages."""
     root = anon.get("/").get_data(as_text=True)
     # Hero intro copy (unique phrases from the required block).
-    assert "GLOBAL METEOR NETWORK" in root
-    assert "all-sky cameras across Romania and Germany" in root
+    assert "ROVIMEN, Romanian Video Meteor Network" in root
+    assert "Our video cameras watch the night sky" in root
     assert "Explore the public data below" in root
-    # A map element is present.
-    assert 'id="map"' in root
+    # The latest plots, not the map (that is on the Network overview), and
+    # the card pointing there.
+    assert 'class="ov-cover-card" href="/network"' in root
+    assert 'id="ov-stacks"' in root and 'id="map"' not in root
     # Top-nav links to the sibling public pages.
-    for href in ('href="/events"', 'href="/highlights"', 'href="/showers"'):
+    for href in ('href="/network"', 'href="/events"', 'href="/highlights"', 'href="/showers"'):
         assert href in root, f"nav link {href} must be present on the map landing"
     # "About" opens the in-page panel.
     assert "openAppPanel('about')" in root
 
 
-def test_logged_in_root_has_no_hero(viewer):
-    """Operators get the plain overview dashboard at "/" — no anon hero block."""
+def test_logged_in_root_shows_the_hero(viewer):
+    """Logged-in users see the same branded hero (logo, credits) on the home page."""
     root = viewer.get("/").get_data(as_text=True)
-    assert "GLOBAL METEOR NETWORK" not in root
-    assert "leaflet" in root.lower()
+    assert "ROVIMEN, Romanian Video Meteor Network" in root
 
 
 def test_anon_detections_payload_hides_private_station_and_ips(anon):
@@ -408,6 +553,17 @@ def test_anon_detections_range_hides_private_and_ips(anon):
         assert banned not in raw, f"anon detections range leaked {banned}"
 
 
+def test_detections_range_caps_the_window_at_92_days(anon):
+    """The range route is public and computes one payload per night, so a
+    window over 92 nights is refused with a JSON error the Sort & Filter tab
+    shows; 92 nights inclusive still answers."""
+    too_long = anon.get("/api/detections/range?from=20260101&to=20260403")
+    assert too_long.status_code == 400
+    assert "92 days" in too_long.get_json()["error"]
+    ok = anon.get("/api/detections/range?from=20260101&to=20260402")
+    assert ok.status_code == 200
+
+
 def test_anon_overview_map_apis_hide_private_and_ips(anon):
     """The map's data APIs (/api/overview, /api/stations) show only public
     stations to anon and redact ip / cam_ip."""
@@ -428,9 +584,66 @@ def test_anon_platepar_private_station_404(anon):
     assert anon.get("/api/platepar/pub_station").status_code not in (301, 302, 401, 403)
 
 
+def test_platepar_never_contacts_a_commissioning_station(viewer, monkeypatch):
+    """The Events page asks for every station's platepar on each load. A
+    commissioning station must not be contacted (``Station.should_contact``):
+    its IP is a placeholder or an absent peer, so the call hung ~5 s and 503'd
+    for gmnro21 (Vârteșcoiu) and gmnro22 (Ferigile)."""
+    import routes.station_proxy as station_proxy
+
+    def _no_contact(*a, **k):
+        raise AssertionError("commissioning station was contacted")
+
+    monkeypatch.setattr(station_proxy, "station_get_raw", _no_contact)
+    assert viewer.get("/api/platepar/comm_station").status_code == 404
+
+
+def test_anon_platepar_never_contacts_station(anon, monkeypatch):
+    """Platepars are pushed (#1248). Without a pushed copy an anonymous
+    request answers "not uploaded yet" and never makes the VPS call the
+    station."""
+    import pushed_calibration
+    import routes.station_proxy as station_proxy
+
+    contacted: list[str] = []
+
+    def _record(*a, **k):
+        contacted.append(a[2] if len(a) > 2 else "")
+        raise RuntimeError("station contacted")
+    monkeypatch.setattr(station_proxy, "station_get_raw", _record)
+    monkeypatch.setattr(pushed_calibration, "get_platepar", lambda hk: None)
+    resp = anon.get("/api/platepar/pub_station")
+    assert contacted == []
+    assert resp.status_code == 404
+    assert resp.get_json()["error"] == "not_uploaded_yet"
+
+
+def test_anon_platepar_serves_the_pushed_copy(anon, monkeypatch):
+    import pushed_calibration
+
+    pushed = {"PUB001": {"az_centre": 123.0}}
+    monkeypatch.setattr(pushed_calibration, "get_platepar",
+                        lambda hk: pushed if hk == "pub_station" else None)
+    resp = anon.get("/api/platepar/pub_station")
+    assert resp.status_code == 200
+    assert resp.get_json() == pushed
+
+
 def test_anon_twilight_private_station_404(anon):
     assert anon.get("/api/twilight/priv_station/20260101").status_code == 404
     assert anon.get("/api/twilight/pub_station/20260101").status_code == 200
+
+
+def test_twilight_network_window_respects_public_flag(anon, viewer):
+    """The fleet RMS window counts public stations only for anon callers;
+    a logged-in caller gets the whole fleet. priv_station (Bucharest) is the
+    easternmost, so it starts capture first."""
+    a = anon.get("/api/twilight/network/20261021")
+    assert a.status_code == 200
+    assert "priv_station" not in (a.get_json()["earliest_station"], a.get_json()["latest_station"])
+    v = viewer.get("/api/twilight/network/20261021").get_json()
+    assert v["earliest_station"] == "priv_station"
+    assert v["station_count"] > a.get_json()["station_count"]
 
 
 def test_logged_in_detections_reaches_full_fleet(viewer):
@@ -564,9 +777,9 @@ _PRIV_PLOT_JPG = "PRV001_20260101_010101_captured_stack.jpg"
 
 def test_anon_rms_plots_public_station_passes_gate(anon):
     """A public station's plot list passes the gate for anon (never
-    302/401/403). The body may be a 503 "no cached plots" since no live
-    station exists in the test, but the gate and public-flag check let it
-    through rather than 404-before-fetch."""
+    302/401/403). The body is an empty list, since nothing is archived in the
+    test, but the gate and public-flag check let it through rather than
+    404-before-lookup."""
     resp = anon.get(f"/api/rms/plots/pub_station/PUB001/{_DATE}")
     assert resp.status_code not in (301, 302, 401, 403, 404), (
         f"public-station plot list must pass the gate for anon, got {resp.status_code}"
@@ -575,15 +788,14 @@ def test_anon_rms_plots_public_station_passes_gate(anon):
 
 def test_anon_rms_plots_private_station_404(anon):
     """A private/commissioning station's plot list must 404 for anon before any
-    station round-trip (its plots must never be served)."""
+    archive lookup (its plots must never be served)."""
     resp = anon.get(f"/api/rms/plots/priv_station/PRV001/{_DATE}")
     assert resp.status_code == 404
 
 
 def test_anon_rms_plot_image_public_station_passes_gate(anon):
-    """A public station's plot image passes the gate for anon. With no live
-    station / cache file the media layer 404/502s, but never a 302-to-login
-    and never the private-station 404-before-fetch."""
+    """A public station's plot image passes the gate for anon. With nothing
+    archived the image route 404s, but never a 302-to-login."""
     resp = anon.get(
         f"/api/rms/plot_image/pub_station/PUB001/{_DATE}/{_PLOT_JPG}"
     )
@@ -594,7 +806,7 @@ def test_anon_rms_plot_image_public_station_passes_gate(anon):
 
 def test_anon_rms_plot_image_private_station_404(anon):
     """A private/commissioning station's plot image must 404 for anon before
-    any file read or station round-trip — non-public plots are never served."""
+    any file read — non-public plots are never served."""
     resp = anon.get(
         f"/api/rms/plot_image/priv_station/PRV001/{_DATE}/{_PRIV_PLOT_JPG}"
     )
@@ -603,28 +815,24 @@ def test_anon_rms_plot_image_private_station_404(anon):
 
 def test_anon_rms_plots_payload_has_no_admin_fields_or_paths(anon, monkeypatch):
     """The anon plot-list payload must carry ONLY the per-plot filename / label
-    / order projection — never ip / cam_ip / host paths / host_key. We stub the
-    station round-trip so the route returns a real list, then assert the shape
-    and that no admin field or path leaks into the serialised body."""
+    / order projection — never ip / cam_ip / host paths / host_key. The list
+    is built from the archive index, so we give the index a night with two
+    plots, then assert the shape and that no admin field or path leaks into
+    the serialised body."""
     import json as _json
 
-    from routes import station_ops
+    import rovimen_dashboard as rd
+    from cache_store import _NightIndex
 
-    def _fake_plots(config, tunnels, host_key, path, *a, **k):
-        # Shape returned by the station API's /api/rms/plots.
-        return [
-            {"filename": _PLOT_JPG, "label": "Captured stack", "order": 1},
-            {"filename": "PUB001_20260101_photometry.jpg",
-             "label": "Photometry", "order": 3},
-        ]
-
-    # Force the "online + live fetch" branch and stub the round-trip + the
-    # color-meteor HEAD probe so no real network is touched.
-    monkeypatch.setattr(station_ops, "station_get_raw", _fake_plots)
+    night = _NightIndex(
+        meteor_files=(), stack_files=frozenset(), timelapse_files=(),
+        rms_files=frozenset({
+            _PLOT_JPG, "PUB001_20260101_010101_photometry_variation.png",
+        }),
+    )
     monkeypatch.setattr(
-        station_ops, "_session_for_url",
-        lambda url: type("S", (), {"head": lambda self, *a, **k: type(
-            "R", (), {"status_code": 404})()})(),
+        rd._archive_idx, "night_files",
+        lambda cam, date: night if cam == "PUB001" else None,
     )
 
     resp = anon.get(f"/api/rms/plots/pub_station/PUB001/{_DATE}")
@@ -643,8 +851,8 @@ def test_anon_rms_plots_payload_has_no_admin_fields_or_paths(anon, monkeypatch):
 
 def test_logged_in_rms_plots_reaches_private_station(admin):
     """A logged-in operator keeps full-fleet access: the private station's plot
-    list must NOT 404-before-fetch (it proceeds into the offline/cache layer,
-    which may 503 on the missing live station, but never the flag 404)."""
+    list must NOT 404-before-lookup (it proceeds to the archive lookup, which
+    answers an empty list here, but never the flag 404)."""
     resp = admin.get(f"/api/rms/plots/priv_station/PRV001/{_DATE}")
     assert resp.status_code not in (301, 302, 401, 403, 404)
 
@@ -723,3 +931,147 @@ def test_public_route_marker_is_visible_on_view():
         return "ok"
 
     assert getattr(_v, security._PUBLIC_ROUTE_ATTR, False) is True
+
+
+# ── Camera-keyed public rules, pinned per route ───────────────────────────
+#
+# The camera-keyed surfaces below map a camera code to its owning station(s)
+# through the shared helpers in ``auth`` (camera_owner, camera_owner_visible,
+# public_camera_codes, public_host_keys). Their rules differ from
+# ``camera_is_public_for_request`` on purpose: a camera no station owns
+# (OLD001) is refused to anonymous visitors here, while the host-keyed media
+# routes let it through. PUB001 belongs to the public station, PRV001 to the
+# private one.
+
+_HL_MEDIA = [
+    "/api/highlights/clip/{c}/2026-01-01/{c}_20260101_010101_color.mp4",
+    "/api/highlights/stack/{c}/2026-01-01/{c}_20260101_010101_stack.webp",
+    "/api/highlights/shortclip/{c}/2026-01-01/{c}_20260101_010101_color.mp4",
+]
+
+
+@pytest.mark.parametrize("tmpl", _HL_MEDIA)
+@pytest.mark.parametrize("cam,passes", [("PUB001", True), ("PRV001", False), ("OLD001", False)])
+def test_anon_highlights_media_gate_per_camera_owner(anon, monkeypatch, tmpl, cam, passes):
+    import public_api
+
+    looked_up: list[str] = []
+
+    def _resolve(camera, date_iso, filename, subdir):
+        looked_up.append(camera)
+        return None
+
+    monkeypatch.setattr(public_api, "_resolve_media_path", _resolve)
+    resp = anon.get(tmpl.format(c=cam))
+    assert resp.status_code == 404
+    assert bool(looked_up) is passes, f"{tmpl} {cam}: gate let through={bool(looked_up)}"
+
+
+@pytest.mark.parametrize("cam", ["PUB001", "PRV001", "OLD001"])
+def test_logged_in_highlights_media_gate_passes_every_camera(admin, monkeypatch, cam):
+    import public_api
+
+    looked_up: list[str] = []
+    monkeypatch.setattr(public_api, "_resolve_media_path",
+                        lambda camera, *a: looked_up.append(camera))
+    admin.get(_HL_MEDIA[0].format(c=cam))
+    assert looked_up == [cam]
+
+
+def _report(cameras: list[str]):
+    import fireball_reports as fr
+
+    return fr.Report.model_validate({
+        "event_id": "20260101_010101", "title": "Test fireball",
+        "time_utc": "2026-01-01 01:01:01", "analysed": "2026-01-05",
+        "status": "final", "authors": "A", "summary": ["Bright."],
+        "cameras": cameras, "facts": [],
+        "clips": [{"camera": c, "date": "2026-01-01",
+                   "filename": f"{c}_20260101_010100_color.mkv"} for c in cameras],
+    })
+
+
+@pytest.fixture
+def one_report(monkeypatch):
+    import fireball_reports as fr
+
+    def _install(cameras: list[str]):
+        rep = _report(cameras)
+        monkeypatch.setattr(fr, "all_reports", lambda reports_dir=None: {rep.event_id: rep})
+        return rep
+    return _install
+
+
+@pytest.mark.parametrize("cam,status", [("PUB001", 200), ("PRV001", 404), ("OLD001", 404)])
+def test_anon_fireball_report_page_per_camera_owner(anon, one_report, cam, status):
+    one_report([cam])
+    assert anon.get("/fireball/20260101_010101").status_code == status
+
+
+@pytest.mark.parametrize("cam,status", [("PUB001", 200), ("PRV001", 200), ("OLD001", 404)])
+def test_logged_in_fireball_report_page_per_camera_owner(admin, one_report, cam, status):
+    one_report([cam])
+    assert admin.get("/fireball/20260101_010101").status_code == status
+
+
+def test_highlights_reports_list_cameras_per_owner(anon, admin, one_report):
+    one_report(["PUB001", "PRV001", "OLD001"])
+    (rep,) = anon.get("/api/highlights/reports").get_json()["reports"]
+    assert rep["cameras"] == ["PUB001"]
+    assert [(w["camera"], w["host_key"]) for w in rep["witnesses"]] == [("PUB001", "pub_station")]
+    assert rep["places"] == ["Public Station"]
+    (rep,) = admin.get("/api/highlights/reports").get_json()["reports"]
+    assert rep["cameras"] == ["PUB001", "PRV001"]
+    assert [(w["camera"], w["host_key"]) for w in rep["witnesses"]] == [
+        ("PUB001", "pub_station"), ("PRV001", "priv_station")]
+
+
+@pytest.mark.parametrize("cam", ["PRV001", "OLD001"])
+def test_anon_highlights_reports_hide_a_report_with_no_public_camera(anon, one_report, cam):
+    one_report([cam])
+    assert anon.get("/api/highlights/reports").get_json()["reports"] == []
+
+
+def test_hall_of_fame_list_per_camera_owner(anon, admin, monkeypatch, tmp_path):
+    import hall_of_fame_store
+
+    monkeypatch.setattr(hall_of_fame_store, "_PATH", tmp_path / "hall_of_fame.json")
+    monkeypatch.setattr(hall_of_fame_store, "_LOCK_PATH", tmp_path / "hof.lock")
+    for i, cam in enumerate(("PUB001", "PRV001", "OLD001")):
+        hall_of_fame_store.add({
+            "id": f"hof_{i:012d}", "camera": cam, "date": "2026-01-01",
+            "filename": f"{cam}_20260101_01010{i}_color.mkv", "order": i,
+            "added_at": f"2026-01-0{i + 1}T00:00:00+00:00", "added_by": "admin",
+        })
+    anon_entries = anon.get("/api/hall_of_fame").get_json()["entries"]
+    assert [(e["camera"], e["host_key"]) for e in anon_entries] == [("PUB001", "pub_station")]
+    admin_entries = admin.get("/api/hall_of_fame").get_json()["entries"]
+    assert sorted((e["camera"], e["host_key"]) for e in admin_entries) == [
+        ("OLD001", None), ("PRV001", "priv_station"), ("PUB001", "pub_station")]
+
+
+def test_camera_lookup_helpers_first_owner_vs_any_owner():
+    """A camera listed under two stations (registry drift): the report rules
+    follow the FIRST owner, the set-based anon filters (highlights data,
+    detections, the hall of fame) pass it when ANY owner is public, and
+    ``camera_is_public_for_request`` would need ALL owners public."""
+    from auth import (
+        camera_owner, camera_owner_visible, public_camera_codes, public_host_keys,
+    )
+    from models import DashboardConfig
+
+    def _st(public: bool, *codes: str) -> dict:
+        return {"ip": "127.0.0.1", "label": "x", "ssh_user": "t", "public": public,
+                "cameras": [{"code": c, "cam_ip": "127.0.0.1"} for c in codes]}
+
+    cfg = DashboardConfig.model_validate({"stations": {
+        "priv": _st(False, "DUP001", "PRV001"),
+        "pub": _st(True, "DUP001", "PUB001"),
+    }})
+    assert camera_owner(cfg, "dup001")[0] == "priv"
+    assert camera_owner(cfg, "OLD001") == (None, None)
+    assert camera_owner_visible(cfg, "DUP001", anonymous=True) is False
+    assert camera_owner_visible(cfg, "DUP001", anonymous=False) is True
+    assert camera_owner_visible(cfg, "OLD001", anonymous=False) is False
+    assert public_camera_codes(cfg) == {"DUP001", "PUB001"}
+    assert public_host_keys(cfg) == {"pub"}

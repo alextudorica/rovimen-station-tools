@@ -3,17 +3,33 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#161b22">
 <title>ROVIMEN — Network Overview</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
+{% if ov_page == 'network' %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
       integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
       crossorigin="anonymous" />
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
         crossorigin="anonymous"></script>
+{% endif %}
 <script type="importmap">
 {
   "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
     "/static/dashboard-common.js":          "{{ url_for('static', filename='dashboard-common.js',          v=build_version) }}",
     "/static/dashboard-video-modal.js":     "{{ url_for('static', filename='dashboard-video-modal.js',     v=build_version) }}",
     "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}"
@@ -21,143 +37,210 @@
 }
 </script>
 <script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
+{#- Each page runs only its own module: the home page never downloads the map's. -#}
+{% if ov_page == 'home' %}
+<script type="module" src="{{ url_for('static', filename='dashboard-home.js', v=build_version) }}"></script>
+{% else %}
 <script type="module" src="{{ url_for('static', filename='dashboard-overview.js', v=build_version) }}"></script>
+{% endif %}
+<script type="module" src="{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}"></script>
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-video-modal.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-basket.css', v=build_version) }}">
 </head>
 <body>
 
 <div class="ov-header">
-  <a href="/" class="nav-logo">ROVIMEN</a>
-  <nav class="main-nav">
-    {% if nav_show('overview') %}<a href="/map" class="nav-tab active">Stations</a>{% endif %}
-    {% if nav_show('events') %}<a href="/events" class="nav-tab">Detections</a>{% endif %}
-    {% if nav_show('highlights') %}<a href="/highlights" class="nav-tab">Highlights</a>{% endif %}
-    {% if nav_show('showers') %}<a href="/showers" class="nav-tab">Showers</a>{% endif %}
-    <a href="/social" class="nav-tab nav-tab-admin" id="logo-dd-social" style="display:none">Social</a>
-    <a href="/admin" class="nav-tab nav-tab-admin" id="logo-dd-admin" style="display:none">Admin</a>
-    <button class="nav-tab" onclick="openAppPanel('about')">About</button>
-  </nav>
+  {#- One shell, two pages (routes/misc.py): ov_page 'home' at /, 'network'
+      at /network (coverage numbers, the map, live view, status table; /map
+      redirects there). Each renders only its own sections and loads only its
+      own script: dashboard-home.js on home, dashboard-overview.js on
+      /network. -#}
+  {% set nav_active = {'network': 'network'}.get(ov_page, '') %}{% include "_nav.html" %}
   <div id="ov-station-sel" class="ov-station-sel" style="display:none"></div>
-  <div style="margin-left:auto;display:flex;align-items:center;gap:14px">
-    <span id="utc-clock" class="hdr-clock"></span>
-    <div id="ov-auth"></div>
-  </div>
 </div>
 
-<div class="ov-main">
-  {% if show_hero %}
-  <div class="ov-hero" id="ov-hero">
-    <h1 class="ov-hero-title">ROVIMEN &mdash; GLOBAL METEOR NETWORK</h1>
-    <p class="ov-hero-text">A network of all-sky cameras across Romania and Germany, watching the night sky for meteors and fireballs as part of the Global Meteor Network. Explore the public data below.</p>
-  </div>
+<main class="ov-main" id="main">
+  {% if ov_page == 'home' %}
+  <section class="ov-hero" id="ov-hero" aria-labelledby="ov-hero-h">
+    <a class="ov-hero-eyebrow" href="https://globalmeteornetwork.org" target="_blank" rel="noopener">
+      <img src="{{ url_for('static', filename='img/gmn_sphere.png', v=build_version) }}" alt="" width="30" height="30" decoding="async">
+      <span>The Romanian branch of the <strong translate="no">Global Meteor Network</strong></span>
+    </a>
+    <div class="ov-hero-main">
+      <h1 class="ov-hero-title" id="ov-hero-h">
+        <img src="{{ url_for('static', filename='img/rovimen_logo.svg', v=build_version) }}" alt="ROVIMEN, Romanian Video Meteor Network" width="340" height="159" fetchpriority="high">
+      </h1>
+      <p class="ov-hero-text">Our video cameras watch the night sky for meteors, fireballs and other astronomical events. Explore the public data below.</p>
+    </div>
+    <div class="ov-credits">
+      <p class="ov-credit-label" id="ov-credit-collab">In collaboration with</p>
+      <a class="ov-credit-partner" href="https://astromania.org" target="_blank" rel="noopener" aria-describedby="ov-credit-collab">
+        <img src="{{ url_for('static', filename='img/astromania.png', v=build_version) }}" alt="the Astromania Association" width="216" height="22" loading="lazy" decoding="async"></a>
+      <p class="ov-credit-label" id="ov-credit-part">Participating</p>
+      <ul class="ov-credit-logos" aria-labelledby="ov-credit-part">
+        <li class="ov-credit-wide"><a href="https://www.astroclubul.ro/" target="_blank" rel="noopener">
+          <img src="{{ url_for('static', filename='img/astroclubul_bucuresti.png', v=build_version) }}" alt="Astroclubul București" width="158" height="22" loading="lazy" decoding="async"></a></li>
+        <li><img src="{{ url_for('static', filename='img/astroian_observatory.png', v=build_version) }}" alt="Astroian Observatory" width="77" height="42" loading="lazy" decoding="async"></li>
+        <li><a href="https://www.sternfreunde.berlin/" target="_blank" rel="noopener">
+          <img src="{{ url_for('static', filename='img/sternfreunde_berlin.png', v=build_version) }}" alt="Sternfreunde Berlin" width="44" height="46" loading="lazy" decoding="async"></a></li>
+        <li><img src="{{ url_for('static', filename='img/astroclubul_iasi.png', v=build_version) }}" alt="AstroClubul Iași" width="46" height="46" loading="lazy" decoding="async"></li>
+        <li><a href="https://povesticustele.wordpress.com/" target="_blank" rel="noopener">
+          <img src="{{ url_for('static', filename='img/povesti_cu_stele_emblem.png', v=build_version) }}" alt="Povești cu Stele" width="49" height="46" loading="lazy" decoding="async"></a></li>
+        <li><a href="http://stardustlc.wordpress.com/" target="_blank" rel="noopener">
+          <img src="{{ url_for('static', filename='img/zeta_aquarii_observatory.png', v=build_version) }}" alt="Zeta Aquarii Observatory" width="45" height="46" loading="lazy" decoding="async"></a></li>
+      </ul>
+    </div>
+  </section>
+  {% else %}
+  <h1 class="ov-page-title">Network overview</h1>
   {% endif %}
   <div class="ov-topbar">
-    <div class="ov-summary" id="ov-summary"></div>
+    <div class="ov-summary" id="ov-summary"><div class="ov-summary-loading">Loading…</div></div>
     <div id="ov-net-stats" class="ov-net-stats" style="display:none"></div>
   </div>
+  {% if ov_page == 'home' %}
+  {#- The coverage itself is on the map, on the Network overview. -#}
+  <a class="ov-cover-card" href="/network">
+    <svg class="ov-cover-ico" width="28" height="28" viewBox="0 0 28 28" fill="none" aria-hidden="true">
+      <circle cx="11" cy="14" r="8" stroke="currentColor" stroke-width="1.5" opacity=".55"/>
+      <circle cx="17" cy="14" r="8" stroke="currentColor" stroke-width="1.5"/>
+      <circle cx="14" cy="14" r="1.6" fill="currentColor"/>
+    </svg>
+    <span class="ov-cover-text">
+      <strong>See where the network watches the sky</strong>
+      <span>Coverage, camera fields of view and every station's status are on the Network overview map.</span>
+    </span>
+    <span class="ov-cover-go">Open the Network overview</span>
+  </a>
+  {% endif %}
+  {% if ov_page == 'network' %}
   <div id="map-wrap">
     <div id="map"></div>
     <div class="map-layer-ctrl map-overlay-ctrl">
-      <button class="fov-btn" id="ml-gmn" onclick="toggleGmnLayer(this)" title="GMN multi-station meteor orbits">GMN Orbits</button>
+      <button type="button" class="fov-btn" id="ml-gmn" aria-pressed="false" onclick="toggleGmnLayer(this)" title="GMN multi-station meteor orbits">GMN Orbits</button>
       <div id="gmn-date-row">
         <label for="gmn-date-input">Night</label>
-        <input type="date" id="gmn-date-input" oninput="onGmnDateChange(this.value)">
-      </div>
-      <div class="wx-row">
-        <button class="fov-btn" id="ml-wx" onclick="toggleWeatherLayer(this)" title="Radar cloud/precipitation overlay (RainViewer)">Clouds</button>
-        <div class="wx-inline" id="wx-inline">
-          <button id="wx-play" onclick="wxTogglePlay()" title="Play/pause animation">&#9654;</button>
-          <input type="range" id="wx-slider" min="0" max="0" value="0" oninput="wxSetFrame(+this.value)">
-          <span class="wx-time" id="wx-time"></span>
-        </div>
+        <input type="date" id="gmn-date-input" name="gmn-night" autocomplete="off" oninput="onGmnDateChange(this.value)">
       </div>
     </div>
     <div class="map-base-ctrl">
-      <button class="fov-btn map-layer-toggle" id="map-layer-toggle-btn" onclick="toggleLayerMenu()" title="Layers">&#9783;</button>
+      <button type="button" class="fov-btn map-layer-toggle" id="map-layer-toggle-btn" onclick="toggleLayerMenu()"
+              aria-label="Map layers" aria-expanded="false" aria-controls="map-layer-btns" title="Map layers"><span aria-hidden="true">&#9783;</span></button>
       <div class="map-layer-btns" id="map-layer-btns">
-        <button class="fov-btn active" id="ml-std"   onclick="switchMapLayer('std',this)">Standard</button>
-        <button class="fov-btn"        id="ml-topo"  onclick="switchMapLayer('topo',this)">Topo</button>
-        <button class="fov-btn"        id="ml-short" onclick="switchMapLayer('short',this)">Dark Mode</button>
-        <button class="fov-btn"        id="ml-lp"    onclick="toggleLpLayer(this)" title="Light Pollution overlay (Lorenz 2024)">Light Pollution</button>
+        <div class="map-seg" role="group" aria-label="Base map">
+          <button type="button" class="fov-btn active" id="ml-std"   aria-pressed="true"  onclick="switchMapLayer('std',this)">Standard</button>
+          <button type="button" class="fov-btn"        id="ml-topo"  aria-pressed="false" onclick="switchMapLayer('topo',this)">Topo</button>
+          <button type="button" class="fov-btn"        id="ml-sat"   aria-pressed="false" onclick="switchMapLayer('sat',this)">Satellite</button>
+          <button type="button" class="fov-btn"        id="ml-light" aria-pressed="false" onclick="switchMapLayer('light',this)">Light</button>
+          <button type="button" class="fov-btn"        id="ml-short" aria-pressed="false" onclick="switchMapLayer('short',this)">Dark Mode</button>
+        </div>
+        <button type="button" class="fov-btn" id="ml-lp" aria-pressed="false" onclick="toggleLpLayer(this)" title="Light Pollution overlay (Lorenz 2024)">Light Pollution</button>
       </div>
       <div class="map-brightness-row" id="brightness-row">
-        <label>Brightness</label>
-        <input type="range" id="map-brightness" min="10" max="100" value="50" oninput="setMapBrightness(this.value,true)">
+        <label for="map-brightness">Brightness</label>
+        <input type="range" id="map-brightness" name="map-brightness" min="10" max="100" value="50" oninput="setMapBrightness(this.value,true)">
       </div>
     </div>
     <div class="fov-control">
-      <button class="fov-btn" id="fov-toggle" onclick="toggleAllFov(this)">Show FOV</button>
-      <button class="fov-btn" data-cov="1" onclick="toggleCovLayer(1,this)">1 Stn</button>
-      <button class="fov-btn" data-cov="2" onclick="toggleCovLayer(2,this)">2 Stn</button>
-      <button class="fov-btn" data-cov="3" onclick="toggleCovLayer(3,this)">2+ Stn</button>
-      <button class="fov-btn active" onclick="setFovAlt(25,this)">25 km</button>
-      <button class="fov-btn"        onclick="setFovAlt(70,this)">70 km</button>
-      <button class="fov-btn"        onclick="setFovAlt(100,this)">100 km</button>
+      <div class="map-seg" role="group" aria-label="Fields of view and coverage">
+        <button type="button" class="fov-btn" id="fov-toggle" onclick="toggleAllFov(this)">Show FOV</button>
+        <button type="button" class="fov-btn" data-cov="1" aria-pressed="false" onclick="toggleCovLayer(1,this)">1 Stn</button>
+        <button type="button" class="fov-btn" data-cov="2" aria-pressed="false" onclick="toggleCovLayer(2,this)">2 Stn</button>
+        <button type="button" class="fov-btn" data-cov="3" aria-pressed="false" onclick="toggleCovLayer(3,this)">2+ Stn</button>
+      </div>
+      <div class="map-seg fov-alt-group" role="group" aria-label="Meteor altitude">
+        <button type="button" class="fov-btn active" aria-pressed="true"  onclick="setFovAlt(25,this)">25&nbsp;km</button>
+        <button type="button" class="fov-btn"        aria-pressed="false" onclick="setFovAlt(70,this)">70&nbsp;km</button>
+        <button type="button" class="fov-btn"        aria-pressed="false" onclick="setFovAlt(100,this)">100&nbsp;km</button>
+      </div>
+      <div class="map-seg" role="group" aria-label="Cameras at a point">
+        <button type="button" class="fov-btn" id="pick-point-btn" aria-pressed="false" onclick="togglePointPick()"
+                title="Then click a point on the map to list the cameras that see it, and open their footage for a time">Cameras at a point</button>
+      </div>
     </div>
     <div id="gmn-banner"></div>
     <div id="station-band">
       <div id="sb-inner"></div>
     </div>
   </div>
-  <div id="ov-live-bar" style="display:none;align-items:center;gap:12px;margin-bottom:12px">
-    <button class="ov-live-btn" id="ov-live-bar-btn" onclick="toggleLiveView()">Live View</button>
-  </div>
+  {% endif %}
+  {% if ov_page == 'home' %}
+  {# Home: hero, network numbers, the curated clips, then the latest plots. #}
+  {% include "_hall_of_fame.html" %}
+  {% endif %}
+  {% if ov_page == 'network' %}
+  {#- Live snapshots load only on request: the button, not the page load. -#}
+  <section class="ov-live-section" id="live" aria-labelledby="ov-live-h">
+    <h2 class="ov-section-h" id="ov-live-h">Live view</h2>
+    <div id="ov-live-bar" class="ov-live-bar">
+      <button type="button" class="ov-live-btn" id="ov-live-bar-btn" onclick="toggleLiveView()">View live snapshot of all cameras in the fleet</button>
+      <span class="muted" id="ov-live-bar-note"></span>
+    </div>
   <div class="ov-live" id="ov-live" style="display:none;margin-bottom:18px">
     <div class="ov-stacks-title" style="margin-bottom:12px">
-      Live Cameras <span class="muted" id="ov-live-count"></span>
+      <span class="muted" id="ov-live-count"></span>
       <span class="ov-zoom-row" style="margin-left:auto;display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)">
-        <span title="Smaller">&#9723;</span>
-        <input type="range" id="ov-live-zoom" min="120" max="420" value="160"
-               oninput="ovLiveUpdateZoom(this.value)" title="Thumbnail size"
+        <span aria-hidden="true">&#9723;</span>
+        <input type="range" id="ov-live-zoom" name="ov-live-zoom" min="120" max="840" value="160"
+               oninput="ovLiveUpdateZoom(this.value)" title="Thumbnail size" aria-label="Thumbnail size"
                style="width:120px;accent-color:var(--green);cursor:pointer">
-        <span title="Larger">&#9724;</span>
+        <span aria-hidden="true">&#9724;</span>
       </span>
     </div>
     <div id="ov-live-grid" class="ov-cam-grid"></div>
   </div>
+  </section>
+  {#- opened from the live grid and from the map's station band -#}
   <div id="ov-live-modal" class="ov-live-modal-wrap" aria-hidden="true"
+       role="dialog" aria-modal="true" aria-labelledby="ov-live-video-label"
        onclick="if(event.target===this)closeLiveModal()">
-    <div style="position:relative;max-width:90vw;max-height:90vh" onclick="event.stopPropagation()">
-      <video id="ov-live-video" controls autoplay style="max-width:90vw;max-height:85vh;border-radius:8px;background:#000"></video>
-      <div id="ov-live-video-label" style="text-align:center;color:var(--muted);font-size:12px;padding:6px 0;font-family:'SF Mono',monospace"></div>
+    <div class="ov-live-dialog" onclick="event.stopPropagation()">
+      <button type="button" class="ov-live-close" onclick="closeLiveModal()" aria-label="Close live view"><span aria-hidden="true">&#x2715;</span></button>
+      <img id="ov-live-still" alt="Latest FF maxpixel" class="ov-live-media" style="display:none">
+      <video id="ov-live-video" controls autoplay muted playsinline class="ov-live-media" style="display:none"></video>
+      <div id="ov-live-video-label" class="ov-live-label" translate="no"></div>
+      <div id="ov-live-status" class="ov-live-status" role="status" aria-live="polite"></div>
     </div>
   </div>
+  {% endif %}
+  {% if ov_page == 'home' %}
   <div class="ov-stacks" id="ov-stacks">
     <div class="ov-stacks-title">
-      Latest Plots and Data <span class="muted">last processed night per camera</span>
+      <h2 class="ov-section-h">Latest plots and data</h2> <span class="muted">last processed night per camera</span>
       <span style="display:flex;align-items:center;gap:8px;margin-left:auto">
-        <button class="ov-live-btn" id="ov-stacks-live-btn" onclick="toggleLiveView()" style="font-size:11px;padding:3px 10px">Live View</button>
         <span class="ov-zoom-row" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--muted)">
-          <span title="Smaller">&#9723;</span>
-          <input type="range" id="ov-zoom" min="120" max="420" value="160"
-                 oninput="ovUpdateZoom(this.value)" title="Camera card size"
+          <span aria-hidden="true">&#9723;</span>
+          <input type="range" id="ov-zoom" name="ov-zoom" min="120" max="840" value="160"
+                 oninput="ovUpdateZoom(this.value)" title="Camera card size" aria-label="Camera card size"
                  style="width:120px;accent-color:var(--blue);cursor:pointer">
-          <span title="Larger">&#9724;</span>
+          <span aria-hidden="true">&#9724;</span>
         </span>
       </span>
     </div>
     <div id="ov-plot-toggle-bar" class="ov-plot-toggle-bar" style="display:none"></div>
-    <div id="ov-stacks-grid"><div class="ov-stacks-loading">Loading stacks…</div></div>
+    <div id="ov-stacks-grid"><div class="ov-stacks-loading" role="status">Loading stacks…</div></div>
   </div>
+  {% endif %}
 
+  {% if ov_page == 'network' %}
   <div class="nw-section" id="nw-section">
-    <div class="nw-section-title">Network Status</div>
+    <h2 class="nw-section-title">Network status</h2>
     <div class="nw-section-sub">All stations &mdash; auto-refreshes every 30 s</div>
     <div class="nw-summary" id="nw-summary"></div>
     <div class="nw-table-wrap">
       <table class="nw-table" id="nw-table" aria-label="Station network status">
         <thead>
           <tr>
-            <th data-col="key"       onclick="nwSort('key')">Station</th>
-            <th data-col="online"    onclick="nwSort('online')">Online</th>
-            <th data-col="last_seen" onclick="nwSort('last_seen')"
-                title="When the dashboard last successfully polled this station.">Last polled</th>
-            <th data-col="cpu"       onclick="nwSort('cpu')">CPU %</th>
-            <th data-col="ram"       onclick="nwSort('ram')">RAM %</th>
-            <th data-col="temp"      onclick="nwSort('temp')">Temp</th>
-            <th data-col="disk"      onclick="nwSort('disk')">Disk %</th>
-            <th data-col="cameras"   style="cursor:default">Cameras</th>
+            <th scope="col" data-col="key"       aria-sort="none" onclick="nwSort('key')" tabindex="0">Station</th>
+            <th scope="col" data-col="online"    aria-sort="none" onclick="nwSort('online')" tabindex="0">Online</th>
+            <th scope="col" data-col="last_seen" aria-sort="none" onclick="nwSort('last_seen')" tabindex="0"
+                title="When the dashboard last heard from this station.">Last contact</th>
+            <th scope="col" data-col="cpu"       aria-sort="none" onclick="nwSort('cpu')" tabindex="0">CPU %</th>
+            <th scope="col" data-col="ram"       aria-sort="none" onclick="nwSort('ram')" tabindex="0">RAM %</th>
+            <th scope="col" data-col="temp"      aria-sort="none" onclick="nwSort('temp')" tabindex="0">Temp</th>
+            <th scope="col" data-col="disk"      aria-sort="none" onclick="nwSort('disk')" tabindex="0">Disk %</th>
+            <th scope="col" data-col="cameras"   style="cursor:default">Cameras</th>
           </tr>
         </thead>
         <tbody id="nw-tbody">
@@ -168,30 +251,33 @@
     <div class="nw-cards" id="nw-cards">
       <div class="nw-loading">Loading&hellip;</div>
     </div>
-    <div class="nw-refresh-info">Last fetched: <span id="nw-last-fetch">&#8212;</span></div>
+    <div class="nw-refresh-info">Last fetched: <span id="nw-last-fetch" translate="no">&#8212;</span></div>
   </div>
-</div>
+  {% endif %}
+</main>
 
-<div id="app-panel" class="app-panel" onclick="appPanelClose(event)">
+<div id="app-panel" class="app-panel" role="dialog" aria-modal="true" aria-labelledby="app-panel-title" aria-hidden="true" onclick="appPanelClose(event)">
   <div class="app-panel-inner">
     <div class="app-panel-header">
       <span id="app-panel-title" class="app-panel-title"></span>
-      <button class="cam-modal-close" onclick="appPanelClose(null)">&#x2715;</button>
+      <button type="button" class="cam-modal-close" onclick="appPanelClose(null)" aria-label="Close"><span aria-hidden="true">&#x2715;</span></button>
     </div>
     <div id="app-panel-body"></div>
   </div>
 </div>
-<!-- Plot zoom modal -->
-<div class="ov-plot-modal" id="ov-plot-modal" onclick="if(event.target===this)ovPlotClose()">
+{% if ov_page == 'home' %}
+<!-- Plot zoom modal (the latest plots' cards) -->
+<div class="ov-plot-modal" id="ov-plot-modal" role="dialog" aria-modal="true" aria-labelledby="ov-plot-modal-title" aria-hidden="true" onclick="if(event.target===this)ovPlotClose()">
   <div class="ov-plot-modal-inner">
     <div class="ov-plot-modal-hdr">
       <span class="ov-plot-modal-title" id="ov-plot-modal-title"></span>
-      <a id="ov-plot-modal-dl" class="ov-plot-btn" download style="font-size:11px">&#8595; Download</a>
-      <button class="ov-plot-modal-close" onclick="ovPlotClose()">&#10005;</button>
+      <a id="ov-plot-modal-dl" class="ov-plot-btn" download style="font-size:11px"><span aria-hidden="true">&#8595;</span> Download</a>
+      <button type="button" class="ov-plot-modal-close" onclick="ovPlotClose()" aria-label="Close"><span aria-hidden="true">&#10005;</span></button>
     </div>
     <img id="ov-plot-modal-img" class="ov-plot-modal-img" alt="Plot" decoding="async">
   </div>
 </div>
+{% endif %}
 
 <script>
 // Register the Service Worker for shell caching. Skip on plain HTTP — SW
@@ -204,7 +290,12 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
 }
 </script>
 
+{% if ov_page == 'network' %}
 <!-- GMN clip modal — shared VideoModal component instance -->
 <div id="gmn-clip-modal-container"></div>
+{% endif %}
+<!-- Hall-of-fame clip modal — own VideoModal instance (dashboard-hof.js) -->
+<div id="hof-modal-container"></div>
+  {% include "_license_footer.html" %}
 </body>
 </html>

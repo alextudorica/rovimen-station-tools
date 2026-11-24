@@ -4,14 +4,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>ROVIMEN — Meteor Detections</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
 <script type="importmap">
 {
   "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
     "/static/dashboard-common.js":          "{{ url_for('static', filename='dashboard-common.js',          v=build_version) }}",
     "/static/dashboard-video-modal.js":     "{{ url_for('static', filename='dashboard-video-modal.js',     v=build_version) }}",
     "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}",
-    "/static/dashboard-grid.js":            "{{ url_for('static', filename='dashboard-grid.js',            v=build_version) }}"
+    "/static/dashboard-grid.js":            "{{ url_for('static', filename='dashboard-grid.js',            v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js":     "{{ url_for('static', filename='dashboard-time-picker.js',     v=build_version) }}"
   }
 }
 </script>
@@ -20,116 +32,121 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-events.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-grid.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-video-modal.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-basket.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-multi-det-modal.css', v=build_version) }}">
 </head>
 <body>
 
 <div class="ev-header">
-  <a href="/" class="nav-logo">ROVIMEN</a>
-  <nav class="main-nav">
-    {% if nav_show('overview') %}<a href="/map" class="nav-tab">Stations</a>{% endif %}
-    {% if nav_show('events') %}<a href="/events" class="nav-tab active">Detections</a>{% endif %}
-    {% if nav_show('highlights') %}<a href="/highlights" class="nav-tab">Highlights</a>{% endif %}
-    {% if nav_show('showers') %}<a href="/showers" class="nav-tab">Showers</a>{% endif %}
-    <a href="/social" class="nav-tab nav-tab-admin" id="logo-dd-social" style="display:none">Social</a>
-    <a href="/admin" class="nav-tab nav-tab-admin" id="logo-dd-admin" style="display:none">Admin</a>
-    <button class="nav-tab" onclick="openAppPanel('about')">About</button>
-  </nav>
+  {% set nav_active = 'events' %}{% include "_nav.html" %}
 </div>
 
-<div class="ev-tabs">
-  <button class="ev-tab active" id="tab-btn-detections" onclick="switchTab('detections')">All Detections</button>
-  <button class="ev-tab" id="tab-btn-events" onclick="switchTab('events')">Multi-Station Events</button>
-  <button class="ev-tab" id="tab-btn-grid" onclick="switchTab('grid')">Grid</button>
-  <button class="ev-tab" id="tab-btn-sortfilter" onclick="switchTab('sortfilter')">Sort &amp; Filter</button>
+<div class="ev-tabs" role="tablist" aria-label="Detection views">
+  <button type="button" class="ev-tab active" id="tab-btn-detections" role="tab" aria-selected="true" aria-controls="pane-detections" tabindex="0" onclick="switchTab('detections')">All Detections</button>
+  <button type="button" class="ev-tab" id="tab-btn-events" role="tab" aria-selected="false" aria-controls="pane-events" tabindex="-1" onclick="switchTab('events')">Multi-Station Events</button>
+  <button type="button" class="ev-tab" id="tab-btn-grid" role="tab" aria-selected="false" aria-controls="pane-grid" tabindex="-1" onclick="switchTab('grid')">Grid</button>
+  <button type="button" class="ev-tab" id="tab-btn-sortfilter" role="tab" aria-selected="false" aria-controls="pane-sortfilter" tabindex="-1" onclick="switchTab('sortfilter')">Sort &amp; Filter</button>
 </div>
 
 <div class="ev-filter-bar">
   <div class="ev-filter-group">
-    <label for="ev-date">Night</label>
-    <select id="ev-date" class="ev-date"></select>
+    <label for="ev-date" class="ev-sr-only">Night</label>
+    {#- the moon is drawn inside the night picker (twilight-slider.js fills .js-moon-icon) -#}
+    <span class="ev-night-wrap"><select id="ev-date" class="ev-date"></select><span class="ev-night-moon js-moon-icon" aria-hidden="true"></span></span>
   </div>
   <div class="ev-filter-group ev-filter-group--time">
-    <label>Time</label>
+    <label for="ev-time-start" class="ev-sr-only">Time</label>
     <span class="ev-time-label" id="ev-time-label">
-      <input type="text" id="ev-time-start" class="ev-time-input" maxlength="5"
+      <input type="text" id="ev-time-start" name="ev-time-start" class="ev-time-input" maxlength="5"
              value="12:00" autocomplete="off" spellcheck="false"
+             aria-label="Start time (UTC, HH:MM)"
              onchange="evTimeInputChange('start')"
              onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
-             onfocus="this.select()">
-      <span class="ev-time-arrow">&rarr;</span>
-      <input type="text" id="ev-time-end" class="ev-time-input" maxlength="5"
+             onfocus="if(!this.readOnly)this.select()">
+      <span class="ev-time-arrow" aria-hidden="true">&rarr;</span>
+      <input type="text" id="ev-time-end" name="ev-time-end" class="ev-time-input" maxlength="5"
              value="12:00" autocomplete="off" spellcheck="false"
+             aria-label="End time (UTC, HH:MM)"
              onchange="evTimeInputChange('end')"
              onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}"
-             onfocus="this.select()">
+             onfocus="if(!this.readOnly)this.select()">
       <span class="ev-time-suffix">UTC</span>
     </span>
-    <span class="ev-moon-icon" id="ev-moon-icon" title=""></span>
+    <button type="button" class="ev-time-reset" id="ev-time-reset" onclick="evResetTimeRange()"
+            title="Show the whole night again (the time window otherwise stays when you switch night)">Whole night</button>
+    <span class="ev-moon-icon" id="ev-moon-icon" title="" aria-hidden="true"></span>
     <div class="ev-slider-wrap">
       <input type="range" id="ev-slider-start" min="0" max="1440" value="0"
+             aria-label="Start of time window"
              oninput="evSliderInput('start')">
       <input type="range" id="ev-slider-end" min="0" max="1440" value="1440"
+             aria-label="End of time window"
              oninput="evSliderInput('end')">
     </div>
   </div>
   <div class="ev-filter-group">
-    <label>Pointing</label>
-    <svg width="56" height="56" viewBox="0 0 72 72" class="ev-compass">
+    <span class="ev-filter-label ev-sr-only" id="ev-pointing-label">Pointing</span>
+    <svg width="56" height="56" viewBox="0 0 72 72" class="ev-compass" role="group" aria-labelledby="ev-pointing-label">
       <circle cx="36" cy="36" r="30" fill="none" stroke="var(--border)" stroke-width="1"/>
       <path class="ev-compass-slice" data-dir="N" onclick="evCompassClick('N')"
+            role="button" tabindex="0" aria-pressed="false" aria-label="Cameras pointing north"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();evCompassClick('N');}"
             d="M36 36 L14.8 14.8 A30 30 0 0 1 57.2 14.8 Z"/>
       <path class="ev-compass-slice" data-dir="E" onclick="evCompassClick('E')"
+            role="button" tabindex="0" aria-pressed="false" aria-label="Cameras pointing east"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();evCompassClick('E');}"
             d="M36 36 L57.2 14.8 A30 30 0 0 1 57.2 57.2 Z"/>
       <path class="ev-compass-slice" data-dir="S" onclick="evCompassClick('S')"
+            role="button" tabindex="0" aria-pressed="false" aria-label="Cameras pointing south"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();evCompassClick('S');}"
             d="M36 36 L57.2 57.2 A30 30 0 0 1 14.8 57.2 Z"/>
       <path class="ev-compass-slice" data-dir="W" onclick="evCompassClick('W')"
+            role="button" tabindex="0" aria-pressed="false" aria-label="Cameras pointing west"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();evCompassClick('W');}"
             d="M36 36 L14.8 57.2 A30 30 0 0 1 14.8 14.8 Z"/>
-      <circle cx="36" cy="36" r="3" fill="var(--border)" pointer-events="none"/>
-      <text class="ev-compass-lbl" x="36" y="9"  text-anchor="middle">N</text>
-      <text class="ev-compass-lbl" x="64" y="38" text-anchor="middle">E</text>
-      <text class="ev-compass-lbl" x="36" y="67" text-anchor="middle">S</text>
-      <text class="ev-compass-lbl" x="8"  y="38" text-anchor="middle">W</text>
+      <circle cx="36" cy="36" r="3" fill="var(--border)" pointer-events="none" aria-hidden="true"/>
+      <text aria-hidden="true" class="ev-compass-lbl" x="36" y="9"  text-anchor="middle">N</text>
+      <text aria-hidden="true" class="ev-compass-lbl" x="64" y="38" text-anchor="middle">E</text>
+      <text aria-hidden="true" class="ev-compass-lbl" x="36" y="67" text-anchor="middle">S</text>
+      <text aria-hidden="true" class="ev-compass-lbl" x="8"  y="38" text-anchor="middle">W</text>
     </svg>
   </div>
+  {#- "Show hidden (N)" in each tab's toolbar: filled by dashboard-events.js
+      (dashboard-hidden.js mountToggle) for sessions that may hide; the
+      Sort & Filter and Grid tabs have their own toolbars, so their own slots. -#}
+  <div class="ev-filter-group hd-slot" id="ev-hidden-slot" hidden></div>
   <div class="ev-zoom-row" style="margin-left:auto">
-    <span title="Smaller">&#9723;</span>
-    <input type="range" id="ev-zoom" min="80" max="240" value="110"
-           oninput="evUpdateZoom(this.value)" title="Card size">
-    <span title="Larger">&#9724;</span>
+    <span aria-hidden="true">&#9723;</span>
+    <input type="range" id="ev-zoom" min="80" max="480" value="110"
+           oninput="evUpdateZoom(this.value)" title="Card size" aria-label="Card size">
+    <span aria-hidden="true">&#9724;</span>
   </div>
 </div>
 
-<div id="pane-detections" class="ev-pane active">
+<div id="pane-detections" role="tabpanel" aria-labelledby="tab-btn-detections" class="ev-pane active">
   <div class="ev-main" id="detections-main">
-    <div class="ev-loading"><div class="ev-spinner"></div> Loading detections…</div>
+    <div class="ev-loading" role="status"><div class="ev-spinner" aria-hidden="true"></div> Loading detections…</div>
   </div>
 </div>
 
-<div id="pane-events" class="ev-pane">
+<div id="pane-events" role="tabpanel" aria-labelledby="tab-btn-events" class="ev-pane">
   <div class="ev-main" id="events-main">
-    <div class="ev-loading"><div class="ev-spinner"></div> Loading events…</div>
+    <div class="ev-loading" role="status"><div class="ev-spinner" aria-hidden="true"></div> Loading events…</div>
   </div>
 </div>
 
-<div id="pane-sortfilter" class="ev-pane">
+<div id="pane-sortfilter" role="tabpanel" aria-labelledby="tab-btn-sortfilter" class="ev-pane">
   <div class="sf-toolbar">
-    <div class="sf-group">
-      <label for="sf-from">From</label>
-      <input type="date" id="sf-from" onchange="sfReload()">
+    <div class="sf-group sf-group--dates">
+      <label for="sf-from" class="ev-sr-only">From</label>
+      <input type="date" id="sf-from" name="sf-from" onchange="sfReload()">
+      <span class="ev-time-arrow" aria-hidden="true">&rarr;</span>
+      <label for="sf-to" class="ev-sr-only">To</label>
+      <input type="date" id="sf-to" name="sf-to" onchange="sfReload()">
     </div>
-    <div class="sf-group">
-      <label for="sf-to">To</label>
-      <input type="date" id="sf-to" onchange="sfReload()">
-    </div>
-    <div class="sf-group" style="flex:1;min-width:180px">
-      <label>Showers</label>
-      <div class="sf-chips" id="sf-shower-chips">
-        <span style="font-size:11px;color:var(--muted)">Load a range to see showers</span>
-      </div>
-    </div>
-    <div class="sf-group">
-      <label for="sf-sort">Sort by</label>
+    {#- "Sort" sits inside the picker as a muted label, like the Grid's View / Bucket -#}
+    <div class="sf-group sf-group--sort">
+      <label for="sf-sort">Sort</label>
       <select id="sf-sort" onchange="sfRender()">
         <option value="time_desc">Time (newest first)</option>
         <option value="time_asc">Time (oldest first)</option>
@@ -139,28 +156,36 @@
         <option value="shower">Shower</option>
       </select>
     </div>
+    <div class="sf-group hd-slot" id="sf-hidden-slot" hidden></div>
     <div class="ev-zoom-row" style="margin-left:auto">
-      <span title="Smaller">&#9723;</span>
-      <input type="range" id="sf-zoom" min="80" max="240" value="110"
-             oninput="evUpdateZoom(this.value)" title="Card size">
-      <span title="Larger">&#9724;</span>
+      <span aria-hidden="true">&#9723;</span>
+      <input type="range" id="sf-zoom" min="80" max="480" value="110"
+             oninput="evUpdateZoom(this.value)" title="Card size" aria-label="Card size">
+      <span aria-hidden="true">&#9724;</span>
+    </div>
+    <div class="sf-group sf-group--showers">
+      <span class="sf-group-label" id="sf-showers-label">Showers</span>
+      <div class="sf-chips" id="sf-shower-chips" role="group" aria-labelledby="sf-showers-label">
+        <span class="sf-chips-empty">Load a range to see showers…</span>
+      </div>
     </div>
   </div>
   <div class="ev-main" id="sortfilter-main">
-    <div class="ev-loading"><div class="ev-spinner"></div> Pick a date range to load detections…</div>
+    <div class="ev-loading" role="status"><div class="ev-spinner" aria-hidden="true"></div> Pick a date range to load detections…</div>
   </div>
 </div>
 
-<div id="pane-grid" class="ev-pane">
+<div id="pane-grid" role="tabpanel" aria-labelledby="tab-btn-grid" class="ev-pane">
   <div class="grid-toolbar">
-    <div class="grid-group">
+    {#- "View" / "Bucket" sit inside their pickers as muted labels (as on the Video DB card) -#}
+    <div class="grid-group grid-group--mode">
       <label for="grid-mode">View</label>
       <select id="grid-mode">
         <option value="footage" selected>All footage</option>
         <option value="detections">Detections only</option>
       </select>
     </div>
-    <div class="grid-group">
+    <div class="grid-group grid-group--bucket">
       <label for="grid-bucket">Bucket</label>
       <select id="grid-bucket">
         <option value="1">1 min</option>
@@ -172,26 +197,43 @@
         <option value="60">60 min</option>
       </select>
     </div>
-    <div class="grid-group">
-      <label for="grid-from">From (UTC)</label>
-      <input type="text" id="grid-from" maxlength="5" placeholder="--:--"
+    <div class="grid-group grid-group--time">
+      <label for="grid-from" class="ev-sr-only">From (UTC)</label>
+      <input type="text" id="grid-from" name="grid-from" class="ev-time-field" maxlength="5" placeholder="--:--"
              autocomplete="off" spellcheck="false"
              onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}">
-    </div>
-    <div class="grid-group">
-      <label for="grid-to">To (UTC)</label>
-      <input type="text" id="grid-to" maxlength="5" placeholder="--:--"
+      <span class="ev-time-arrow" aria-hidden="true">&rarr;</span>
+      <label for="grid-to" class="ev-sr-only">To (UTC)</label>
+      <input type="text" id="grid-to" name="grid-to" class="ev-time-field" maxlength="5" placeholder="--:--"
              autocomplete="off" spellcheck="false"
              onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur();}">
+      <span class="grid-utc">UTC</span>
     </div>
-    <div class="grid-hint">
-      All footage: cameras down, time across — every clip in the window (capped to
-      ~5 min). Set a start time to inspect an event, including cameras that never
-      triggered a detection. Continuous video is kept ~2 days.
+    <button type="button" id="grid-toggle-other" class="grid-btn" aria-pressed="false"
+            title="Show cameras outside Romania/Moldova (e.g. Berlin)">Other stations</button>
+    <div id="grid-cam-filter" class="grid-cam-filter" hidden>
+      <span class="grid-cam-filter-text"></span>
+      <button type="button" id="grid-cam-filter-clear" class="grid-btn" title="Show every camera again">Show all</button>
     </div>
+    <div class="grid-group hd-slot" id="grid-hidden-slot" hidden></div>
+    <div class="grid-select-controls">
+      <button type="button" id="grid-select-toggle" class="grid-btn" aria-pressed="false"
+              title="Pick clips across nights, stations and detections to view together">Select</button>
+      <button type="button" id="grid-view-selected" class="grid-btn" style="display:none" disabled
+              title="Open the selected clips together in the synchronized viewer">View selected (0)</button>
+      <button type="button" id="grid-clear-selected" class="grid-btn" style="display:none" disabled
+              title="Clear the current selection">Clear</button>
+    </div>
+    <div class="grid-size-row">
+      <span aria-hidden="true">&#9723;</span>
+      <label for="grid-size" class="ev-sr-only">Thumbnail size</label>
+      <input type="range" id="grid-size" name="grid-size" min="64" max="560" value="64" step="4" title="Thumbnail size">
+      <span aria-hidden="true">&#9724;</span>
+    </div>
+    <div class="grid-hint"></div>
   </div>
   <div class="ev-main" id="grid-main">
-    <div class="ev-loading"><div class="ev-spinner"></div> Pick a night to load the grid…</div>
+    <div class="ev-loading" role="status"><div class="ev-spinner" aria-hidden="true"></div> Pick a night to load the grid…</div>
   </div>
 </div>
 
@@ -200,43 +242,48 @@
 <!-- Single-clip modal — single-video mode for individual detections -->
 <div id="ev-single-modal-container"></div>
 
-<!-- Compilation cart drawer + floating button (admin-only, hidden until first add) -->
-<button class="comp-fab empty" id="comp-fab" onclick="compCartToggleDrawer()" style="display:none">
-  <span>&#127916;</span> Compilation <span class="comp-fab-count" id="comp-fab-count">0</span>
+<!-- Compilation cart (admin-only). dashboard-events.js moves the button into
+     the header's #nav-carts slot; the drawer opens like the basket panel. -->
+<button type="button" class="comp-fab hc nav-cart-btn empty" id="comp-fab" onclick="compCartToggleDrawer()" style="display:none"
+        aria-controls="comp-drawer" aria-expanded="false" aria-label="Compilation cart" title="Compilation cart">
+  <svg class="nav-cart-ico" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M7 5v14M17 5v14M3 9.5h4M3 14.5h4M17 9.5h4M17 14.5h4"/></svg>
+  <span class="comp-fab-count nav-cart-badge" id="comp-fab-count">0</span>
 </button>
-<aside class="comp-drawer" id="comp-drawer" aria-hidden="true">
+<aside class="comp-drawer nav-cart-panel" id="comp-drawer" aria-hidden="true" aria-labelledby="comp-drawer-title" inert>
+  <div class="nav-cart-grab" aria-hidden="true"></div>
+  <div class="nav-cart-switch" hidden></div>
   <div class="comp-drawer-hdr">
-    <h3>Compilation cart</h3>
-    <button class="comp-drawer-close" onclick="compCartToggleDrawer()">Close</button>
+    <h3 id="comp-drawer-title">Compilation cart</h3>
+    <button type="button" class="comp-drawer-close" onclick="compCartToggleDrawer()" aria-label="Close compilation cart" title="Close">&#10005;</button>
   </div>
   <div class="comp-drawer-body" id="comp-drawer-body"></div>
   <div class="comp-progress" id="comp-progress" style="display:none"></div>
   <div class="comp-drawer-foot" id="comp-drawer-foot">
     <label>Title
-      <input type="text" id="comp-title" placeholder="ROVIMEN Weekly · 2026-W19" maxlength="120">
+      <input type="text" id="comp-title" name="comp-title" placeholder="ROVIMEN Weekly · 2026-W19…" maxlength="120" autocomplete="off">
     </label>
     <label>Schedule for (optional)
-      <input type="datetime-local" id="comp-schedule">
+      <input type="datetime-local" id="comp-schedule" name="comp-schedule">
     </label>
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap" id="comp-yt-row">
       <label style="display:flex;align-items:center;gap:6px;font-size:12px;text-transform:none;letter-spacing:0;color:var(--text)" id="comp-yt-label">
         <input type="checkbox" id="comp-yt-upload" onchange="compCartYtToggle()">
         <span>Upload to YouTube</span>
       </label>
-      <select id="comp-yt-privacy" disabled
+      <select id="comp-yt-privacy" name="comp-yt-privacy" aria-label="YouTube privacy" disabled
               style="background:var(--card);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:11px;font-family:inherit">
         <option value="unlisted">Unlisted</option>
         <option value="private">Private</option>
         <option value="public">Public</option>
       </select>
-      <span id="comp-yt-warn" style="font-size:10px;color:#f59e0b;display:none"></span>
+      <span id="comp-yt-warn" style="font-size:10px;color:#f59e0b;display:none" aria-live="polite"></span>
     </div>
     <div class="comp-drawer-actions">
       <button class="comp-secondary" onclick="compCartClear()" type="button">Clear cart</button>
       <button class="comp-build-btn" id="comp-build-btn" onclick="compCartBuild()" type="button">Build now</button>
     </div>
     <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--muted)">
-      <span id="comp-summary">0 clips</span>
+      <span id="comp-summary" class="comp-summary">0 clips</span>
       <button class="comp-secondary" onclick="compCartShowList()" type="button" style="padding:3px 8px;font-size:10px">Past builds</button>
     </div>
   </div>
@@ -264,5 +311,6 @@ if ('serviceWorker' in navigator && location.protocol === 'https:') {
     <div id="app-panel-body"></div>
   </div>
 </div>
+  {% include "_license_footer.html" %}
 </body>
 </html>

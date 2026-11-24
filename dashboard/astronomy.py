@@ -23,10 +23,10 @@ from pathlib import Path
 def _compute_build_version() -> str:
     """Return a short Git SHA used as a cache-busting query for static assets.
 
-    Falls back to a file-mtime tag from one of the deployed JS bundles when
-    git metadata is not available (e.g. a stripped-down Docker image).
-    Picks the newest mtime across the known bundles so the version flips
-    whenever the deploy rsync touches any of them. Computed once per
+    Falls back to a file-mtime tag from the deployed static assets when git
+    metadata is not available (the VPS install has none). Picks the newest
+    mtime under static/ so the version flips whenever a deploy changes any
+    asset. Computed once per
     process so request handling stays free of subprocess overhead.
     """
     try:
@@ -41,31 +41,13 @@ def _compute_build_version() -> str:
             return sha
     except Exception:
         pass
-    # mtime fallback: any of the shipped bundles will do; pick the newest
-    # so a deploy that only updates one of them still bumps the tag.
+    # mtime fallback: the newest file under static/. Every asset counts, not
+    # a hand-kept list: the deploy rsync rewrites only files whose content
+    # changed (it no longer bumps every mtime), so an asset missing from a
+    # list could change without moving the tag and clients would keep their
+    # stale copy for the 7-day cache lifetime.
     static_dir = Path(__file__).parent / "static"
-    candidates = [
-        static_dir / "dashboard-station.js",
-        static_dir / "dashboard-common.js",
-        static_dir / "dashboard-overview.js",
-        static_dir / "dashboard-rms.js",
-        static_dir / "dashboard-vdb.js",
-        static_dir / "dashboard-archive.js",
-        static_dir / "dashboard-sysadmin.js",
-        static_dir / "dashboard-highlights.js",
-        static_dir / "dashboard-events.js",
-        static_dir / "dashboard-video-modal.js",
-        static_dir / "dashboard-multi-det-modal.js",
-        static_dir / "dashboard-dome-webgl.js",
-        static_dir / "twilight-slider.js",
-        static_dir / "dashboard-showers.js",
-        static_dir / "dashboard-showers.css",
-        static_dir / "dashboard.css",
-        static_dir / "dashboard-overview.css",
-        static_dir / "dashboard-common.js",
-        static_dir / "dashboard-video-modal.css",
-        static_dir / "dashboard-multi-det-modal.css",
-    ]
+    candidates = [p for p in static_dir.rglob("*") if p.is_file()] if static_dir.is_dir() else []
     mtimes = [int(p.stat().st_mtime) for p in candidates if p.exists()]
     if mtimes:
         return str(max(mtimes))
@@ -78,6 +60,48 @@ BUILD_VERSION: str = _compute_build_version()
 # ---------------------------------------------------------------------------
 # Twilight computation (pure-Python, no ephem dependency)
 # ---------------------------------------------------------------------------
+
+# The fleet runs RMS in continuous_capture mode: it switches the cameras to
+# night mode, and records meteors, while the sun is below -9°
+# (RMS/CaptureModeSwitcher.py SWITCH_HORIZON_DEG). Colour capture keeps
+# recording until 30 min after RMS's last FF file (color_capture.py
+# ff_idle_timeout_minutes), so footage runs from the evening -9° to 30 min
+# past the morning -9°. Checked on gmnro20 (Brăila) and gmnro22 (Ferigile),
+# night of 2026-10-20: first chunk within 2 min of -9°, last ~31 min after it.
+CAPTURE_HORIZON = -9.0
+COLOUR_TAIL_MIN = 30
+
+
+def capture_window(lat: float, lon: float, date_str: str) -> tuple[int, int] | None:
+    """Footage window for the night of *date_str*: evening start and next-
+    morning end as UTC minutes of day; None when the sun never crosses -9°
+    (polar day / night)."""
+    tw = _compute_twilight(lat, lon, date_str, horizon=CAPTURE_HORIZON)
+    start, rise = tw.get("sunset_min"), tw.get("sunrise_min")
+    if start is None or rise is None or start == rise:
+        return None
+    return start, (rise + COLOUR_TAIL_MIN) % 1440
+
+
+def _noon_anchored(minute: int) -> int:
+    """Minutes since 12:00 UTC, so a night's evening sorts before its morning."""
+    return (minute - 720) % 1440
+
+
+def network_capture_window(windows: dict[str, tuple[int, int]]) -> dict | None:
+    """The fleet's capture window for one night from per-station windows
+    (host_key -> (start_min, end_min)): the earliest start and the latest end,
+    compared on the noon-to-noon axis. None when no station has a window."""
+    if not windows:
+        return None
+    first = min(windows, key=lambda k: _noon_anchored(windows[k][0]))
+    last = max(windows, key=lambda k: _noon_anchored(windows[k][1]))
+    return {
+        "capture_start_min": windows[first][0], "capture_end_min": windows[last][1],
+        "earliest_station": first, "latest_station": last,
+        "station_count": len(windows),
+    }
+
 
 @functools.lru_cache(maxsize=4096)
 def _compute_twilight(lat: float, lon: float, date_str: str, horizon: float = -18.0) -> dict:

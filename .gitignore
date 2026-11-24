@@ -51,5 +51,5 @@ node_modules/
 *.swp
 *.sync-conflict-*
 
-# Celestial dome fleet registry (describes your own stations)
-celestial_dome_stations.json
+# The bundle verification key is public by design
+!deployment/bundle_signing_pub.pem

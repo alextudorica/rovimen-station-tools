@@ -16,6 +16,8 @@ import sys
 from datetime import datetime, date, timezone
 from pathlib import Path
 
+from atomic_write import write_atomic
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -86,9 +88,8 @@ def main() -> None:
         "scanned_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
-    tmp = args.output.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(payload, separators=(",", ":")))
-    tmp.replace(args.output)
+    write_atomic(args.output, json.dumps(payload, separators=(",", ":")),
+                 tmp=args.output.with_suffix(".json.tmp"))
     logger.info("wrote %s (%d entries)", args.output, len(counts))
 
 

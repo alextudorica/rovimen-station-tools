@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#161b22">
+<title>ROVIMEN — Fireball alerts</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
+<script type="importmap">
+{
+  "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
+    "/static/dashboard-video-modal.js": "{{ url_for('static', filename='dashboard-video-modal.js', v=build_version) }}",
+    "/static/dashboard-common.js": "{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"
+  }
+}
+</script>
+<script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
+<script type="module" src="{{ url_for('static', filename='dashboard-alerts.js', v=build_version) }}"></script>
+<style>
+.al-main{max-width:720px;margin:24px auto;padding:0 16px}
+.al-main h1{font-size:22px;margin:0 0 6px}
+.al-lead{color:var(--muted);margin:0 0 20px;line-height:1.5}
+.al-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px 18px;margin-bottom:14px}
+.al-card h2{font-size:16px;margin:0 0 6px}
+.al-card p{margin:0 0 10px;color:var(--muted);line-height:1.5}
+.al-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.al-row input[type=email]{flex:1 1 240px;background:var(--bg);border:1px solid var(--border);color:var(--text);
+  font:inherit;padding:8px 10px;border-radius:6px}
+.al-status{font-size:13px;margin-top:8px;min-height:1.2em}
+.al-status.ok{color:var(--green)}.al-status.err{color:var(--red)}
+.al-off{color:var(--muted);font-style:italic}
+/* .hc sets display, which beats the [hidden] attribute */
+.al-main [hidden]{display:none}
+</style>
+</head>
+<body>
+
+<div class="ov-header">
+  {% set nav_active = 'alerts' %}{% include "_nav.html" %}
+</div>
+
+<main class="al-main" id="main">
+  <h1>Fireball alerts</h1>
+  <p class="al-lead">When several ROVIMEN cameras see the same bright fireball, the network confirms it
+    within about half a minute and sends an alert: the time, the ground track map, the cameras that saw
+    it and, later, the clips and the automated trajectory. Choose where you want them.</p>
+
+  <section class="al-card">
+    <h2>Telegram</h2>
+    {% if telegram_url %}
+    <p>Join the ROVIMEN fireball channel; Telegram notifies you of every post.</p>
+    <a class="hc hc-primary" href="{{ telegram_url }}" target="_blank" rel="noopener">Join on Telegram</a>
+    {% else %}<p class="al-off">The Telegram channel is not set up yet.</p>{% endif %}
+  </section>
+
+  <section class="al-card">
+    <h2>Discord</h2>
+    {% if discord_url %}
+    <p>Join the ROVIMEN Discord server; alerts arrive in the fireball channel.</p>
+    <a class="hc hc-primary" href="{{ discord_url }}" target="_blank" rel="noopener">Join on Discord</a>
+    {% else %}<p class="al-off">The Discord channel is not set up yet.</p>{% endif %}
+  </section>
+
+  <section class="al-card">
+    <h2>Email</h2>
+    {% if email_enabled %}
+    <p>One email per confirmed fireball, plus its clips and the automated solution. You get a confirmation
+      email when you subscribe.</p>
+    <form class="al-row" id="al-email-form">
+      <input type="email" id="al-email" name="email" autocomplete="email" placeholder="you@example.com"
+             value="{{ alert_email or '' }}" required aria-label="Email address for fireball alerts">
+      <button type="submit" class="hc hc-primary" id="al-subscribe">{{ 'Update' if alert_email else 'Subscribe' }}</button>
+      <button type="button" class="hc" id="al-unsubscribe"{% if not alert_email %} hidden{% endif %}>Unsubscribe</button>
+    </form>
+    <div class="al-status" id="al-status" role="status" aria-live="polite">{% if alert_email %}Subscribed as {{ alert_email }}.{% endif %}</div>
+    {% else %}<p class="al-off">Email alerts are not set up yet.</p>{% endif %}
+  </section>
+</main>
+
+{% include "_license_footer.html" %}
+</body>
+</html>

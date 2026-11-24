@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ROVIMEN — Meteor Camera Network</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
 <style>
 /* :root tokens (--bg, --card, --border, --text, --muted, --green, --blue)
@@ -13,10 +15,23 @@
 body{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:16px}
 .home-box{background:var(--card);border:1px solid var(--border);border-radius:12px;
   padding:40px 44px;width:520px;max-width:100%}
+.home-brand{display:flex;align-items:center;justify-content:center;gap:12px;margin-bottom:6px}
+.home-gmn{width:40px;height:40px;flex-shrink:0}
 .home-logo{font-size:22px;font-weight:700;color:var(--blue);letter-spacing:2px;
-  text-align:center;margin-bottom:6px}
+  text-align:center}
 .home-subtitle{font-size:11px;color:var(--muted);text-align:center;margin-bottom:20px;
   text-transform:uppercase;letter-spacing:1px}
+.home-partners{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;
+  gap:12px 22px;margin-bottom:16px}
+.home-partners a{display:inline-flex;align-items:center;opacity:.9;
+  transition:opacity .15s}
+.home-partners a:hover{opacity:1}
+.home-partners img{display:block}
+/* GMN sphere + Astromania wordmark sized to roughly EQUAL bounding-box AREA
+   (not equal height): the ~9.8:1 wordmark stays short so it doesn't dwarf the
+   near-square sphere. Row is vertically centred. */
+.home-partners .home-partner-gmn{height:44px;width:auto}
+.home-partners .home-partner-astromania{height:14px;width:auto}
 .home-intro{font-size:13px;color:var(--text);line-height:1.6;text-align:center;
   margin-bottom:26px}
 .home-nav{display:flex;flex-direction:column;gap:10px;margin-bottom:24px}
@@ -35,17 +50,34 @@ body{display:flex;align-items:center;justify-content:center;min-height:100vh;pad
 @media(max-width:540px){
   .home-box{padding:28px 20px}
   .home-link{padding:16px;min-height:44px}
+  .home-partners{gap:10px 18px}
+  .home-partners .home-partner-gmn{height:34px}
+  .home-partners .home-partner-astromania{height:11px}
 }
 </style>
 </head>
 <body>
 <main class="home-box">
-  <div class="home-logo">ROVIMEN</div>
+  <div class="home-brand">
+    <img class="home-gmn" src="{{ url_for('static', filename='img/gmn_sphere.png', v=build_version) }}"
+         alt="Global Meteor Network" width="40" height="40" decoding="async">
+    <div class="home-logo">ROVIMEN</div>
+  </div>
   <div class="home-subtitle">Global Meteor Network</div>
+  <div class="home-partners">
+    <a href="https://globalmeteornetwork.org" target="_blank" rel="noopener" title="Global Meteor Network">
+      <img class="home-partner-gmn" src="{{ url_for('static', filename='img/gmn_sphere.png', v=build_version) }}"
+           alt="Global Meteor Network" height="44" decoding="async">
+    </a>
+    <a href="https://astromania.org" target="_blank" rel="noopener" title="Astromania">
+      <img class="home-partner-astromania" src="{{ url_for('static', filename='img/astromania.png', v=build_version) }}"
+           alt="Astromania" height="14" decoding="async">
+    </a>
+  </div>
   <p class="home-intro">
-    A network of all-sky cameras across Romania and Germany, watching the
-    night sky for meteors and fireballs as part of the Global Meteor Network.
-    Explore the public data below.
+    The Romanian network for meteor observations &mdash; video cameras across
+    the country watching the night sky for meteors and fireballs, as part of
+    the Global Meteor Network. Explore the public data below.
   </p>
 
   {% if enabled_pages %}
@@ -66,5 +98,6 @@ body{display:flex;align-items:center;justify-content:center;min-height:100vh;pad
     Operator? <a href="/login">Sign in</a>
   </div>
 </main>
+  {% include "_license_footer.html" %}
 </body>
 </html>

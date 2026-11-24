@@ -67,7 +67,7 @@ def app():
                      "rotate": False, "az": 180.0, "alt": 45.0},
                 ],
                 "ip": "127.0.0.1", "jump_hosts": [], "label": "Test Beta",
-                "lat": 44.43, "lon": 26.1, "proxy_media": False,
+                "lat": 44.65, "lon": 26.1, "proxy_media": False,
                 "public": True, "public_tabs": [], "ssh_user": "test",
                 "location_name": "Test Beta", "show_on_map": True,
                 "status": "active",
@@ -120,6 +120,13 @@ class TestIndex:
         media = client.get("/api/public/v1").get_json()["media"]
         for kind in ("clip", "stack", "timelapse", "nightstack"):
             assert kind in media, f"missing media type: {kind}"
+
+    def test_license_advertised(self, client):
+        lic = client.get("/api/public/v1").get_json()["license"]
+        assert lic["name"] == "CC-BY 4.0"
+        assert lic["url"] == "https://creativecommons.org/licenses/by/4.0/"
+        assert "mandatory attribution" in lic["notice"]
+        assert "ROVIMEN meteor network" in lic["notice"]
 
 
 # ── CORS ─────────────────────────────────────────────────────────────────
@@ -472,21 +479,31 @@ class TestAuth:
         resp = client.get("/api/public/v1")
         assert resp.status_code == 200
 
-    def test_stations_no_key_401(self, client):
-        resp = client.get("/api/public/v1/stations")
+    def test_stations_no_key_ok(self, client):
+        # Station markers are keyless even when keys are required: a
+        # browser-embedded map can't carry a secret X-API-Key, and the
+        # payload is public-safe (public: true stations only).
+        assert client.get("/api/public/v1/stations").status_code == 200
+        sid = client.get(
+            "/api/public/v1/stations"
+        ).get_json()["stations"][0]["id"]
+        assert client.get(f"/api/public/v1/stations/{sid}").status_code == 200
+
+    def test_keyed_endpoint_no_key_401(self, client):
+        resp = client.get("/api/public/v1/detections")
         assert resp.status_code == 401
 
     def test_401_body_shape(self, client):
-        data = client.get("/api/public/v1/stations").get_json()
+        data = client.get("/api/public/v1/detections").get_json()
         assert data["error"] == "missing_or_invalid_api_key"
         assert "detail" in data
 
     def test_401_www_authenticate(self, client):
-        resp = client.get("/api/public/v1/stations")
+        resp = client.get("/api/public/v1/detections")
         assert "ApiKey" in resp.headers.get("WWW-Authenticate", "")
 
     def test_url_key_param_rejected(self, client):
-        resp = client.get("/api/public/v1/stations?key=somekey")
+        resp = client.get("/api/public/v1/detections?key=somekey")
         assert resp.status_code == 400
         data = resp.get_json()
         assert data["error"] == "url_key_param_disabled"

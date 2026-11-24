@@ -115,7 +115,7 @@ sudo systemctl restart dnsmasq
 cat /var/lib/misc/dnsmasq.leases
 
 # Example output:
-# 1767520437 00:12:43:3b:b1:9f 10.0.0.80 LocalHost 01:00:12:43:3b:b1:9f
+# 1767520437 00:12:43:aa:bb:cc 10.0.0.80 LocalHost 01:00:12:43:aa:bb:cc
 #            ^^ MAC address    ^^ IP     ^^ hostname
 ```
 
@@ -392,7 +392,7 @@ For multiple cameras on one station:
 
 | Camera | MAC Address | IP | RTSP Port | Location |
 |--------|-------------|-----|-----------|----------|
-| CAM01 | 00:12:43:3b:b1:9f | 10.0.0.80 | 554 | TBD |
+| CAM01 | 00:12:43:aa:bb:cc | 10.0.0.80 | 554 | TBD |
 | CAM02 | TBD | 10.0.0.81 | 554 | TBD |
 | CAM03 | TBD | 10.0.0.82 | 554 | TBD |
 

@@ -4,7 +4,7 @@ How a multi-station meteor camera network is composed, how the pieces reach
 each other, and how to configure Tailscale so the dashboard can talk to every
 station without exposing anything to the public internet.
 
-This reflects a real deployment (15+ stations across two countries, multiple
+This reflects a real deployment (25+ stations across three countries, multiple
 operators, consumer ISPs, CGNAT, no port forwarding anywhere). Adapt names and
 addresses to your own network.
 
@@ -55,7 +55,7 @@ Three layers, strictly separated:
 |------|-------|------|----------|
 | 554  | cameras | RTSP video | camera LAN only |
 | 8554 | station (optional) | local RTSP relay (MediaMTX) — one camera pull shared by capture + colour capture | localhost only |
-| 7779 | station | station REST API (`rovimen_station_api.py`) | tailnet only |
+| 7779 | station | station REST API (`rovimen-scripts/station_api.py`) | tailnet only |
 | 7777 | VPS | dashboard (Flask/gunicorn) | behind nginx/TLS |
 | 22   | stations + VPS | SSH (key-only) | tailnet only |
 
@@ -145,9 +145,7 @@ one tailnet when you can — jump hosts add a serial dependency.
 
 ## 5. Frequent problems
 
-The full catalog with diagnosis walkthroughs lives in
-[`known_failure_modes.md`](known_failure_modes.md). The ones that hit every
-new deployment:
+The ones that hit every new deployment:
 
 **Station shows offline on the dashboard, but the PC is up.**
 `tailscale status` on the station — if it shows `offline` or only DERP-relayed

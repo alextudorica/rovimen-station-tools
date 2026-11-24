@@ -2,30 +2,6 @@ import { describe, it, expect } from 'vitest';
 
 import * as ctx from '../../dashboard/static/dashboard-station.js';
 
-describe('escHtmlSafe', () => {
-  const f = ctx.escHtmlSafe;
-
-  it('escapes ampersand', () => {
-    expect(f('a&b')).toBe('a&amp;b');
-  });
-  it('escapes angle brackets', () => {
-    expect(f('<div>')).toBe('&lt;div&gt;');
-  });
-  it('escapes quotes', () => {
-    expect(f('"x"')).toBe('&quot;x&quot;');
-    expect(f("'x'")).toBe("&#39;x&#39;");
-  });
-  it('handles numbers', () => {
-    expect(f(42)).toBe('42');
-  });
-  it('handles null gracefully', () => {
-    expect(f(null)).toBe('null');
-  });
-  it('all special chars at once', () => {
-    expect(f('&<>"\'')).toBe('&amp;&lt;&gt;&quot;&#39;');
-  });
-});
-
 describe('_isAbort', () => {
   const f = ctx._isAbort;
 
@@ -186,5 +162,77 @@ describe('computeCaptureWindow', () => {
     const w = f(LAT, LON, now);
     const wrap = h => ((h % 24) + 24) % 24;
     expect(wrap(w.sunsetUTC)).toBeGreaterThan(wrap(w.sunriseUTC));
+  });
+});
+
+describe('FDP night filter helpers', () => {
+  it('converts a date-input value to the archive night key', () => {
+    expect(ctx.fdpIsoToYmd('2026-09-21')).toBe('20260921');
+  });
+  it('rejects anything that is not an ISO date', () => {
+    expect(ctx.fdpIsoToYmd('')).toBe(null);
+    expect(ctx.fdpIsoToYmd(null)).toBe(null);
+    expect(ctx.fdpIsoToYmd('20260921')).toBe(null);
+  });
+  it('converts a night key back for the date input', () => {
+    expect(ctx.fdpYmdToIso('20260921')).toBe('2026-09-21');
+    expect(ctx.fdpYmdToIso(null)).toBe('');
+    expect(ctx.fdpYmdToIso('2026-09-21')).toBe('');
+  });
+  it('lists the processed nights newest first, starting yesterday UTC', () => {
+    const now = new Date(Date.UTC(2026, 8, 1, 10, 0));
+    expect(ctx.fdpRecentNights(now, 3)).toEqual(['20260831', '20260830', '20260829']);
+  });
+});
+
+describe('mkDiskPressure', () => {
+  const f = ctx.mkDiskPressure;
+
+  it('renders nothing without an ongoing episode', () => {
+    expect(f(null)).toBe('');
+    expect(f(undefined)).toBe('');
+    expect(f({})).toBe('');
+  });
+  it('names the filesystem, fullness and how long it has lasted', () => {
+    const since = new Date(Date.now() - 3 * 3600000).toISOString();
+    const html = f({ since, runs: 18, filesystem: '/home/gmn/color_capture', pct: 98, free_gb: 3.6 });
+    expect(html).toContain('the janitor cannot free enough space');
+    expect(html).toContain('/home/gmn/color_capture at 98% · 3.6 GB free · for 3.0 h');
+  });
+  it('escapes the filesystem path', () => {
+    const html = f({ since: new Date().toISOString(), filesystem: '<x>', pct: 99 });
+    expect(html).toContain('&lt;x&gt;');
+    expect(html).not.toContain('<x>');
+  });
+});
+
+describe('mkCaptureFallback', () => {
+  const f = ctx.mkCaptureFallback;
+
+  it('is empty while colour is on its own disk, or on an older bundle', () => {
+    expect(f(null)).toBe('');
+    expect(f(undefined)).toBe('');
+  });
+  it('names both roots when colour is on the fallback', () => {
+    const html = f({ configured: '/mnt/data/color_capture', active: '/home/gmn/color_capture' });
+    expect(html).toContain('Colour disk missing');
+    expect(html).toContain('/mnt/data/color_capture');
+    expect(html).toContain('/home/gmn/color_capture');
+  });
+  it('escapes the paths', () => {
+    expect(f({ configured: '<x>', active: '/a' })).toContain('&lt;x&gt;');
+  });
+});
+
+describe('fdpMissingText', () => {
+  const f = ctx.fdpMissingText;
+  it('says last night is still on its way', () => {
+    expect(f('comp', 1)).toBe('Not uploaded yet');
+    expect(f('tl', 0)).toBe('Not uploaded yet');
+  });
+  it('says an old timelapse was removed, anything else never came', () => {
+    expect(f('tl', 15)).toBe('Removed after 14 days');
+    expect(f('tl', 10)).toBe('None');
+    expect(f('plots', 40)).toBe('None');
   });
 });

@@ -18,6 +18,8 @@ import secrets
 import shutil
 import subprocess
 import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +32,7 @@ import youtube_upload
 from auth import require_admin
 from cache_store import ARCHIVE_PATH, COMPILATIONS_ARCHIVE_PATH, COMPILATIONS_OUT_PATH, INTRO_PATH
 from models import DashboardConfig
+from security import public_route
 from station_client import StationCache
 from tunnels import TunnelManager
 
@@ -68,13 +71,48 @@ def _clips_over_cap(clips: Any) -> bool:
     return isinstance(clips, list) and len(clips) > MAX_CLIPS
 
 
+# How often the dashboard looks for scheduled compilations whose time has come.
+COMPILATION_TICK_S = 60.0
+
+
+def run_compilation_ticks(
+    tick: Callable[[], list[str]],
+    is_leader: Callable[[], bool],
+    *,
+    interval_s: float = COMPILATION_TICK_S,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Fire due scheduled compilations every *interval_s*, forever.
+
+    Runs on a daemon thread in every gunicorn worker (``create_app``'s
+    background start). ``is_leader`` is a duty-leader flock, asked again on
+    every pass: exactly one worker fires, and the duty moves to another
+    worker when its holder exits.
+    """
+    while True:
+        sleep(interval_s)
+        try:
+            if not is_leader():
+                continue
+            fired = tick()
+            if fired:
+                logger.info("compilation tick: started %s", ", ".join(fired))
+        except Exception:
+            logger.exception("compilation tick failed")
+
+
 def register_compilation_routes(
     app: Flask,
     config: DashboardConfig,
     tunnels: TunnelManager,
     cache: StationCache,
-) -> None:
-    """Register all compilation (video cart) routes on *app*."""
+) -> Callable[[], list[str]]:
+    """Register all compilation (video cart) routes on *app*.
+
+    Returns the scheduled-build tick (start every manifest whose
+    ``scheduled_for`` has passed), which ``create_app`` runs once a minute
+    through :func:`run_compilation_ticks`.
+    """
 
     # ── Closure state ─────────────────────────────────────────────────
     _compilation_jobs: dict[str, dict] = {}
@@ -206,6 +244,7 @@ def register_compilation_routes(
             "-ss", f"{seek_start:.3f}",
             "-i", str(archive_path),
             "-t", f"{duration:.3f}",
+            "-fps_mode", "passthrough",  # MKV reports 1000 fps; see media._build_crop_cmd
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
             "-an", "-movflags", "+faststart",
             str(dest),
@@ -388,6 +427,7 @@ def register_compilation_routes(
                     "ffmpeg", "-hide_banner", "-loglevel", "error",
                     "-f", "concat", "-safe", "0",
                     "-i", str(list_file),
+                    "-fps_mode", "passthrough",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-an",
                     "-movflags", "+faststart",
@@ -683,19 +723,9 @@ def register_compilation_routes(
         uses this to enable / grey-out the 'Upload to YouTube' checkbox."""
         return jsonify(youtube_upload.is_configured())
 
-    @app.route("/internal/compilation/tick", methods=["POST", "GET"])
-    def internal_compilation_tick():
-        """Cron-driven trigger: fires any compilation whose status is
-        ``scheduled`` and ``scheduled_for`` is in the past. Auth: shared
-        secret in the X-Rovimen-Tick-Token header (env ROVIMEN_TICK_TOKEN).
-        We can't trust remote_addr because the dashboard sits behind an
-        nginx proxy that always forwards as 127.0.0.1; a header secret is
-        the simplest robust gate. Without the env set or with a wrong
-        token the endpoint 404s so it doesn't advertise itself."""
-        expected = os.environ.get("ROVIMEN_TICK_TOKEN", "")
-        provided = request.headers.get("X-Rovimen-Tick-Token", "")
-        if not expected or not secrets.compare_digest(expected, provided):
-            abort(404)
+    def fire_due_compilations() -> list[str]:
+        """Start the build of every manifest whose status is ``scheduled``
+        and whose ``scheduled_for`` has passed; returns their ids."""
         now_iso = datetime.now(timezone.utc).isoformat()
         fired: list[str] = []
         for m in compilation_store.load_all():
@@ -723,4 +753,24 @@ def register_compilation_routes(
                 target=_run_compilation_build, args=(mid,), daemon=True,
             ).start()
             fired.append(mid)
-        return jsonify({"fired": fired, "now": now_iso})
+        return fired
+
+    @app.route("/api/internal/compilation/tick", methods=["POST", "GET"])
+    @public_route
+    def internal_compilation_tick():
+        """Run the scheduled-build tick now. The dashboard already runs it
+        once a minute (``run_compilation_ticks``); this is for manual use.
+        Auth: shared secret in the X-Rovimen-Tick-Token header (env
+        ROVIMEN_TICK_TOKEN). ``@public_route`` only lets a session-less
+        caller past the login gate; the token is the gate. We can't trust
+        remote_addr because the dashboard sits behind an nginx proxy that
+        always forwards as 127.0.0.1. Without the env set or with a wrong
+        token the endpoint 404s so it doesn't advertise itself."""
+        expected = os.environ.get("ROVIMEN_TICK_TOKEN", "")
+        provided = request.headers.get("X-Rovimen-Tick-Token", "")
+        if not expected or not secrets.compare_digest(expected, provided):
+            abort(404)
+        fired = fire_due_compilations()
+        return jsonify({"fired": fired, "now": datetime.now(timezone.utc).isoformat()})
+
+    return fire_due_compilations

@@ -1,0 +1,14 @@
+[Unit]
+Description=ROVIMEN connectivity and service-health watchdog
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# A hung run (a wedged tailscaled, an NFS stall) would otherwise stay
+# "activating" forever, and the timer never starts another one.
+TimeoutStartSec=600
+User=gmn
+ExecStart=/usr/bin/bash /home/gmn/rovimen_scripts/rovimen_watchdog.sh
+StandardOutput=journal
+StandardError=journal

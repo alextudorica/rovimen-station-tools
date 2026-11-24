@@ -13,10 +13,12 @@
   padding: 16px;
   box-sizing: border-box;
   overflow-y: auto;
+  overscroll-behavior: contain;
   opacity: 0;
   pointer-events: none;
   transition: opacity .15s;
 }
+.vm-backdrop:focus { outline: none; }
 .vm-backdrop.open {
   opacity: 1;
   pointer-events: auto;
@@ -24,9 +26,10 @@
 
 /* ── Dialog ────────────────────────────────────────────────────────────────── */
 .vm-dialog {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  background: var(--hdr-ink);
+  border: 1px solid var(--hdr-line);
+  border-radius: var(--radius-2xl);
+  color: var(--hdr-text);
   width: 100%;
   max-width: 960px;
   display: flex;
@@ -41,11 +44,10 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--hdr-line);
   flex-shrink: 0;
   min-width: 0;
-  background: var(--card);
 }
 .vm-title {
   flex: 1 1 0;
@@ -53,8 +55,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12px;
-  color: var(--text);
+  font: 600 14px/1.3 var(--ui-font);
+  color: var(--hdr-text);
+  font-variant-numeric: tabular-nums;
 }
 .vm-header-right {
   display: flex;
@@ -64,42 +67,42 @@
   flex-wrap: wrap;
   justify-content: flex-end;
 }
-.vm-nav-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 14px;
-  padding: 2px 8px;
-  line-height: 1.4;
-}
-.vm-nav-btn:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
-.vm-nav-btn:disabled { opacity: .35; cursor: default; }
-.vm-close-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--muted);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
-  padding: 2px 10px;
-  line-height: 1.6;
-}
-.vm-close-btn:hover { color: var(--text); border-color: var(--text); }
-
-/* ── Badges ────────────────────────────────────────────────────────────────── */
-.vm-badge {
-  background: rgba(88,166,255,.15);
-  border: 1px solid rgba(88,166,255,.3);
-  border-radius: 10px;
-  color: var(--blue);
-  font-size: 10px;
-  padding: 1px 7px;
+/* Every button in the modal shares the site header's control (.hc): 36 px,
+   hairline border, starlight text, teal when active. */
+.vm-nav-btn, .vm-close-btn, .vm-open-link, .vm-ctrl-btn, .vm-stitch-btn,
+.vm-action-btn, .vm-witness-btn {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 12px;
+  margin: 0;
+  background: transparent;
+  border: 1px solid var(--hdr-line);
+  border-radius: var(--radius-lg);
+  color: var(--hdr-text);
+  font: 500 13px/1 var(--ui-font);
+  text-decoration: none;
   white-space: nowrap;
+  cursor: pointer;
+  transition: background-color .15s, border-color .15s;
 }
+:is(.vm-nav-btn, .vm-close-btn, .vm-open-link, .vm-ctrl-btn, .vm-stitch-btn,
+    .vm-action-btn, .vm-witness-btn):hover:not(:disabled) {
+  background: color-mix(in srgb,var(--hdr-text) 6%,transparent);
+  border-color: color-mix(in srgb,var(--hdr-text) 18%,transparent);
+}
+:is(.vm-nav-btn, .vm-stitch-btn, .vm-action-btn):disabled { opacity: .35; cursor: default; }
+/* arrows, close and transport are square icons */
+.vm-nav-btn, .vm-close-btn, .vm-ctrl-btn { width: 36px; padding: 0; font-size: var(--fs-lg); }
+.vm-open-links { display: flex; gap: 6px; }
+.vm-open-link { color: var(--hdr-muted); gap: .3em; }
+.vm-open-link:hover { color: var(--hdr-text); }
+.vm-open-short { display: none; }
+
 
 /* ── Video section ─────────────────────────────────────────────────────────── */
 .vm-video-section {
@@ -111,6 +114,7 @@
 }
 .vm-video-wrap {
   position: relative;
+  outline: none;
   width: 100%;
   min-height: clamp(180px, calc(100dvh - 280px), 72vh);
   display: flex;
@@ -136,7 +140,7 @@
   justify-content: center;
   background: #000;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-base);
   pointer-events: none;
 }
 .vm-video-err {
@@ -146,7 +150,7 @@
   align-items: center;
   justify-content: center;
   color: var(--muted);
-  font-size: 13px;
+  font-size: var(--fs-base);
   pointer-events: none;
 }
 .vm-crop-canvas {
@@ -159,8 +163,9 @@
   cursor: crosshair;
 }
 .vm-crop-btn-active {
-  color: #29aaff;
-  border-color: #29aaff;
+  color: var(--hdr-teal);
+  border-color: var(--hdr-teal);
+  background: color-mix(in srgb,var(--hdr-teal) 12%,transparent);
 }
 
 /* ── Controls row ──────────────────────────────────────────────────────────── */
@@ -168,10 +173,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px 4px;
+  padding: 10px 12px 6px;
   flex-shrink: 0;
-  border-top: 1px solid var(--border);
-  background: var(--card);
   min-width: 0;
 }
 .vm-ctrl-btns {
@@ -179,28 +182,12 @@
   gap: 4px;
   flex-shrink: 0;
 }
-.vm-ctrl-btn {
-  background: rgba(255,255,255,.08);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
-  padding: 3px 7px;
-  line-height: 1.5;
-  white-space: nowrap;
-}
-.vm-ctrl-btn:hover { background: rgba(255,255,255,.14); }
-.vm-ctrl-btn.vm-btn-slow-active {
-  color: var(--yellow);
-  border-color: var(--yellow);
-  background: rgba(210,153,34,.15);
-}
+/* active toggles (slow motion, loop): teal, like the Video DB chips */
+.vm-ctrl-btn.vm-btn-slow-active,
 .vm-ctrl-btn.vm-btn-loop-active {
-  color: var(--blue);
-  border-color: var(--blue);
-  background: rgba(88,166,255,.15);
+  color: var(--hdr-teal);
+  border-color: var(--hdr-teal);
+  background: color-mix(in srgb,var(--hdr-teal) 12%,transparent);
 }
 
 /* ── Track bar ─────────────────────────────────────────────────────────────── */
@@ -213,18 +200,38 @@
 }
 .vm-trackbar {
   position: relative;
-  height: 10px;
-  background: rgba(255,255,255,.12);
-  border-radius: 5px;
+  height: 6px;
+  background: color-mix(in srgb,var(--hdr-text) 10%,transparent);
+  border-radius: var(--radius-xs);
   cursor: pointer;
-  margin: 8px 0 0;
+  margin: 10px 0 0;
   touch-action: none;
+}
+/* Hit zone: the track is 6 px, the area that takes a press is ~34 px
+   (~50 px on touch screens), so a seek does not need pixel aim. */
+.vm-trackbar::before {
+  content: '';
+  position: absolute;
+  left: -8px; right: -8px;
+  top: -14px; bottom: -14px;
+}
+@media (pointer: coarse) {
+  .vm-trackbar::before { top: -22px; bottom: -22px; }
+  .vm-trackbar-start-handle,
+  .vm-trackbar-end-handle { width: 40px; height: 44px; }
+  .vm-trackbar-start-handle::after,
+  .vm-trackbar-end-handle::after { width: 18px; height: 18px; }
+}
+.vm-trackbar-playhead::before {
+  content: '';
+  position: absolute;
+  left: -9px; right: -9px; top: -6px; bottom: -6px;
 }
 .vm-trackbar-fill {
   position: absolute;
   top: 0; bottom: 0;
-  background: rgba(88,166,255,.35);
-  border-radius: 5px;
+  background: color-mix(in srgb,var(--hdr-teal) 45%,transparent);
+  border-radius: var(--radius-xs);
   pointer-events: none;
 }
 .vm-trackbar-det-marker {
@@ -248,10 +255,10 @@
   position: absolute;
   top: 50%;
   transform: translate(-50%, -50%);
-  width: 4px;
-  height: 26px;
-  background: #fff;
-  border-radius: 2px;
+  width: 3px;
+  height: 20px;
+  background: var(--hdr-text);
+  border-radius: var(--radius-2xs);
   cursor: ew-resize;
   touch-action: none;
   box-shadow: 0 0 4px rgba(0,0,0,.6);
@@ -275,29 +282,36 @@
   width: 12px; height: 12px;
   border-radius: 50%;
 }
-.vm-trackbar-start-handle::after { background: var(--blue); }
-.vm-trackbar-end-handle::after   { background: var(--green); }
+.vm-trackbar-start-handle::after,
+.vm-trackbar-end-handle::after {
+  background: var(--hdr-ink);
+  border: 2px solid var(--hdr-teal);
+  box-sizing: border-box;
+}
 .vm-trackbar-labels {
+  font-family: var(--mono-font);
+  font-variant-numeric: tabular-nums;
   display: flex;
   justify-content: space-between;
-  font-size: 10px;
+  font-size: var(--fs-xs);
   color: var(--muted);
   padding: 2px 2px 0;
   min-height: 14px;
 }
-.vm-lbl-start { color: var(--blue); }
+.vm-lbl-start, .vm-lbl-end { color: var(--hdr-muted); }
 .vm-lbl-det   { color: var(--yellow); }
-.vm-lbl-end   { color: var(--green); }
 
 /* ── Time display ──────────────────────────────────────────────────────────── */
 .vm-time-display {
-  font-size: 11px;
-  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: var(--fs-md);
+  color: var(--hdr-muted);
   white-space: nowrap;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
   display: flex;
   gap: 3px;
+  margin-left: 6px;
   align-items: center;
 }
 
@@ -306,28 +320,15 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
-  background: rgba(255,255,255,.03);
-  border-top: 1px solid var(--border);
+  padding: 4px 12px 8px;
   flex-shrink: 0;
   flex-wrap: wrap;
 }
-.vm-stitch-btn {
-  background: rgba(255,255,255,.08);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
-  padding: 3px 10px;
-}
-.vm-stitch-btn:hover:not(:disabled) { background: rgba(255,255,255,.14); }
-.vm-stitch-btn:disabled { opacity: .35; cursor: default; }
+.vm-stitch-btn { height: 32px; min-height: 32px; color: var(--hdr-muted); }
 .vm-stitch-label {
   flex: 1 1 0;
-  font-size: 11px;
-  color: var(--muted);
+  font-size: var(--fs-md);
+  color: var(--hdr-muted);
   text-align: center;
 }
 
@@ -336,39 +337,51 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  border-top: 1px solid var(--border);
+  padding: 10px 12px 12px;
+  border-top: 1px solid var(--hdr-line);
   flex-shrink: 0;
   flex-wrap: wrap;
+  row-gap: 10px;
+  column-gap: 10px;
 }
 .vm-dur-label {
-  font-size: 11px;
-  color: var(--muted);
-  margin-right: auto;
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-md);
+  color: var(--hdr-muted);
+  margin-left: auto;
 }
-.vm-action-btn {
-  background: rgba(88,166,255,.12);
-  border: 1px solid rgba(88,166,255,.35);
-  border-radius: 4px;
-  color: var(--blue);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12px;
-  padding: 4px 14px;
-  text-decoration: none;
-  display: inline-flex;
+/* The one filled button: download the clip (teal, like Log in). */
+.vm-action-btn.vm-download-btn {
+  background: var(--hdr-teal);
+  border-color: var(--hdr-teal);
+  color: var(--on-teal);
+  font-weight: 600;
+}
+.vm-action-btn.vm-download-btn:hover:not(:disabled) { background: var(--hdr-teal-hover); border-color: var(--hdr-teal-hover); }
+
+/* Actions are grouped Download / View / Keep. On desktop the groups sit in one
+   row split by hairlines; the sheet chrome only exists on phones. */
+.vm-act-sheet { display: contents; }
+.vm-more-btn, .vm-act-scrim, .vm-act-sheet-head { display: none; }
+.vm-act-group {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
-  line-height: 1.5;
+  gap: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--hdr-line);
 }
-.vm-action-btn:hover:not(:disabled) { background: rgba(88,166,255,.22); }
-.vm-action-btn:disabled { opacity: .5; cursor: default; }
-.vm-action-btn.secondary {
-  background: rgba(255,255,255,.08);
-  border-color: var(--border);
-  color: var(--muted);
-}
-.vm-action-btn.secondary:hover:not(:disabled) { background: rgba(255,255,255,.14); color: var(--text); }
+/* Desktop rows: [Download clip | Download group ......... 20.0 s clip]
+                 [View group | Keep group]; the sheet's ::before is the line break. */
+.vm-actions-row > .vm-download-btn { order: 1; }
+.vm-act-group[data-label="Download"] { order: 2; }
+.vm-actions-row > .vm-dur-label { order: 3; }
+.vm-act-sheet::before { content: ""; order: 4; flex-basis: 100%; height: 0; }
+.vm-act-group[data-label="View"] { order: 5; padding-left: 0; border-left: 0; }
+.vm-act-group[data-label="Keep"] { order: 6; }
+.vm-act-group[data-label="Review"] { order: 7; }
+/* a group whose buttons are all hidden (anonymous viewer, stack view) takes no room */
+.vm-act-group:not(:has(> :not([style*="display:none"]):not([style*="display: none"]))) { display: none; }
 
 /* ── Loop download ─────────────────────────────────────────────────────────── */
 .vm-loop-dl-wrap {
@@ -378,9 +391,9 @@
   position: absolute;
   bottom: calc(100% + 8px);
   right: 0;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
+  background: var(--hdr-ink);
+  border: 1px solid color-mix(in srgb,var(--hdr-text) 18%,transparent);
+  border-radius: var(--radius-lg);
   padding: 10px 12px;
   display: flex;
   align-items: center;
@@ -390,14 +403,14 @@
   z-index: 10;
 }
 .vm-loop-dl-label {
-  font-size: 12px;
+  font-size: var(--fs-md);
   color: var(--muted);
 }
 .vm-loop-stepper {
   display: flex;
   align-items: stretch;
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 .vm-loop-step-btn {
@@ -406,7 +419,7 @@
   color: var(--text);
   cursor: pointer;
   font-family: inherit;
-  font-size: 15px;
+  font-size: var(--fs-xl);
   line-height: 1;
   padding: 3px 9px;
 }
@@ -418,8 +431,9 @@
   border-left: 1px solid var(--border);
   border-right: 1px solid var(--border);
   color: var(--text);
-  font-family: inherit;
-  font-size: 13px;
+  font-family: var(--mono-font);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-base);
   padding: 3px 4px;
   text-align: center;
   -moz-appearance: textfield;
@@ -429,7 +443,7 @@
 
 /* ── Info section ──────────────────────────────────────────────────────────── */
 .vm-info-section {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--hdr-line);
   flex-shrink: 0;
 }
 .vm-info-summary {
@@ -437,7 +451,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  font-size: 12px;
+  font-size: var(--fs-md);
   color: var(--muted);
 }
 .vm-info-summary-text {
@@ -450,10 +464,10 @@
 .vm-info-expand-btn {
   background: none;
   border: none;
-  color: var(--blue);
+  color: var(--hdr-teal);
   cursor: pointer;
   font-family: inherit;
-  font-size: 11px;
+  font-size: var(--fs-md);
   padding: 0;
   flex-shrink: 0;
   white-space: nowrap;
@@ -465,26 +479,41 @@
   transition: max-height .25s ease, padding .25s ease;
   padding: 0 12px;
 }
+/* Tall enough for the single-station block plus the multi-station solution
+   (radiant, velocities, heights, mass, orbital elements) a triangulated
+   meteor adds underneath it. */
 .vm-info-full.expanded {
-  max-height: 800px;
+  max-height: 1400px;
   padding: 0 12px 12px;
 }
 .vm-info-grid {
+  font-variant-numeric: tabular-nums;
   display: grid;
   grid-template-columns: max-content 1fr;
   gap: 3px 12px;
-  font-size: 12px;
+  font-size: var(--fs-md);
 }
 .vm-info-label { color: var(--muted); white-space: nowrap; }
+/* Section divider inside the two-column grid — spans both tracks. */
+.vm-info-head {
+  grid-column: 1 / -1;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--hdr-line);
+  color: var(--hdr-teal);
+  font-size: var(--fs-sm);
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
 
 /* ── Witnesses ─────────────────────────────────────────────────────────────── */
 .vm-witnesses-section {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--hdr-line);
   padding: 8px 12px;
   flex-shrink: 0;
 }
 .vm-witnesses-label {
-  font-size: 11px;
+  font-size: var(--fs-sm);
   color: var(--muted);
   margin-bottom: 6px;
 }
@@ -494,120 +523,130 @@
   overflow-x: auto;
   padding-bottom: 2px;
 }
-.vm-witness-btn {
-  background: rgba(255,255,255,.06);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
-  padding: 4px 10px;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-.vm-witness-btn:hover { background: rgba(255,255,255,.12); border-color: var(--blue); }
+.vm-witness-btn { flex-shrink: 0; }
 
-/* ── Multi-video section ───────────────────────────────────────────────────── */
-.vm-multi-status {
-  padding: 8px 12px;
-  font-size: 12px;
-  color: var(--muted);
-  flex-shrink: 0;
+/* ── Keyboard focus ────────────────────────────────────────────────────────── */
+.vm-nav-btn:focus-visible,
+.vm-close-btn:focus-visible,
+.vm-open-link:focus-visible,
+.vm-ctrl-btn:focus-visible,
+.vm-stitch-btn:focus-visible,
+.vm-action-btn:focus-visible,
+.vm-loop-step-btn:focus-visible,
+.vm-info-expand-btn:focus-visible,
+.vm-witness-btn:focus-visible,
+.vm-trackbar:focus-visible {
+  outline: 2px solid var(--hdr-teal);
+  outline-offset: 2px;
 }
-.vm-multi-status.ready  { color: var(--green); }
-.vm-multi-status.hidden { display: none; }
-.vm-multi-grid {
-  display: grid;
-  gap: 12px;
-  padding: 0 12px 4px;
-}
-.vm-multi-cell {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.vm-multi-cell video {
-  display: block;
-  width: 100%;
-  background: #000;
-  border-radius: 4px;
-}
-.vm-multi-cell-label {
-  font-size: 11px;
-  color: var(--muted);
-  text-align: center;
-}
-.vm-multi-bar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  border-top: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.vm-multi-scrubber-wrap {
-  flex: 1 1 0;
-  min-width: 0;
-  position: relative;
-}
-.vm-multi-scrubber {
-  width: 100%;
-  accent-color: var(--blue);
-  display: block;
-}
-.vm-multi-scrubber-ticks {
-  display: flex;
-  justify-content: space-between;
-  font-size: 10px;
-  color: var(--muted);
-  padding: 0 4px;
-  margin-top: 2px;
-}
-.vm-multi-scrubber-marker {
-  position: absolute;
-  left: 50%;
-  top: 0;
-  transform: translateX(-50%);
-  width: 2px;
-  height: 16px;
-  background: var(--yellow);
-  pointer-events: none;
-}
-.vm-multi-pos-label {
-  font-size: 11px;
-  color: var(--blue);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  flex-shrink: 0;
-  min-width: 52px;
-  text-align: right;
-}
-.vm-multi-dl-btns {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  padding: 4px 12px 0;
-  flex-shrink: 0;
-}
-.vm-multi-badges {
-  display: flex;
-  gap: 6px;
-  flex-shrink: 0;
+.vm-video-wrap:focus-visible { outline: 2px solid var(--hdr-teal); outline-offset: -2px; }
+.vm-trackbar-start-handle:focus-visible,
+.vm-trackbar-end-handle:focus-visible { outline: none; }
+.vm-trackbar-start-handle:focus-visible::after,
+.vm-trackbar-end-handle:focus-visible::after { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--text); }
+
+@media (prefers-reduced-motion: reduce) {
+  .vm-backdrop, .vm-info-full, .vm-act-sheet { transition: none; }
 }
 
 /* ── Responsive ────────────────────────────────────────────────────────────── */
 @media (max-width: 600px) {
   .vm-backdrop { padding: 8px; }
-  .vm-dialog   { border-radius: 6px; }
-  .vm-video-el, .vm-stack-img {
-    max-height: clamp(160px, calc(100dvh - 320px), 50vh);
+  /* Cap the dialog to the viewport and let its body scroll INSIDE the card.
+     Previously the dialog grew past the viewport and only the backdrop
+     scrolled, which pushed the action row (Download/Show stack, Lock, Add to
+     basket, …) below the fold with no visible scroll affordance — on a phone
+     those buttons simply never appeared. Header stays pinned;
+     the body scrolls so every button is reachable. */
+  .vm-dialog {
+    border-radius: var(--radius-md);
+    max-height: calc(100dvh - 16px);   /* viewport minus the 8px backdrop padding */
   }
-  .vm-ctrl-btn  { padding: 5px 7px; font-size: 11px; min-height: 36px; }
-  .vm-nav-btn   { padding: 5px 10px; min-height: 36px; }
-  .vm-close-btn { min-height: 36px; padding: 5px 12px; }
-  .vm-ctrl-btns { gap: 3px; }
-  .vm-controls-row { gap: 4px 6px; padding: 6px 8px 4px; flex-wrap: wrap; }
+  .vm-single-section {
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    min-height: 0;      /* allow the flex child to shrink below content height */
+    flex: 1 1 auto;
+  }
+  /* The video wrapper reserved up to 564px of min-height on a 844px phone,
+     starving the controls + action rows of vertical room. Drop the floor so
+     the buttons below the player fit within the dialog viewport. */
+  .vm-video-wrap {
+    min-height: clamp(140px, 40vh, 320px);
+  }
+  .vm-video-el, .vm-stack-img {
+    max-height: clamp(140px, 40vh, 320px);
+  }
+  /* The header row (Prev, title, Open station, Open in Video DB, Next, Close)
+     is wider than a phone and does not shrink, so the dialog's
+     overflow:hidden cut Close off the right edge. Keep Prev, title, Next and
+     Close on the first line; the links wrap below. */
+  .vm-header { flex-wrap: wrap; }
+  .vm-header-right { display: contents; }
+  .vm-open-links { order: 1; flex-basis: 100%; }
+  .vm-open-links .vm-open-link { flex: 1 1 0; min-width: 0; padding: 0 6px; }
+  .vm-open-verb { display: none; }
+  .vm-open-short { display: inline; }   /* "Station · Video DB · Video Grid" fits a 360 px phone */
+  .vm-ctrl-btns { gap: 4px; }
+  .vm-controls-row { gap: 6px; padding: 8px 10px 4px; flex-wrap: wrap; }
   .vm-trackbar-wrap { flex-basis: 100%; order: 1; }
-  .vm-actions-row  { gap: 6px; padding: 6px 8px; }
+  .vm-stitch-row { padding: 0 10px 8px; }
+  /* Inset the bar so its end handles sit outside the OS edge-swipe ("back") zone. */
+  .vm-trackbar-wrap { padding: 0 24px; box-sizing: border-box; }
+
+  /* Phones: Download clip + More; the other actions in a bottom sheet, in labelled groups. */
+  .vm-act-sheet::before { display: none; }
+  .vm-act-group {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    padding: 0;
+    border: 0;
+  }
+  .vm-act-group::before {
+    content: attr(data-label);
+    grid-column: 1 / -1;
+    font: 600 11px/1 var(--ui-font);
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--hdr-muted);
+    padding: 2px 2px 4px;
+  }
+  .vm-act-group .vm-action-btn { width: 100%; height: 40px; min-height: 40px; padding: 0 8px; }
+
+  .vm-actions-row { flex-direction: row; flex-wrap: wrap; gap: 8px; }
+  .vm-actions-row > .vm-dur-label { order: 0; flex-basis: 100%; margin: 0; }
+  .vm-actions-row > .vm-download-btn { flex: 1 1 auto; height: 44px; min-height: 44px; font-size: var(--fs-xl); }
+  .vm-more-btn { order: 2; display: inline-flex; height: 44px; min-height: 44px; padding: 0 16px; font-size: var(--fs-xl); }
+  .vm-act-scrim {
+    position: fixed; inset: 0; z-index: 20;
+    background: rgba(0,0,0,.55);
+  }
+  .vm-sheet-open .vm-act-scrim { display: block; }
+  .vm-act-sheet {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 21;
+    display: flex; flex-direction: column; gap: 16px;
+    max-height: 80dvh; overflow-y: auto; overscroll-behavior: contain;
+    padding: 8px 16px calc(20px + env(safe-area-inset-bottom));
+    background: var(--hdr-ink);
+    border-top: 1px solid color-mix(in srgb,var(--hdr-text) 18%,transparent);
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -12px 40px rgba(0,0,0,.6);
+    transform: translateY(100%);
+    visibility: hidden;
+    transition: transform .2s ease, visibility 0s .2s;
+  }
+  .vm-sheet-open .vm-act-sheet { transform: none; visibility: visible; transition: transform .2s ease; }
+  .vm-act-sheet-head {
+    display: flex; align-items: center; justify-content: space-between;
+    font: 600 15px/1 var(--ui-font); color: var(--hdr-text);
+  }
+  /* grab handle */
+  .vm-act-sheet-head::before {
+    content: ""; position: absolute; left: 50%; top: 6px; transform: translateX(-50%);
+    width: 36px; height: 4px; border-radius: var(--radius-2xs); background: color-mix(in srgb,var(--hdr-text) 25%,transparent);
+  }
+  .vm-act-sheet-head { padding-top: 10px; }
+  .vm-act-sheet-close { width: 36px; padding: 0; }
+}
 }

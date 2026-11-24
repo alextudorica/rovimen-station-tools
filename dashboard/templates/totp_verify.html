@@ -3,53 +3,91 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#161b22">
 <title>ROVIMEN — 2FA</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
 <style>
 /* :root tokens (--bg, --card, --border, --text, --muted, --green, --red,
    --blue) come from dashboard.css. Auth-only layout overrides below. */
-body{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:16px}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:24px;min-height:100vh;padding:16px;font-family:var(--ui-font)}
 .box{background:var(--card);border:1px solid var(--border);border-radius:10px;
   padding:32px 36px;width:360px;max-width:100%}
-.logo{font-size:18px;font-weight:700;color:var(--blue);letter-spacing:1.5px;
-  text-align:center;margin-bottom:6px}
-.subtitle{font-size:11px;color:var(--muted);text-align:center;margin-bottom:22px;
+.box .logo{text-align:center;margin-bottom:8px}
+.box .logo img{max-width:100%;height:auto}
+.subtitle{font-size:11px;font-weight:600;color:var(--muted);text-align:center;margin-bottom:22px;
   text-transform:uppercase;letter-spacing:1px}
-.field{margin-bottom:14px}
+.field{margin-bottom:16px}
 .field label{display:block;font-size:10px;text-transform:uppercase;
   letter-spacing:1px;color:var(--muted);margin-bottom:6px}
 .field input{width:100%;background:var(--bg);border:1px solid var(--border);
-  color:var(--text);font-family:inherit;font-size:22px;letter-spacing:8px;
-  padding:12px;border-radius:6px;text-align:center;box-sizing:border-box}
-.field input:focus{outline:none;border-color:var(--blue)}
+  color:var(--text);font-family:var(--mono-font,monospace);font-variant-numeric:tabular-nums;font-size:22px;letter-spacing:8px;
+  padding:12px;border-radius:6px;text-align:center;box-sizing:border-box;
+  transition:border-color .15s,box-shadow .15s}
+.field input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 2px rgba(88,166,255,.35)}
+.field input[aria-invalid="true"]{border-color:var(--red)}
 .btn{width:100%;background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.35);
-  color:var(--blue);font-family:inherit;font-size:13px;font-weight:600;padding:10px;
-  border-radius:6px;cursor:pointer;letter-spacing:.5px;margin-top:6px}
+  color:var(--blue);font-family:var(--ui-font);font-size:13px;font-weight:600;padding:10px;
+  border-radius:6px;cursor:pointer;margin-top:8px;touch-action:manipulation;
+  transition:background-color .15s}
 .btn:hover{background:rgba(88,166,255,.22)}
+.btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.btn:disabled{opacity:.6;cursor:progress}
 .error{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.25);
   border-radius:6px;padding:10px;color:var(--red);font-size:12px;text-align:center;
-  margin-bottom:14px}
+  margin-bottom:16px}
+.error:empty{display:none}
 /* Phone: shrink the wide letter-spacing so 6-digit code stays on one
    line, tighten box padding so the form fits a 375 px viewport. */
 @media(max-width:540px){
-  .box{padding:24px 18px;border-radius:12px}
+  .box{padding:24px 16px}
   .field input{letter-spacing:6px;font-size:22px;padding:14px;min-height:54px}
   .btn{font-size:14px;padding:14px;min-height:44px}
 }
+@media(prefers-reduced-motion:reduce){
+  .field input,.btn{transition:none}
+}
 </style>
+<script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
 </head>
 <body>
-<form class="box" method="POST" action="/totp/verify">
+<div class="auth-time" title="Current UTC time and tonight's RMS capture window at the centre of Romania">
+  <span id="utc-clock" class="hdr-clock" translate="no">&mdash;</span>
+  <span class="nav-rms js-rms-window" translate="no" hidden></span>
+</div>
+<form class="box" id="totp-verify-form" method="POST" action="/totp/verify">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <div class="logo">ROVIMEN</div>
-  <div class="subtitle">2-Factor Authentication</div>
-  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <div class="logo"><img src="{{ url_for('static', filename='img/rovimen_logo.svg', v=build_version) }}" alt="ROVIMEN, Romanian Video Meteor Network" width="260" height="121" decoding="async" fetchpriority="high"></div>
+  <h1 class="subtitle">2-Factor Authentication</h1>
+  <div class="error" id="totp-error" role="alert" aria-live="assertive">{% if error %}{{ error }}{% endif %}</div>
   <div class="field">
     <label for="totp-verify-code">6-digit code from your authenticator</label>
     <input id="totp-verify-code" type="text" name="code" inputmode="numeric" pattern="[0-9]{6}"
-           maxlength="6" autocomplete="one-time-code" autofocus required>
+           maxlength="6" autocomplete="one-time-code" spellcheck="false" autofocus required
+           {% if error %}aria-invalid="true" aria-describedby="totp-error"{% endif %}>
   </div>
   <button type="submit" class="btn">Verify</button>
 </form>
+{# Auth pages load no app panel, so the footer leaves out its About button. #}
+{% set no_app_panel = true %}{% include "_license_footer.html" %}
+<script>
+/* Disable the submit button only once the request starts; re-enable it when
+   the page comes back from the back/forward cache. */
+(function () {
+  var form = document.getElementById('totp-verify-form');
+  var btn = form.querySelector('button[type="submit"]');
+  var idle = btn.textContent;
+  form.addEventListener('submit', function () {
+    btn.disabled = true;
+    btn.textContent = 'Verifying…';
+  });
+  window.addEventListener('pageshow', function () {
+    btn.disabled = false;
+    btn.textContent = idle;
+  });
+})();
+</script>
 </body>
 </html>

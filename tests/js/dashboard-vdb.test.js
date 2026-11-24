@@ -196,28 +196,6 @@ describe('vdbSliderToFmt', () => {
   });
 });
 
-describe('vdbParseHHMM', () => {
-  const f = ctx.vdbParseHHMM;
-
-  it('parses "14:30" to 870', () => {
-    expect(f('14:30')).toBe(870);
-  });
-  it('parses compact "1430"', () => {
-    expect(f('1430')).toBe(870);
-  });
-  it('rejects invalid', () => {
-    expect(f('25:00')).toBeNull();
-    expect(f('')).toBeNull();
-    expect(f('abc')).toBeNull();
-  });
-  it('24:00 is valid (end of day)', () => {
-    expect(f('24:00')).toBe(1440);
-  });
-  it('24:01 is invalid', () => {
-    expect(f('24:01')).toBeNull();
-  });
-});
-
 describe('vdbMinutesToSliderVal', () => {
   const f = ctx.vdbMinutesToSliderVal;
 
@@ -252,5 +230,60 @@ describe('vdbNextDay', () => {
   });
   it('february 28 in leap year stays in feb', () => {
     expect(f('20280228')).toBe('2028-02-29');
+  });
+});
+
+// ── vdbManualLockFilter: the "Manual locks only" toggle ───────────────────────
+// The backend always serves the full night (archived detections merged in);
+// the toggle is a pure client-side filter down to person-placed locks. It
+// must NOT hide detection locks when off (the old server-side locked_only
+// round-trip hid detections by default) and must keep ONLY manual locks on.
+describe('vdbManualLockFilter', () => {
+  const f = ctx.vdbManualLockFilter;
+  const manual    = { filename: 'a_color.mkv', locked: true,  lock_type: 'manual' };
+  const detection = { filename: 'b_color.mkv', locked: true,  lock_type: 'detection' };
+  const bulk      = { filename: 'c_color.mkv', locked: false, lock_type: null };
+  const bare      = { filename: 'd_color.mkv' };  // archive entries may omit fields
+  const chunks = [manual, detection, bulk, bare];
+
+  it('off: returns every chunk, detections included', () => {
+    expect(f(chunks, false)).toEqual(chunks);
+  });
+  it('off: returns the same array (no needless copy for the hot path)', () => {
+    expect(f(chunks, false)).toBe(chunks);
+  });
+  it('on: keeps only manual locks', () => {
+    expect(f(chunks, true)).toEqual([manual]);
+  });
+  it('on: drops detection locks', () => {
+    expect(f([detection], true)).toEqual([]);
+  });
+  it('on: drops unlocked and lock-less chunks', () => {
+    expect(f([bulk, bare], true)).toEqual([]);
+  });
+  it('empty list passes through in both modes', () => {
+    expect(f([], false)).toEqual([]);
+    expect(f([], true)).toEqual([]);
+  });
+});
+
+// ── Time window ↔ state.view (kept across camera / night / station switches) ──
+describe('vdb time window <-> view', () => {
+  it('maps a slider window to HH:MM and back', () => {
+    // Slider is noon-anchored: 0 = 12:00, 720 = 00:00, 1440 = next 12:00.
+    const s = ctx.vdbMinutesToSliderVal(15 * 60 + 32, false);
+    const e = ctx.vdbMinutesToSliderVal(15 * 60 + 40, true);
+    expect(ctx.vdbRangeToView(s, e)).toEqual({ from: '15:32', to: '15:40' });
+    expect(ctx.vdbViewToRange({ from: '15:32', to: '15:40' })).toEqual({ startVal: s, endVal: e });
+  });
+  it('treats the full range as no window', () => {
+    expect(ctx.vdbRangeToView(0, 1440)).toEqual({ from: null, to: null });
+    expect(ctx.vdbViewToRange({ from: null, to: null })).toBeNull();
+    expect(ctx.vdbViewToRange(null)).toBeNull();
+  });
+  it('round-trips a window that crosses midnight', () => {
+    const r = ctx.vdbViewToRange({ from: '23:50', to: '00:10' });
+    expect(r.startVal).toBeLessThan(r.endVal);
+    expect(ctx.vdbRangeToView(r.startVal, r.endVal)).toEqual({ from: '23:50', to: '00:10' });
   });
 });

@@ -12,9 +12,19 @@ WorkingDirectory=/home/gmn/rovimen_scripts
 # Opt-in gate: the agent exits 0 immediately unless the ingest key file exists,
 # so the unit can be enabled fleet-wide while staying dormant until a station
 # is enrolled in the push pilot.
-ExecStart=/home/gmn/RMS/venv/bin/python /home/gmn/rovimen_scripts/rovimen_pusher.py
+# Stdlib-only (urllib/json/sqlite3) — system python3 on purpose, so a fresh
+# install from the bundle works on any station regardless of venv location.
+ExecStart=/usr/bin/env python3 /home/gmn/rovimen_scripts/rovimen_pusher.py
 Restart=always
 RestartSec=15
+# Station identity (ROVIMEN_HOST_KEY) and ingest endpoint/key overrides live in
+# ingest.env, written at enrollment and refreshed by the updater. Identity must
+# never be hand-edited into the unit body: reconcile_units() in updater.sh
+# overwrites installed units with this template whenever they drift, so any
+# Environment= lines added post-install are erased on the next update
+# (2026-07-11 fleet heartbeat outage). "-" prefix: un-enrolled stations have no
+# ingest.env and the opt-in gate in rovimen_pusher.py still exits 0 cleanly.
+EnvironmentFile=-/home/gmn/.config/rovimen/ingest.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONIOENCODING=utf-8
 # Purely outbound telemetry — keep it out of capture's way.

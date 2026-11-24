@@ -1,273 +1,238 @@
-/* ── Meteor Showers reference page ── */
+/* ── Meteor Showers: a year calendar ──
+   One row per shower on a shared Jan–Dec axis (dashboard-showers.js). The
+   bar is the activity period, brighter for a higher ZHR; the dot is the
+   peak; a gold line marks today on every row. The axis row sticks under the
+   site header. Colours are the header's night sky (--hdr-*), so the
+   calendar reads as the same sky as the tonight strip above it. */
 
-.sh-filter-bar {
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  gap: 4px;
-  padding: 8px 20px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.sh-filter-bar::-webkit-scrollbar { display: none; }
+.sh-page-wrap { max-width: 1240px; margin: 0 auto; padding: 22px 20px 48px; }
 
-.sh-month-btn {
-  background: none;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--muted);
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 3px 10px;
-  white-space: nowrap;
-  flex-shrink: 0;
-  transition: border-color .15s, color .15s, background .15s;
-}
-.sh-month-btn:hover { border-color: var(--blue); color: var(--blue); }
-.sh-month-btn.active {
-  border-color: var(--blue);
-  color: var(--blue);
-  background: rgba(88,166,255,.1);
-}
-
-.sh-toolbar {
-  display: flex;
+/* Columns shared by the axis and every row */
+.sh-axis, .sh-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr) 56px 40px 40px 64px;
+  column-gap: 14px;
   align-items: center;
-  gap: 12px;
-  padding: 10px 20px;
-  border-bottom: 1px solid var(--border);
-  flex-wrap: wrap;
 }
-.sh-search {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12px;
-  padding: 5px 10px;
-  width: 240px;
-  outline: none;
-  transition: border-color .15s;
-}
+
+.sh-head { margin: 6px 0 16px; }
+.sh-title { margin: 0 0 6px; font-size: 26px; font-weight: 700; color: var(--text-strong);
+  letter-spacing: -.01em; }
+.sh-tonight { margin: 0; max-width: 72ch; min-height: 1.5em; color: var(--muted);
+  font-size: var(--fs-lg); line-height: 1.5; text-wrap: pretty; }
+
+/* ── Toolbar ── */
+.sh-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin-bottom: 14px; }
+.sh-search { width: 240px; max-width: 100%; height: 32px; padding: 0 10px; box-sizing: border-box;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-md);
+  color: var(--text); font: inherit; font-size: var(--fs-base); }
 .sh-search::placeholder { color: var(--muted); }
-.sh-search:focus { border-color: var(--blue); }
-.sh-check-label {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--muted);
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-}
-.sh-check-label input[type="checkbox"] {
-  accent-color: var(--blue);
-  cursor: pointer;
-  width: 13px;
-  height: 13px;
-}
-.sh-check-label:has(input:checked) { color: var(--blue); }
-.sh-count { color: var(--muted); font-size: 11px; }
-.sh-source-note {
-  color: var(--muted);
-  font-size: 10px;
-  margin-left: auto;
-}
-.sh-source-note a { color: var(--blue); text-decoration: none; }
-.sh-source-note a:hover { text-decoration: underline; }
+.sh-scope { display: inline-flex; border: 1px solid var(--border); border-radius: var(--radius-md); overflow: hidden; }
+.sh-scope-btn { height: 30px; padding: 0 12px; background: none; border: 0; color: var(--muted);
+  font: inherit; font-size: var(--fs-md); font-weight: 600; cursor: pointer; }
+.sh-scope-btn + .sh-scope-btn { border-left: 1px solid var(--border); }
+.sh-scope-btn span { font-family: var(--mono-font); font-weight: 400; font-variant-numeric: tabular-nums; }
+.sh-scope-btn:hover { color: var(--text); }
+.sh-scope-btn.active { background: color-mix(in srgb,var(--hdr-teal) 12%,transparent); color: var(--hdr-teal); }
+.sh-check-label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted);
+  font-size: var(--fs-md); cursor: pointer; user-select: none; }
+.sh-check-label input { accent-color: var(--hdr-teal); margin: 0; }
+/* Zoom: slider, then Earlier / Later and Whole year once zoomed in */
+.sh-zoom { display: inline-flex; align-items: center; gap: 6px; }
+.sh-zoom-label { color: var(--muted); font-size: var(--fs-md); }
+.sh-zoom input[type="range"] { width: 140px; accent-color: var(--hdr-teal); margin: 0; }
+.sh-zoom-btn { height: 30px; min-width: 30px; padding: 0 8px; background: none; border: 1px solid var(--border);
+  border-radius: var(--radius-md); color: var(--muted); font: inherit; font-size: var(--fs-md); cursor: pointer; }
+.sh-zoom-btn:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
+.sh-zoom-btn:disabled { opacity: .4; cursor: default; }
+.sh-zoom-btn[hidden] { display: none; }
+.sh-zoom-btn:focus-visible, .sh-zoom input:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.sh-count { margin-left: auto; color: var(--muted); font-size: var(--fs-md);
+  font-family: var(--mono-font); font-variant-numeric: tabular-nums; }
 
-.sh-page-wrap {
-  padding: 20px;
-  max-width: 1600px;
-  margin: 0 auto;
-}
-.sh-loading {
-  color: var(--muted);
-  padding: 60px;
-  text-align: center;
+/* ── Calendar ── */
+.sh-cal { border: 1px solid var(--hdr-line); border-radius: var(--radius-xl); background: var(--hdr-ink); }
+.sh-loading, .sh-empty { margin: 0; padding: 18px 16px; color: var(--muted); font-size: var(--fs-base); }
+
+.sh-axis { position: sticky; top: var(--site-hdr-h, 87px); z-index: 2; height: 44px; padding: 0 14px;
+  background: var(--hdr-ink); border-bottom: 1px solid var(--hdr-line);
+  border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+  color: var(--hdr-muted); font-size: var(--fs-sm); }
+.sh-axis-track { position: relative; align-self: stretch; overflow: hidden; }
+/* Months on top; dates (or "Today") under them; positions in px from JS */
+.sh-month { position: absolute; top: 7px; transform: translateX(-50%); line-height: 1; white-space: nowrap; }
+.sh-date, .sh-today-label { position: absolute; bottom: 3px; transform: translateX(-50%); line-height: 1;
+  font-family: var(--mono-font); font-size: var(--fs-2xs); font-variant-numeric: tabular-nums; color: var(--hdr-muted); }
+.sh-date.is-today, .sh-today-label { color: var(--sky-naut); font-weight: 700; }
+.sh-today-label { font-family: var(--ui-font); }
+
+.sh-row { position: relative; min-height: 30px; padding: 0 14px; color: var(--text); text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb,var(--hdr-text) 5%,transparent);
+  content-visibility: auto; contain-intrinsic-size: auto 31px; }
+/* The summed ZHR of all rated showers, above the shower rows */
+.sh-total { display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr) 56px 40px 40px 64px;
+  column-gap: 14px; align-items: center; padding: 0 14px; height: 96px; border-bottom: 1px solid var(--hdr-line); }
+.sh-total .sh-name { white-space: normal; }
+.sh-total .sh-name-text { color: var(--hdr-text); font-weight: 600; }
+.sh-total-sub { display: block; color: var(--hdr-muted); font-size: var(--fs-xs); }
+.sh-total-track { align-self: stretch; background: var(--hdr-ink-2); }
+.sh-total-track svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+.sh-total-grid { stroke: var(--hdr-line); stroke-width: 1; }
+.sh-total-tick { fill: var(--hdr-muted); font-family: var(--mono-font); font-size: 9px; }
+.sh-total .sh-c-peak { color: var(--hdr-muted); font-family: var(--ui-font); font-size: var(--fs-sm); }
+.sh-total .sh-c-zhr { color: var(--hdr-text); font-weight: 700; }
+.sh-rows > .sh-row:last-child { border-bottom: 0; border-radius: 0 0 var(--radius-xl) var(--radius-xl); }
+.sh-row[hidden] { display: none; }
+.sh-row:hover { background: color-mix(in srgb,var(--hdr-text) 4%,transparent); }
+.sh-row:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+.sh-row.is-open { background: color-mix(in srgb,var(--hdr-teal) 8%,transparent); }
+
+/* ── Details panel, opened under its row ── */
+.sh-detail { padding: 14px 20px 18px; background: var(--hdr-ink-2); border-bottom: 1px solid var(--hdr-line);
+  border-top: 1px solid color-mix(in srgb,var(--hdr-teal) 40%,transparent); }
+.sh-detail-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.sh-detail-title { margin: 0; font-size: var(--fs-3xl); font-weight: 700; color: var(--text-strong); }
+.sh-detail-close { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center;
+  background: none; border: 1px solid var(--hdr-line); border-radius: var(--hc-r); color: var(--hdr-muted); cursor: pointer; font-size: var(--fs-lg); }
+.sh-detail-close:hover { color: var(--hdr-text); border-color: var(--hdr-muted); }
+.sh-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px 20px; margin: 0 0 12px; }
+.sh-facts div { min-width: 0; }
+.sh-facts dt { color: var(--hdr-muted); font-size: var(--fs-sm); margin-bottom: 2px; }
+.sh-facts dd { margin: 0; color: var(--hdr-text); font-size: var(--fs-base); overflow-wrap: anywhere; }
+.sh-viewing { margin: 0 0 14px; max-width: 80ch; color: var(--text); font-size: var(--fs-base); line-height: 1.55; }
+/* the season up close */
+.sh-dc { margin: 0 0 14px; }
+.sh-dc-plot { position: relative; height: 110px; border-bottom: 1px solid var(--hdr-line); }
+/* No measured shape: only the dashed period line, so no tall empty plot */
+.sh-dc.is-flat .sh-dc-plot { height: 28px; }
+.sh-dc-plot svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.sh-dc-dash { stroke: var(--hdr-teal); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.sh-dc-dot { fill: var(--hdr-text); stroke: var(--hdr-ink-2); stroke-width: 2; }
+/* Mean line and hatched year-to-year spread (also the total row) */
+.sh-band { stroke: none; }
+.sh-band-wash { fill: color-mix(in srgb,var(--hdr-teal) 18%,transparent); stroke: none; }
+.sh-hatch-line { stroke: color-mix(in srgb,var(--hdr-teal) 70%,transparent); stroke-width: 1.2; }
+.sh-mean { fill: none; stroke: var(--hdr-teal); stroke-width: 1.75; stroke-linejoin: round; }
+.sh-total-today { stroke: var(--sky-naut); stroke-width: 1; opacity: .8; }
+.sh-dc-moon { position: relative; height: 10px; margin-top: 3px; }
+.sh-dc-moon span { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb,var(--hdr-text) var(--f),var(--hdr-ink)); }
+.sh-dc-ticks { position: relative; height: 18px; }
+.sh-dc-ticks span { position: absolute; top: 4px; transform: translateX(-50%); white-space: nowrap;
+  font-family: var(--mono-font); font-size: var(--fs-2xs); color: var(--hdr-muted); }
+.sh-dc figcaption { margin-top: 4px; color: var(--hdr-muted); font-size: var(--fs-sm); line-height: 1.5; }
+.sh-detail-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; }
+.sh-detail-go { padding: 8px 16px; border-radius: var(--radius-md); background: var(--hdr-teal); color: var(--on-teal);
+  font-size: var(--fs-base); font-weight: 600; text-decoration: none; }
+.sh-detail-go:hover { background: var(--hdr-teal-hover); }
+.sh-detail-link { color: var(--blue); font-size: var(--fs-md); text-decoration: none; }
+.sh-detail-link:hover { text-decoration: underline; }
+.sh-detail-close:focus-visible, .sh-detail-go:focus-visible, .sh-detail-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+.sh-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-base); }
+.sh-code { color: var(--hdr-muted); font-family: var(--mono-font); font-size: var(--fs-xs); }
+.sh-row.is-active .sh-name-text { color: var(--hdr-text); font-weight: 600; }
+
+/* The track: month bands, the activity bars, the peak and today */
+/* A track clips its inner layer, which spans the whole year at --sh-zoom x
+   the track's width and slides left by --sh-pan (a share of that width). */
+.sh-track { position: relative; align-self: stretch; overflow: hidden; }
+.sh-track-in { position: absolute; top: 0; bottom: 0; left: 0; width: calc(var(--sh-zoom, 1) * 100%);
+  transform: translateX(calc(var(--sh-pan, 0%) * -1)); background: var(--bands); }
+.sh-track-in::after { content: ''; position: absolute; top: 0; bottom: 0; left: var(--today); width: 1px;
+  background: var(--sky-naut); opacity: .7; pointer-events: none; }
+.sh-axis-labels { position: absolute; top: 0; left: 0; right: 0; bottom: 6px; }
+.sh-axis-labels::after { content: ''; position: absolute; bottom: 0; height: 5px; left: var(--today-px, -9px); width: 1px;
+  background: var(--sky-naut); opacity: .7; }
+/* The Moon through the year: a strip at the foot of the axis, zoomed with
+   the rows (paler = brighter Moon) */
+.sh-axis-track .sh-moon-in { top: auto; bottom: 0; height: 5px; background: var(--moon); }
+.sh-axis .sh-name { align-self: end; padding-bottom: 1px; text-align: right; }
+.sh-moon-key { font-size: var(--fs-2xs); color: var(--hdr-muted); }
+/* Day lines once a day is 9 px wide */
+.sh-cal.show-days .sh-track-in { background:
+  repeating-linear-gradient(to right, transparent 0 calc(100% / 365 - 1px),
+    color-mix(in srgb,var(--hdr-text) 6%,transparent) calc(100% / 365 - 1px) calc(100% / 365)), var(--bands); }
+/* Sideways pans and pinches are ours; vertical scrolling stays the page's */
+.sh-cal { touch-action: pan-y; }
+.sh-cal.is-zoomed .sh-track { cursor: grab; }
+.sh-cal.is-zoomed .sh-track:active { cursor: grabbing; }
+.sh-bar { position: absolute; top: 50%; height: 8px; margin-top: -4px; min-width: 2px; border-radius: var(--radius-pill);
+  background: var(--hdr-teal); opacity: var(--i, .5); }
+.sh-row.is-active .sh-bar { box-shadow: 0 0 8px color-mix(in srgb,var(--hdr-teal) 55%,transparent); }
+.sh-bar-year { left: 0; right: 0; opacity: .22; border-radius: 0; }
+/* Activity profile: a filled double-exponential curve; brighter for a
+   higher ZHR, glowing while the shower is active */
+.sh-prof { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.sh-prof path { fill: color-mix(in srgb,var(--hdr-teal) calc(var(--i, .5) * 45%),transparent);
+  stroke: var(--hdr-teal); stroke-width: 1.25; stroke-linejoin: round; stroke-opacity: calc(.35 + var(--i, .5) * .65); }
+.sh-prof-noz path { fill: none; stroke-dasharray: none; }
+.sh-row.is-active .sh-prof { filter: drop-shadow(0 0 4px color-mix(in srgb,var(--hdr-teal) 60%,transparent)); }
+/* No ZHR known: a dashed line on the curve's floor */
+.sh-bar-noz { top: calc(26 / 30 * 100%); height: 0; margin-top: 0; border-top: 1.5px dashed var(--hdr-teal);
+  background: none; border-radius: 0; opacity: .7; }
+.sh-peak { position: absolute; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px; border-radius: 50%; z-index: 1;
+  background: var(--hdr-text); box-shadow: 0 0 0 2px var(--hdr-ink); }
+
+.sh-num { text-align: right; font-family: var(--mono-font); font-size: var(--fs-md);
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sh-axis .sh-num { font-family: var(--ui-font); font-size: var(--fs-sm); }
+.sh-row .sh-c-peak { color: var(--hdr-muted); }
+.sh-row .sh-c-vg { color: var(--hdr-muted); }
+.sh-row .sh-c-seen, .sh-total .sh-c-seen { color: var(--hdr-teal); }
+.sh-total .sh-c-seen { font-weight: 600; }
+
+.sh-source-note { margin: 14px 0 0; color: var(--muted); font-size: var(--fs-sm); line-height: 1.6; }
+.sh-source-note a { color: var(--muted); text-decoration: underline; text-underline-offset: 2px; }
+.sh-source-note a:hover { color: var(--text); }
+
+.sh-search:focus-visible, .sh-scope-btn:focus-visible, .sh-check-label input:focus-visible,
+.sh-source-note a:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* Speed drops first, then the toolbar count moves under the search */
+@media (max-width: 900px) {
+  .sh-axis, .sh-row, .sh-total { grid-template-columns: minmax(120px, 170px) minmax(0, 1fr) 52px 36px 56px; }
+  .sh-c-vg { display: none; }
 }
 
-.sh-section { margin-bottom: 36px; }
-.sh-section-title {
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--blue);
-  text-transform: uppercase;
-  letter-spacing: 0.7px;
-  margin-bottom: 12px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 6px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.sh-section-count {
-  font-size: 10px;
-  color: var(--muted);
-  font-weight: 400;
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-.sh-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 4px;
-}
-
-.sh-card {
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  cursor: pointer;
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
-  transition: border-color .15s, box-shadow .15s;
-}
-.sh-card:hover { border-color: rgba(88,166,255,.45); }
-.sh-card:focus-visible {
-  outline: 2px solid var(--blue);
-  outline-offset: 2px;
-}
-.sh-card--active {
-  border-color: var(--green);
-  box-shadow: 0 0 0 1px var(--green), 0 0 12px rgba(63,185,80,.15);
-}
-.sh-card--active:hover {
-  border-color: var(--green);
-  box-shadow: 0 0 0 1px var(--green), 0 0 18px rgba(63,185,80,.25);
-}
-
-.sh-card-head {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 5px;
-  padding: 10px 14px;
-  border-bottom: none;
-  border-right: 1px solid var(--border);
-  width: 220px;
-  flex-shrink: 0;
-}
-.sh-code {
-  font-family: 'SF Mono', Consolas, monospace;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--blue);
-  background: rgba(88,166,255,.1);
-  border: 1px solid rgba(88,166,255,.25);
-  border-radius: 5px;
-  padding: 3px 10px;
-  white-space: nowrap;
-  letter-spacing: 2px;
-  line-height: 1.3;
-}
-.sh-name {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text);
-  line-height: 1.35;
-}
-.sh-badges {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-top: 1px;
-}
-.sh-badge-active {
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--green);
-  background: rgba(63,185,80,.12);
-  border: 1px solid rgba(63,185,80,.35);
-  border-radius: 3px;
-  padding: 1px 6px;
-  white-space: nowrap;
-}
-.sh-badge-count {
-  font-size: 10px;
-  font-weight: 700;
-  color: #e8832a;
-  background: rgba(232,131,42,.1);
-  border: 1px solid rgba(232,131,42,.35);
-  border-radius: 3px;
-  padding: 1px 6px;
-  white-space: nowrap;
-}
-.sh-section-active {
-  color: var(--green);
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: none;
-  letter-spacing: 0;
-}
-
-.sh-card-body {
-  flex: 1;
-  display: grid;
-  grid-auto-flow: column;
-  grid-template-rows: auto auto;
-  justify-content: start;
-  align-content: center;
-  align-items: baseline;
-  gap: 3px 24px;
-  padding: 10px 16px;
-}
-.sh-row {
-  display: flex;
-  align-items: baseline;
-  gap: 5px;
-  font-size: 11px;
-}
-.sh-row-zhr { grid-row: 1 / -1; align-self: center; }
-.sh-lbl {
-  color: var(--muted);
-  flex-shrink: 0;
-  font-size: 10px;
-}
-.sh-val {
-  color: var(--text);
-  text-align: right;
-}
-.sh-val-parent {
-  color: var(--muted);
-  font-size: 10px;
-  text-align: right;
-}
-.sh-val-zhr {
-  color: var(--green);
-  font-weight: 600;
+/* Phones: the name and numbers on one line, the year track full width under them */
+@media (max-width: 600px) {
+  .sh-page-wrap { padding: 16px 12px 40px; }
+  .sh-title { font-size: 22px; }
+  .sh-tonight { font-size: var(--fs-base); }
+  .sh-search { flex: 1 1 100%; width: auto; }
+  .sh-axis, .sh-row, .sh-total { grid-template-columns: minmax(0, 1fr) 50px 28px 56px; column-gap: 8px; padding: 0 10px; }
+  .sh-total { height: auto; padding-top: 8px; }
+  .sh-total .sh-name { grid-column: 1; grid-row: 1; }
+  .sh-total-track { grid-column: 1 / -1; grid-row: 2; height: 80px; margin: 6px 0 10px; }
+  .sh-axis .sh-name, .sh-row .sh-name { grid-column: 1; grid-row: 1; }
+  .sh-axis-track, .sh-row .sh-track { grid-column: 1 / -1; grid-row: 2; }
+  .sh-row { padding-top: 6px; }
+  /* one quiet ground: alternating bands chop a short track into blocks */
+  .sh-row .sh-track { height: 14px; margin: 4px 0 7px; border-radius: var(--radius-2xs); background: var(--hdr-ink-2); }
+  .sh-axis { height: auto; padding-top: 6px; }
+  .sh-axis-track { height: 30px; }
+  .sh-month { top: 3px; font-size: var(--fs-2xs); }
+  .sh-date, .sh-today-label { bottom: 2px; }
+  .sh-moon-key { display: none; }
+  .sh-detail { padding: 12px 10px 14px; }
+  .sh-facts { grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+  .sh-zoom { flex: 1 1 100%; }
+  .sh-zoom input[type="range"] { flex: 1; width: auto; }
+  /* the track keeps its quiet ground; the inner layer only carries the bars */
+  .sh-track-in { background: none; }
+  .sh-row { contain-intrinsic-size: auto 54px; }
 }
 
 @media (max-width: 600px) {
-  .sh-filter-bar { padding: 6px 12px; }
-  .sh-toolbar { padding: 8px 12px; }
-  .sh-search { width: 100%; }
-  .sh-source-note { display: none; }
-  .sh-page-wrap { padding: 12px; }
-  .sh-card { flex-direction: column; }
-  .sh-card-head {
-    width: 100%;
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-    flex-direction: row;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    justify-content: flex-start;
-  }
-  .sh-code { font-size: 14px; align-self: flex-start; }
-  .sh-card-body {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 12px;
-  }
-  .sh-row-zhr { grid-row: unset; align-self: unset; }
+  .sh-cal.show-days .sh-track-in { background: repeating-linear-gradient(to right, transparent 0 calc(100% / 365 - 1px),
+    color-mix(in srgb,var(--hdr-text) 6%,transparent) calc(100% / 365 - 1px) calc(100% / 365)); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-row.is-active .sh-bar { box-shadow: none; }
+}
+
+.sh-visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
 }

@@ -57,9 +57,11 @@ _GMN_THROTTLE_S = 1.0                    # min seconds between consecutive queri
 _GMN_HTTP_TIMEOUT = 30                   # round-trip + queueing dominate even though
                                          # the underlying SQL budget is 3 s.
 _GMN_BATCH = 150                         # event IDs per IN(...) clause
-# "Our" station codes are supplied by the dashboard config at startup (see
-# gmn_data.configure_station_codes). Events are tagged has_ro/de_only through
-# gmn_data.tag_witness, so the poller carries no hard-coded RO/DE prefixes.
+# Only the OUR stations on the German side — DE has thousands of meteors a
+# night across many sites we don't operate. Listing them explicitly keeps
+# the de_only overlay focused on Berlin gear (gmnde00/01) instead of all
+# of Germany. RO* stays a wildcard (we operate the entire RO prefix).
+_GMN_DE_STATION_CODES = ("DE0018", "DE001B", "DE001C", "DE001D")
 # Shower lookup is small (~1000 rows) and immutable; cache forever in-process.
 _gmn_shower_cache: dict[int, str] = {}
 _gmn_shower_cache_lock = threading.Lock()
@@ -95,7 +97,9 @@ def _gmn_row_to_event(row: dict[str, Any]) -> dict[str, Any]:
     """Map an upstream meteor_summary row to the slim dashboard shape, tagged
     with ``has_ro`` (>=1 RO* witness) and ``de_only`` (only DE* witnesses)."""
     stations = _gmn_split_stations(row.get("participating_stations"))
-    _is_ours, has_ro, de_only = gmn_data.tag_witness({s.upper() for s in stations})
+    has_ro  = any(s.upper().startswith("RO") for s in stations)
+    has_de  = any(s.upper().startswith("DE") for s in stations)
+    de_only = has_de and not has_ro
     return {
         "id":             row.get("unique_trajectory_identifier"),
         "time":           row.get("beginning_utc_time"),
@@ -217,20 +221,11 @@ def _gmn_fetch_multistation_LEGACY_DATASETTE(date_str: str) -> dict[str, Any]:
     # Q1: trajectory IDs witnessed by at least one RO* station OR one of
     # OUR specific DE codes on this date. The frontend plots the DE-only
     # ones as a muted secondary overlay, RO drives the headline counter.
-    codes = sorted(gmn_data.our_cam_codes())
-    if not codes:
-        # No stations configured yet — nothing is "ours", so return an empty
-        # (but well-formed) payload rather than issuing an invalid IN () query.
-        return {
-            "date": date_str, "total_upstream": 0, "events": [],
-            "has_ro_count": 0, "de_only_count": 0,
-            "last_fetched_utc": fetched_at,
-        }
-    codes_in = ",".join(f"'{c}'" for c in codes)
+    de_in = ",".join(f"'{c}'" for c in _GMN_DE_STATION_CODES)
     id_sql = (
         "SELECT DISTINCT meteor_unique_trajectory_identifier AS id "
         "FROM participating_station "
-        f"WHERE station_code IN ({codes_in}) "
+        f"WHERE (station_code LIKE 'RO%' OR station_code IN ({de_in})) "
         f"AND meteor_unique_trajectory_identifier LIKE '{yyyymmdd}%' "
         "ORDER BY meteor_unique_trajectory_identifier"
     )
@@ -307,11 +302,12 @@ def _gmn_fetch_multistation_LEGACY_DATASETTE(date_str: str) -> dict[str, Any]:
         st_list = stations_by_id.get(mid, [])
         if len(st_list) < 2:
             continue  # single-station rows aren't of interest
-        # Tag via the config-derived code sets (gmn_data.tag_witness):
-        # has_ro = a primary (non-highlight) station saw it; de_only = only
-        # highlight stations did.
+        # has_de here means "one of OUR Berlin stations" — not "any DE
+        # station" — so the de_only overlay doesn't pick up unrelated
+        # German sites that happen to share a witness.
         upper = {s.upper() for s in st_list}
-        _is_ours, has_ro, de_only = gmn_data.tag_witness(upper)
+        has_ro = any(s.startswith("RO") for s in upper)
+        has_de = bool(upper & set(_GMN_DE_STATION_CODES))
         events.append({
             "id":             mid,
             "time":           m.get("time"),
@@ -326,7 +322,7 @@ def _gmn_fetch_multistation_LEGACY_DATASETTE(date_str: str) -> dict[str, Any]:
             "velocity":       m.get("velocity"),
             "stations":       st_list,
             "has_ro":         has_ro,
-            "de_only":        de_only,
+            "de_only":        has_de and not has_ro,
         })
 
     has_ro_count  = sum(1 for e in events if e["has_ro"])
@@ -394,8 +390,11 @@ def _gmn_poller_loop(stop_event: threading.Event) -> None:
             (today - timedelta(days=d)).isoformat()
             for d in range(_GMN_BACKFILL_WINDOW_DAYS + 1)
         ]
-        logger.info("GMN poller: backfilling %d dates (serial, %.1fs throttle)",
-                    len(backfill_dates), _GMN_THROTTLE_S)
+        # Each date is a dict lookup in the per-month index gmn_data keeps on
+        # disk, so the whole backfill is two small JSON loads — no upstream
+        # queries, no throttle (that was the Datasette era).
+        logger.info("GMN poller: backfilling %d dates from the monthly index",
+                    len(backfill_dates))
         retry_dates: list[str] = []
         for d in backfill_dates:
             if stop_event.is_set():

@@ -18,29 +18,54 @@ import rovimen_pusher as rp
 
 
 class TestSeqCounter:
-    def test_starts_at_zero_when_no_state(self, tmp_path):
-        seq = rp.SeqCounter(state_path=tmp_path / "state.json")
-        assert seq.current == 0
-        assert seq.next() == 1
-        assert seq.next() == 2
+    # 2026-11-22 12:00:00 UTC, in seconds.
+    NOW = 1_795_348_800.0
+
+    def _clock(self, t: float = NOW):
+        return lambda: t
+
+    def test_fresh_state_starts_from_the_clock(self, tmp_path):
+        """A reinstalled station (no pusher_state.json, same host key) used to
+        restart at 1, under the VPS's stored maximum, and every push was
+        answered 200 and dropped: the station looked offline for months."""
+        seq = rp.SeqCounter(state_path=tmp_path / "state.json", clock=self._clock())
+        start = int(self.NOW * 1000)
+        assert seq.current == start
+        assert seq.next() == start + 1
+        assert seq.next() == start + 2
+
+    def test_a_low_saved_seq_jumps_to_the_clock(self, tmp_path):
+        # The counter of a station that started before clock seeding.
+        path = tmp_path / "state.json"
+        path.write_text(json.dumps({"last_seq": 4_123_456}))
+        seq = rp.SeqCounter(state_path=path, clock=self._clock())
+        assert seq.next() == int(self.NOW * 1000) + 1
 
     def test_persists_across_restart(self, tmp_path):
         path = tmp_path / "state.json"
-        seq = rp.SeqCounter(state_path=path)
+        seq = rp.SeqCounter(state_path=path, clock=self._clock(0.0))
         seq.next()
         seq.next()
         seq.next()
         # New instance reads the persisted value and keeps climbing.
-        seq2 = rp.SeqCounter(state_path=path)
+        seq2 = rp.SeqCounter(state_path=path, clock=self._clock(0.0))
         assert seq2.current == 3
         assert seq2.next() == 4
 
-    def test_corrupt_state_resets_to_zero(self, tmp_path):
+    def test_never_goes_back_when_the_clock_does(self, tmp_path):
+        path = tmp_path / "state.json"
+        seq = rp.SeqCounter(state_path=path, clock=self._clock())
+        last = [seq.next() for _ in range(5)][-1]
+        # Restart with the clock an hour behind (a Pi before NTP sync).
+        seq2 = rp.SeqCounter(state_path=path, clock=self._clock(self.NOW - 3600))
+        assert seq2.current == last
+        assert seq2.next() == last + 1
+
+    def test_corrupt_state_starts_from_the_clock(self, tmp_path):
         path = tmp_path / "state.json"
         path.write_text("not json {")
-        seq = rp.SeqCounter(state_path=path)
-        assert seq.current == 0
-        assert seq.next() == 1
+        seq = rp.SeqCounter(state_path=path, clock=self._clock())
+        assert seq.next() == int(self.NOW * 1000) + 1
 
     def test_monotonic_strictly_increasing(self, tmp_path):
         seq = rp.SeqCounter(state_path=tmp_path / "state.json")
@@ -79,21 +104,57 @@ class TestHeartbeatPayload:
             "rms_running": True,
             "color_capture_running": True,
             "network_name": "ROVIMEN",
-            "last_updated": "2026-07-01T00:00:00Z",  # extra field dropped
+            "last_updated": "2026-07-01T00:00:00Z",
+            "top_procs": [],  # not read by the dashboard: dropped
         }
         p = rp.build_heartbeat_payload(status)
         assert set(p) == {
             "online", "services", "cameras", "disk", "storage",
             "extra_disks", "rms_running", "color_capture_running", "network_name",
+            "bundle", "segment_health", "capture",
+            "disk_pressure", "capture_fallback", "uplink", "boot", "last_updated",
         }
         assert p["network_name"] == "ROVIMEN"
-        assert "last_updated" not in p
+        assert p["last_updated"] == "2026-07-01T00:00:00Z"
+
+    def test_forwards_disk_pressure_and_capture_fallback(self):
+        # The Storage-card banners: a push station's only way to the dashboard.
+        pressure = {"since": "2026-10-16T21:50:00Z", "filesystem": "/", "pct": 99,
+                    "free_gb": 1.2, "runs": 4}
+        fallback = {"configured": "/mnt/color", "active": "/home/gmn/color_video"}
+        p = rp.build_heartbeat_payload({"disk_pressure": pressure,
+                                        "capture_fallback": fallback})
+        assert p["disk_pressure"] == pressure
+        assert p["capture_fallback"] == fallback
+
+    def test_carries_uplink_and_boot_blocks(self):
+        uplink = {"class": "isp", "since": "2026-11-13T02:00:00Z"}
+        boot = {"boot_id": "abc", "uptime_s": 120, "previous": {"end": "unclean"}}
+        p = rp.build_heartbeat_payload({}, uplink=uplink, boot=boot)
+        assert p["uplink"] == uplink
+        assert p["boot"] == boot
+        assert p["disk_pressure"] is None and p["capture_fallback"] is None
 
     def test_defaults_when_fields_missing(self):
         p = rp.build_heartbeat_payload({})
         assert p["online"] is True
         assert p["services"] == {}
         assert p["cameras"] == []
+
+    def test_forwards_bundle_telemetry(self):
+        # Signed-update telemetry from station_api._bundle_status rides the
+        # heartbeat verbatim so the VPS watchdog can alert on verify state.
+        bundle = {
+            "version": "dev.276.2026.07.03", "build": 276, "channel": "dev",
+            "verify_mode": "warn", "last_verify": "ok",
+            "verified_at": "2026-07-03T14:00:00+00:00", "pin_fp": "ab12cd34ef56ab12",
+        }
+        p = rp.build_heartbeat_payload({"bundle": bundle})
+        assert p["bundle"] == bundle
+
+    def test_bundle_none_when_status_lacks_it(self):
+        p = rp.build_heartbeat_payload({"online": True})
+        assert p["bundle"] is None
 
 
 class TestVitalsPayload:
@@ -209,6 +270,43 @@ class TestLiveThumbIntervalResolution:
         assert rp.resolve_live_thumb_interval({}) == rp.LIVE_THUMB_INTERVAL
 
 
+class TestResolveInterval:
+    def test_default_when_absent(self, monkeypatch):
+        monkeypatch.delenv("ROVIMEN_VITALS_INTERVAL", raising=False)
+        assert rp.resolve_interval({}, "vitals", 60) == 60
+
+    def test_config_push_value(self, monkeypatch):
+        monkeypatch.delenv("ROVIMEN_VITALS_INTERVAL", raising=False)
+        assert rp.resolve_interval({"push": {"vitals_interval": 120}}, "vitals", 60) == 120
+
+    def test_env_overrides_config(self, monkeypatch):
+        monkeypatch.setenv("ROVIMEN_VITALS_INTERVAL", "90")
+        assert rp.resolve_interval({"push": {"vitals_interval": 120}}, "vitals", 60) == 90
+
+    def test_clamped(self, monkeypatch):
+        monkeypatch.delenv("ROVIMEN_HEARTBEAT_INTERVAL", raising=False)
+        assert rp.resolve_interval({"push": {"heartbeat_interval": 1}}, "heartbeat", 45, lo=10, hi=3600) == 10
+        assert rp.resolve_interval({"push": {"heartbeat_interval": 99999}}, "heartbeat", 45, lo=10, hi=3600) == 3600
+
+    def test_invalid_falls_back(self, monkeypatch):
+        monkeypatch.delenv("ROVIMEN_MEDIA_INTERVAL", raising=False)
+        assert rp.resolve_interval({"push": {"media_interval": "nope"}}, "media", 900) == 900
+
+    def test_resolve_intervals_reads_all(self, monkeypatch):
+        for v in ("HEARTBEAT", "VITALS", "DETECTIONS", "MEDIA", "CALIBRATION", "LIVE_FRAME",
+                  "LIVE_THUMB", "CHUNKS", "EVENTS"):
+            monkeypatch.delenv(f"ROVIMEN_{v}_INTERVAL", raising=False)
+        cfg = {"push": {"heartbeat_interval": 40, "vitals_interval": 60,
+                        "detections_interval": 300, "media_interval": 900,
+                        "calibration_interval": 1800, "live_frame_interval": 600,
+                        "live_thumb_interval": 30}}
+        got = rp.resolve_intervals(cfg)
+        assert got == {"heartbeat": 40, "vitals": 60, "detections": 300,
+                       "media": 900, "calibration": 1800, "live_frame": 600,
+                       "live_thumb": 30, "chunks": rp.CHUNKS_INTERVAL,
+                       "events": rp.EVENTS_INTERVAL}
+
+
 # ── config / identity resolution ───────────────────────────────────────────
 
 
@@ -264,6 +362,38 @@ class TestResolveBaseUrl:
     def test_none_when_undeterminable(self, monkeypatch):
         monkeypatch.delenv("ROVIMEN_INGEST_BASE_URL", raising=False)
         assert rp.resolve_base_url({}) is None
+
+
+class TestResolveFallbackUrl:
+    @pytest.fixture(autouse=True)
+    def _clean(self, monkeypatch, tmp_path):
+        for var in ("ROVIMEN_INGEST_FALLBACK_URL", "ROVIMEN_INGEST_BASE_URL"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setattr(rp, "ENV_PATH", tmp_path / "absent.env")
+
+    def test_env_wins_and_strips_slash(self, monkeypatch):
+        monkeypatch.setenv("ROVIMEN_INGEST_FALLBACK_URL", "https://vps.tailnet/")
+        cfg = {"push": {"ingest_fallback_url": "https://from-config"}}
+        assert rp.resolve_fallback_url(cfg) == "https://vps.tailnet"
+
+    def test_env_file(self, monkeypatch, tmp_path):
+        env = tmp_path / "ingest.env"
+        env.write_text("ROVIMEN_INGEST_FALLBACK_URL=https://vps.tailnet\n")
+        monkeypatch.setattr(rp, "ENV_PATH", env)
+        assert rp.resolve_fallback_url({}) == "https://vps.tailnet"
+
+    def test_push_config(self):
+        cfg = {"push": {"ingest_fallback_url": "https://vps.tailnet"}}
+        assert rp.resolve_fallback_url(cfg) == "https://vps.tailnet"
+
+    def test_none_when_it_is_the_primary(self, monkeypatch):
+        monkeypatch.setenv("ROVIMEN_INGEST_BASE_URL", "https://vps.tailnet")
+        cfg = {"push": {"ingest_fallback_url": "https://vps.tailnet/"}}
+        assert rp.resolve_fallback_url(cfg) is None
+
+    def test_none_when_unset(self):
+        assert rp.resolve_fallback_url({"push": {}}) is None
+        assert rp.resolve_fallback_url({}) is None
 
 
 # ── backoff ─────────────────────────────────────────────────────────────────
@@ -346,7 +476,8 @@ class _FakePost:
 
 
 def _make_publisher(tmp_path):
-    seq = rp.SeqCounter(state_path=tmp_path / "state.json")
+    # A zero clock keeps seq at 1, 2, 3 so the batching tests can name them.
+    seq = rp.SeqCounter(state_path=tmp_path / "state.json", clock=lambda: 0.0)
     spool = rp.Spool(path=tmp_path / "spool.db")
     pub = rp.Publisher("https://vps.example", "gmn0002", "rvmn_key", seq, spool)
     return pub, spool
@@ -418,6 +549,180 @@ class TestPublisherSend:
         spool.close()
 
 
+def _det_rows(n: int, *, date: str = "20260810") -> list[dict]:
+    return [
+        {"cam": "RO0003", "date": date,
+         "ff_file": f"FF_RO0003_{date}_{i:05d}.fits", "meteor_no": 1}
+        for i in range(n)
+    ]
+
+
+class TestChunkDetections:
+    """The hot window is 14 rolling days of every camera, so it must go out in
+    bounded batches (regression 2026-08-09: one station's window outgrew the
+    server cap and every push was rejected whole for two weeks)."""
+
+    def test_batch_size_is_well_under_the_server_cap(self):
+        # The VPS cap is 20 000; batches must not ride the ceiling.
+        assert rp.DETECTION_BATCH_ROWS <= 2000
+        assert rp.DETECTION_BATCH_ROWS >= 500
+
+    def test_splits_into_full_batches_plus_remainder(self):
+        batches = rp.chunk_detections(_det_rows(2500), size=1000)
+        assert [len(b) for b in batches] == [1000, 1000, 500]
+
+    def test_no_row_is_lost_or_duplicated(self):
+        rows = _det_rows(2500)
+        batches = rp.chunk_detections(rows, size=1000)
+        flat = [r for b in batches for r in b]
+        assert len(flat) == len(rows)
+        assert {r["ff_file"] for r in flat} == {r["ff_file"] for r in rows}
+
+    def test_short_window_is_a_single_batch(self):
+        assert len(rp.chunk_detections(_det_rows(10), size=1000)) == 1
+
+    def test_empty_window_yields_no_batches(self):
+        assert rp.chunk_detections([], size=1000) == []
+
+    def test_batches_run_oldest_night_first(self):
+        rows = (_det_rows(2, date="20260812") + _det_rows(2, date="20260801")
+                + _det_rows(2, date="20260807"))
+        batches = rp.chunk_detections(rows, size=2)
+        dates = [b[0]["date"] for b in batches]
+        assert dates == sorted(dates)
+        assert dates[0] == "20260801"
+
+    def test_tolerates_a_missing_or_unparseable_meteor_no(self):
+        rows = [
+            {"cam": "RO0003", "date": "20260810", "ff_file": "b.fits"},
+            {"cam": "RO0003", "date": "20260810", "ff_file": "a.fits",
+             "meteor_no": "not-a-number"},
+        ]
+        batches = rp.chunk_detections(rows, size=10)
+        assert [r["ff_file"] for r in batches[0]] == ["a.fits", "b.fits"]
+
+    def test_degenerate_size_does_not_hang(self):
+        assert len(rp.chunk_detections(_det_rows(3), size=0)) == 3
+
+
+class TestIsPermanentStatus:
+    @pytest.mark.parametrize("status", [400, 403, 413, 422])
+    def test_permanent_4xx(self, status):
+        assert rp.is_permanent_status(status) is True
+
+    @pytest.mark.parametrize("status", [408, 429, 500, 502, 503, None])
+    def test_transient_or_unknown(self, status):
+        assert rp.is_permanent_status(status) is False
+
+
+class TestPushDetectionsBatching:
+    def test_large_window_goes_out_in_several_posts(self, tmp_path, monkeypatch):
+        pub, spool = _make_publisher(tmp_path)
+        monkeypatch.setattr(rp, "fetch_detections",
+                            lambda since: _det_rows(2500))
+        monkeypatch.setattr(rp, "DETECTION_BATCH_ROWS", 1000)
+        fake = _FakePost([])
+        monkeypatch.setattr(rp, "post_json", fake)
+
+        assert pub.push_detections() is True
+        assert len(fake.calls) == 3
+        sizes = [len(c[2]["payload"]["detections"]) for c in fake.calls]
+        assert sizes == [1000, 1000, 500]
+        # Every batch is independently enveloped with its own monotonic seq.
+        assert [c[2]["seq"] for c in fake.calls] == [1, 2, 3]
+        spool.close()
+
+    def test_no_batch_exceeds_the_configured_size(self, tmp_path, monkeypatch):
+        pub, spool = _make_publisher(tmp_path)
+        monkeypatch.setattr(rp, "fetch_detections", lambda since: _det_rows(7183))
+        fake = _FakePost([])
+        monkeypatch.setattr(rp, "post_json", fake)
+        pub.push_detections()
+        assert all(len(c[2]["payload"]["detections"]) <= rp.DETECTION_BATCH_ROWS
+                   for c in fake.calls)
+        spool.close()
+
+    def test_window_since_rides_every_batch(self, tmp_path, monkeypatch):
+        pub, spool = _make_publisher(tmp_path)
+        monkeypatch.setattr(rp, "fetch_detections", lambda since: _det_rows(2100))
+        monkeypatch.setattr(rp, "DETECTION_BATCH_ROWS", 1000)
+        fake = _FakePost([])
+        monkeypatch.setattr(rp, "post_json", fake)
+        pub.push_detections()
+        assert {c[2]["payload"]["window_since"] for c in fake.calls} == \
+            {rp._window_since()}
+        spool.close()
+
+    def test_failed_batch_stops_the_run_so_later_rows_are_not_acked(
+            self, tmp_path, monkeypatch):
+        pub, spool = _make_publisher(tmp_path)
+        monkeypatch.setattr(rp, "fetch_detections", lambda since: _det_rows(3000))
+        monkeypatch.setattr(rp, "DETECTION_BATCH_ROWS", 1000)
+        fake = _FakePost([
+            rp.PostResult(ok=True, status=200),
+            rp.PostResult(ok=False, status=503),
+        ])
+        monkeypatch.setattr(rp, "post_json", fake)
+
+        assert pub.push_detections() is False
+        # First succeeded, second failed, third never attempted.
+        assert len(fake.calls) == 2
+        spool.close()
+
+    def test_detection_batches_are_never_spooled(self, tmp_path, monkeypatch):
+        pub, spool = _make_publisher(tmp_path)
+        monkeypatch.setattr(rp, "fetch_detections", lambda since: _det_rows(1500))
+        monkeypatch.setattr(rp, "DETECTION_BATCH_ROWS", 1000)
+        fake = _FakePost([rp.PostResult(ok=False, status=500)])
+        monkeypatch.setattr(rp, "post_json", fake)
+        pub.push_detections()
+        # They re-derive from the local index, so the bounded spool stays free.
+        assert spool.count() == 0
+        spool.close()
+
+    def test_permanent_rejection_is_logged_loudly_with_station_and_rows(
+            self, tmp_path, monkeypatch, caplog):
+        pub, spool = _make_publisher(tmp_path)
+        monkeypatch.setattr(rp, "fetch_detections", lambda since: _det_rows(1500))
+        monkeypatch.setattr(rp, "DETECTION_BATCH_ROWS", 1000)
+        fake = _FakePost([rp.PostResult(ok=False, status=422)])
+        monkeypatch.setattr(rp, "post_json", fake)
+
+        with caplog.at_level("ERROR", logger="rovimen_pusher"):
+            assert pub.push_detections() is False
+        errors = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert errors, "a permanent rejection must not fail silently"
+        msg = errors[-1].getMessage()
+        assert "gmn0002" in msg          # station key
+        assert "422" in msg
+        assert "1000" in msg             # rows in the rejected batch
+        spool.close()
+
+    def test_permanent_rejection_does_not_spin(self, tmp_path, monkeypatch):
+        pub, spool = _make_publisher(tmp_path)
+        monkeypatch.setattr(rp, "fetch_detections", lambda since: _det_rows(5000))
+        monkeypatch.setattr(rp, "DETECTION_BATCH_ROWS", 1000)
+        fake = _FakePost([rp.PostResult(ok=False, status=422)])
+        monkeypatch.setattr(rp, "post_json", fake)
+        pub.push_detections()
+        # One attempt, then out — the cycle cadence provides the retry.
+        assert len(fake.calls) == 1
+        spool.close()
+
+    def test_transient_failure_is_a_warning_not_an_error(
+            self, tmp_path, monkeypatch, caplog):
+        pub, spool = _make_publisher(tmp_path)
+        monkeypatch.setattr(rp, "fetch_detections", lambda since: _det_rows(1500))
+        monkeypatch.setattr(rp, "DETECTION_BATCH_ROWS", 1000)
+        fake = _FakePost([rp.PostResult(ok=False, status=503)])
+        monkeypatch.setattr(rp, "post_json", fake)
+        with caplog.at_level("WARNING", logger="rovimen_pusher"):
+            pub.push_detections()
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+        assert [r for r in caplog.records if r.levelname == "WARNING"]
+        spool.close()
+
+
 class TestPublisherPushHelpers:
     def test_push_detections_empty_is_success_no_post(self, tmp_path, monkeypatch):
         pub, spool = _make_publisher(tmp_path)
@@ -435,187 +740,160 @@ class TestPublisherPushHelpers:
         spool.close()
 
 
-# ── command worker (§3) — verify, dispatch, ack, fail-closed ────────────────
+# ── ingest.env fallback (cron contexts without the systemd EnvironmentFile) ─
 
 
-def _mint_keypair(tmp_path):
-    """Return (pubkey_raw, sign_fn) using the server signer for parity."""
-    import sys
-    sys.path.insert(0, "dashboard")
-    import command_signing
-    priv = tmp_path / "priv.pem"
-    pub = tmp_path / "pub.pem"
-    command_signing.generate_keypair(priv, pub)
-    import command_verify
-    pubkey_raw = command_verify.load_public_key_raw(pub)
-    key = command_signing.load_private_key(priv)
+class TestIngestEnvFallback:
+    def _write_env(self, tmp_path, content):
+        p = tmp_path / "ingest.env"
+        p.write_text(content)
+        return p
 
-    def sign(cmd: dict, station: str) -> str:
-        msg = command_signing.canonical_message(
-            id=cmd["id"], station=station, type=cmd["type"], args=cmd.get("args", {}),
-            issued_at=cmd["issued_at"], not_after=cmd["not_after"],
+    def test_parses_key_value_lines(self, tmp_path):
+        p = self._write_env(
+            tmp_path,
+            "# enrollment identity\n"
+            "ROVIMEN_HOST_KEY=gmnro05\n"
+            "ROVIMEN_INGEST_BASE_URL=https://vps.example\n"
+            "\n"
+            "not-a-pair\n",
         )
-        return command_signing.sign(msg, key)
+        env = rp._ingest_env(p)
+        assert env == {
+            "ROVIMEN_HOST_KEY": "gmnro05",
+            "ROVIMEN_INGEST_BASE_URL": "https://vps.example",
+        }
 
-    return pubkey_raw, sign
+    def test_missing_file_returns_empty(self, tmp_path):
+        assert rp._ingest_env(tmp_path / "absent.env") == {}
 
-
-def _future(minutes=5):
-    from datetime import datetime, timedelta, timezone
-    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _past(minutes=5):
-    from datetime import datetime, timedelta, timezone
-    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-class TestCommandWorker:
-    def _worker(self, tmp_path, monkeypatch):
-        pubkey_raw, sign = _mint_keypair(tmp_path)
-        stop = __import__("threading").Event()
-        w = rp.CommandWorker("https://vps.example", "gmn0002", "rvmn_k", pubkey_raw, stop)
-        acks: list[tuple[str, bool, str]] = []
-        posts: list[tuple[str, dict | None]] = []
-        monkeypatch.setattr(w, "_ack", lambda cid, ok, detail: acks.append((cid, ok, detail)))
-        monkeypatch.setattr(rp, "_local_post", lambda path, body=None, timeout=60: posts.append((path, body)) or (True, "ok"))
-        return w, sign, acks, posts
-
-    def test_valid_signed_command_dispatches(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        cmd = {"id": "cmd_1", "type": "restart_service", "args": {"service": "rms-cam0"},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert posts == [("/api/restart/rms-cam0", None)]
-        assert acks[-1][1] is True
-
-    def test_tampered_command_refused(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        cmd = {"id": "cmd_2", "type": "reboot", "args": {},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        cmd["type"] = "restart_service"  # tamper after signing
-        cmd["args"] = {"service": "evil"}
-        w.handle(cmd)
-        assert posts == []                       # never dispatched
-        assert acks[-1][1] is False
-        assert "signature_invalid" in acks[-1][2]
-
-    def test_expired_command_refused(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        cmd = {"id": "cmd_3", "type": "reboot", "args": {},
-               "issued_at": _past(10), "not_after": _past()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert posts == []
-        assert acks[-1][1] is False
-        assert "expired" in acks[-1][2]
-
-    def test_disallowed_type_refused_even_if_signed(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        cmd = {"id": "cmd_4", "type": "exec", "args": {"cmd": "rm -rf /"},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert posts == []
-        assert acks[-1][1] is False
-        assert "disallowed_type" in acks[-1][2]
-
-    def test_wrong_station_signature_refused(self, tmp_path, monkeypatch):
-        """A command signed for a different station must not verify here."""
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        cmd = {"id": "cmd_5", "type": "reboot", "args": {},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmnro10")   # signed for another station
-        w.handle(cmd)
-        assert posts == []
-        assert acks[-1][1] is False
-
-    def test_lock_clip_dispatch(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        args = {"cam": "RO000M", "date": "20260630", "filename": "x.mkv", "locked": True}
-        cmd = {"id": "cmd_6", "type": "lock_clip", "args": args,
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert posts == [("/api/lock/RO000M/20260630/x.mkv", {"locked": True})]
-        assert acks[-1][1] is True
-
-    def test_run_updater_allowlisted_and_dispatches_to_run(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        assert "run_updater" in rp.CommandWorker.ALLOWED_TYPES
-        cmd = {"id": "cmd_upd", "type": "run_updater", "args": {},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert posts == [("/api/updater/run", None)]
-        assert acks[-1][1] is True
-
-    def test_run_updater_check_dispatches_to_check(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        cmd = {"id": "cmd_updc", "type": "run_updater", "args": {"check": True},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert posts == [("/api/updater/check", None)]
-        assert acks[-1][1] is True
-
-    def test_restart_services_allowlisted_and_dispatches_to_services_restart(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        assert "restart_services" in rp.CommandWorker.ALLOWED_TYPES
-        cmd = {"id": "cmd_svc", "type": "restart_services", "args": {},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert posts == [("/api/services/restart", None)]
-        assert acks[-1][1] is True
-
-    def test_restart_services_connection_drop_acked_ok(self, tmp_path, monkeypatch):
-        """The station_api self-restarts, so the loopback POST connection drops
-        mid-response. That URLError is the success signal, not a failure."""
-        w, sign, acks, _posts = self._worker(tmp_path, monkeypatch)
-        # Simulate the socket reset _local_post surfaces when the API exits.
+    def test_host_key_falls_back_to_env_file(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ROVIMEN_HOST_KEY", raising=False)
         monkeypatch.setattr(
-            rp, "_local_post",
-            lambda path, body=None, timeout=60: (
-                False, "local action failed: <urlopen error [Errno 104] Connection reset by peer>"
-            ),
-        )
-        cmd = {"id": "cmd_svc_drop", "type": "restart_services", "args": {},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert acks[-1][1] is True
-        assert "restart in progress" in acks[-1][2]
+            rp, "ENV_PATH", self._write_env(tmp_path, "ROVIMEN_HOST_KEY=gmnro05\n"))
+        assert rp.resolve_host_key({}) == "gmnro05"
 
-    def test_restart_services_http_error_still_fails(self, tmp_path, monkeypatch):
-        """A real HTTP error status (not a connection drop) is still a failure."""
-        w, sign, acks, _posts = self._worker(tmp_path, monkeypatch)
+    def test_process_env_beats_env_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("ROVIMEN_HOST_KEY", "from-process")
         monkeypatch.setattr(
-            rp, "_local_post",
-            lambda path, body=None, timeout=60: (False, "HTTP 500: boom"),
-        )
-        cmd = {"id": "cmd_svc_err", "type": "restart_services", "args": {},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        assert acks[-1][1] is False
-        assert "HTTP 500" in acks[-1][2]
+            rp, "ENV_PATH", self._write_env(tmp_path, "ROVIMEN_HOST_KEY=from-file\n"))
+        assert rp.resolve_host_key({}) == "from-process"
 
-    def test_redelivered_command_not_reexecuted(self, tmp_path, monkeypatch):
-        w, sign, acks, posts = self._worker(tmp_path, monkeypatch)
-        cmd = {"id": "cmd_7", "type": "reboot", "args": {},
-               "issued_at": _future(-1), "not_after": _future()}
-        cmd["sig"] = sign(cmd, "gmn0002")
-        w.handle(cmd)
-        w.handle(cmd)                            # redelivery
-        assert len(posts) == 1                   # dispatched once only
-        assert acks[-1][2] == "already_executed"
+    def test_base_url_falls_back_to_env_file(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ROVIMEN_INGEST_BASE_URL", raising=False)
+        monkeypatch.setattr(
+            rp, "ENV_PATH",
+            self._write_env(tmp_path, "ROVIMEN_INGEST_BASE_URL=https://vps.example/\n"))
+        assert rp.resolve_base_url({}) == "https://vps.example"
+
+    def test_env_file_beats_config(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("ROVIMEN_HOST_KEY", raising=False)
+        monkeypatch.setattr(
+            rp, "ENV_PATH", self._write_env(tmp_path, "ROVIMEN_HOST_KEY=from-file\n"))
+        assert rp.resolve_host_key({"host_key": "from-config"}) == "from-file"
 
 
-class TestFailClosed:
-    def test_no_pubkey_returns_none(self, tmp_path, monkeypatch):
-        import command_verify
-        missing = tmp_path / "nope.pem"
-        assert command_verify.load_public_key_raw(missing) is None
+class _FakeCollect:
+    """Stands in for station_collect; records calls."""
+
+    def __init__(self, fail: bool = False):
+        self.calls: list[tuple] = []
+        self.fail = fail
+
+    def _ret(self, name, value, *args, **kwargs):
+        self.calls.append((name, args, kwargs))
+        if self.fail:
+            raise OSError("capture disk gone")
+        return value
+
+    def list_timelapses(self):
+        return self._ret("list_timelapses", {"RO000A": []})
+
+    def list_rms_cameras(self):
+        return self._ret("list_rms_cameras", [{"code": "RO000A", "cam_ip": ""}])
+
+    def list_live_cameras(self):
+        return self._ret("list_live_cameras", [{"code": "RO000A"}, {"code": "GH662W"}])
+
+    def list_nights(self, cam, limit=None):
+        return self._ret("list_nights", ["20260925", "20260924"][:limit], cam)
+
+    def list_chunks(self, cam, date, locked_only=False):
+        return self._ret("list_chunks", {"morning_done": True, "chunks": [
+            {"filename": "a.mkv", "locked": True}, {"filename": "b.mkv", "locked": False},
+        ]}, cam, date, locked_only=locked_only)
+
+    def read_detections_index(self, since):
+        return self._ret("read_detections_index",
+                         {"ready": True, "detections": [{"ff_file": "x"}],
+                          "night_sky": [{"night": since}]}, since)
+
+
+class TestLocalReads:
+    """Listings, cameras and the index come from station_collect in-process;
+    :7779 is only the fallback."""
+
+    @pytest.fixture
+    def no_http(self, monkeypatch):
+        def refuse(url, timeout=None):
+            raise AssertionError(f"unexpected HTTP read {url}")
+        monkeypatch.setattr(rp, "_get_json", refuse)
+        rp._index_memo.clear()
+
+    def test_reads_use_station_collect(self, monkeypatch, no_http):
+        fake = _FakeCollect()
+        monkeypatch.setattr(rp, "_collect", fake)
+        assert rp.fetch_timelapses() == {"RO000A": []}
+        assert rp.fetch_camera_codes() == ["RO000A"]
+        assert rp.fetch_live_camera_codes() == ["RO000A", "GH662W"]
+        assert rp.fetch_nights("RO000A") == ["20260925", "20260924"]
+        assert rp.fetch_locked_chunks("RO000A", "20260925") == [
+            {"filename": "a.mkv", "locked": True}]
+        assert ("list_chunks", ("RO000A", "20260925"), {"locked_only": True}) in fake.calls
+
+    def test_one_index_read_serves_detections_and_night_sky(self, monkeypatch, no_http):
+        fake = _FakeCollect()
+        monkeypatch.setattr(rp, "_collect", fake)
+        assert rp.fetch_detections("20260912") == [{"ff_file": "x"}]
+        assert rp.fetch_night_sky("20260912") == [{"night": "20260912"}]
+        assert [c[0] for c in fake.calls] == ["read_detections_index"]
+
+    def test_a_failing_local_read_falls_back_to_http(self, monkeypatch):
+        monkeypatch.setattr(rp, "_collect", _FakeCollect(fail=True))
+        urls = []
+
+        def fake_get(url, timeout=None):
+            urls.append(url)
+            return ["20260925"]
+
+        monkeypatch.setattr(rp, "_get_json", fake_get)
+        assert rp.fetch_nights("RO000A") == ["20260925"]
+        assert urls == [f"{rp.STATION_API_BASE}/api/nights/RO000A"]
+
+    def test_status_and_vitals_stay_on_http(self, monkeypatch):
+        monkeypatch.setattr(rp, "_collect", _FakeCollect())
+        urls = []
+        monkeypatch.setattr(rp, "_get_json", lambda url, timeout=None: urls.append(url) or {})
+        rp.fetch_status()
+        rp.fetch_vitals()
+        assert urls == [f"{rp.STATION_API_BASE}/api/status",
+                        f"{rp.STATION_API_BASE}/api/vitals"]
+
+    def test_the_real_station_collect_is_importable(self):
+        assert rp._collect is not None
+        assert hasattr(rp._collect, "list_chunks")
+
+
+def test_mask_gzip_is_stable_and_python37_safe():
+    """Masks are gzipped with a zero mtime through GzipFile, not gzip.compress(mtime=),
+    which is Python 3.8+ and failed on the Câmpenița Pis (Python 3.7.3)."""
+    import gzip
+    import inspect
+
+    raw = bytes(range(256)) * 40
+    a = rp._gzip_stable(raw)
+    b = rp._gzip_stable(raw)
+    assert a == b
+    assert gzip.decompress(a) == raw
+    assert a[4:8] == b"\x00\x00\x00\x00"  # MTIME field of the gzip header
+    assert "mtime=0)" not in inspect.getsource(rp.build_calibration_payload)

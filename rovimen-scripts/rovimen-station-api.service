@@ -10,6 +10,11 @@ WorkingDirectory=/home/gmn/rovimen_scripts
 ExecStart=/home/gmn/RMS/venv/bin/python /home/gmn/rovimen_scripts/station_api.py
 Restart=always
 RestartSec=10
+# On-demand encodes (overlay gate, lock, process_clip) run ffmpeg as children
+# of this service: below RMS capture for CPU, and disk I/O only when the disk
+# is otherwise idle, like color-capture.service.
+Nice=10
+IOSchedulingClass=idle
 Environment=PYTHONUNBUFFERED=1
 
 [Install]

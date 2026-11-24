@@ -188,3 +188,11 @@ class TestBuildFootageGrid:
 
     def test_empty_input(self):
         assert _build_footage_grid({}, _COLUMNS, 5, None, None) == []
+
+    def test_reencoded_flag_reaches_the_cell(self):
+        """The modal shows "Processed" instead of a second Process clip run
+        from this flag; it used to be dropped here."""
+        done = dict(_chunk("21:32:00", filename="DONE"), reencoded=True)
+        fb = _footage(a=[done, _chunk("21:32:20", filename="RAW")])
+        chunks = _build_footage_grid(fb, _COLUMNS, 5, None, None)[0]["cells"]["RO000A"]["chunks"]
+        assert {c["filename"]: c["reencoded"] for c in chunks} == {"DONE": True, "RAW": False}

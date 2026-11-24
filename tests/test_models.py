@@ -88,7 +88,7 @@ class TestStationConfig:
     def test_with_cameras(self):
         cam = CameraConfig(code="RO000A", cam_ip="192.168.1.10")
         st = StationConfig(
-            ip="100.64.0.7",
+            ip="100.64.0.6",
             label="Ghirdoveni",
             cameras=[cam],
         )
@@ -97,7 +97,7 @@ class TestStationConfig:
 
     def test_nested_cameras_from_dict(self):
         st = StationConfig(
-            ip="100.64.0.6",
+            ip="100.64.0.7",
             label="Vaslui",
             cameras=[
                 {"code": "RO000M", "cam_ip": "192.168.1.10"},
@@ -111,9 +111,9 @@ class TestStationConfig:
         st = StationConfig(
             ip="100.64.0.8",
             label="Bucharest",
-            jump_hosts=["100.64.0.6"],
+            jump_hosts=["100.64.0.7"],
         )
-        assert st.jump_hosts == ["100.64.0.6"]
+        assert st.jump_hosts == ["100.64.0.7"]
 
     def test_public_station(self):
         st = StationConfig(
@@ -163,7 +163,7 @@ class TestUserConfig:
             stations=["gmn0000", "gmn0001"],
             reset_token="tok_hash",
             reset_token_expiry="2026-06-01T00:00:00+00:00",
-            email="alex@example.com",
+            email="operator@example.com",
             totp_secret="JBSWY3DPEHPK3PXP",
             require_totp=True,
             magic_token="magic_hash",
@@ -172,7 +172,7 @@ class TestUserConfig:
         assert user.display_name == "Alex"
         assert user.role == "admin"
         assert len(user.stations) == 2
-        assert user.email == "alex@example.com"
+        assert user.email == "operator@example.com"
         assert user.totp_secret == "JBSWY3DPEHPK3PXP"
         assert user.magic_token == "magic_hash"
         assert user.expires_at == "2026-12-31T23:59:59+00:00"

@@ -1,7 +1,7 @@
 """Admin routes — users CRUD, activity-log health, network-config edits.
 
 Extracted from rovimen_dashboard.py as part of the A-1 refactor
-(docs/audit-2026-05-24.md). All routes preserved verbatim — same URLs,
+(the 2026-05 security audit). All routes preserved verbatim — same URLs,
 same behaviour, same decorators. Wired in from ``create_app()`` via the
 two ``register_*_routes`` entry points below.
 
@@ -20,16 +20,59 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from contextlib import contextmanager
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Collection, TypeVar
 
-from flask import Flask, abort, jsonify, request
+from flask import Flask, abort, jsonify, request, session
+from pydantic import BaseModel, ValidationError
 from werkzeug.security import generate_password_hash
 
 import security
+from auth import password_fingerprint
 
 from models import CameraConfig, DashboardConfig, StationConfig, UserConfig
+
+_Model = TypeVar("_Model", bound=BaseModel)
+
+# What the user PATCH route sets; ``password`` is hashed into password_hash.
+_USER_EDITABLE = frozenset({"display_name", "role", "stations", "expires_at", "password"})
+
+
+class RefusedEdit(Exception):
+    """An admin edit the route refuses. Raised inside the save block, so the
+    block's write is skipped and the file and the in-memory model stay as
+    they were; the route answers ``status`` with the message."""
+
+    def __init__(self, message: str, status: int = 422) -> None:
+        super().__init__(message)
+        self.status = status
+
+
+def validated_edit(model: _Model, updates: Any, editable: Collection[str]) -> _Model:
+    """``model`` with ``updates`` applied, validated as a whole new model.
+
+    ``model_copy(update=)`` and attribute assignment do not validate, so a
+    JSON null or a string in a number field used to reach
+    ``dashboard_config.yaml`` or ``users.yaml``, which then no longer loaded
+    (or skipped the user). Raises ``RefusedEdit`` (422) when ``updates`` is
+    not an object, names a key outside ``editable``, or holds a value the
+    model rejects. Lax coercion still applies, so ``"30"`` is stored as 30.0.
+    """
+    if not isinstance(updates, dict):
+        raise RefusedEdit("Validation failed: the body must be a JSON object")
+    unknown = sorted(set(updates) - set(editable))
+    if unknown:
+        raise RefusedEdit(f"Validation failed: not editable here: {', '.join(unknown)}")
+    try:
+        return type(model).model_validate({**model.model_dump(), **updates})
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc'])}: {err['msg']}"
+            for err in exc.errors(include_url=False)
+        )
+        raise RefusedEdit(f"Validation failed: {problems}") from exc
 
 
 # ── SSRF deny-list for /api/admin/autodetect ──────────────────────────────
@@ -182,6 +225,17 @@ def register_admin_user_routes(app: Flask) -> None:
             days = 7
         return jsonify(usage_stats.compute_usage(days=days))
 
+    @app.route("/api/admin/traffic")
+    @require_admin
+    def api_admin_traffic():
+        """Visitor-traffic report (anonymous + authenticated page views)."""
+        import usage_stats
+        try:
+            days = int(request.args.get("days", "7"))
+        except (TypeError, ValueError):
+            days = 7
+        return jsonify(usage_stats.compute_traffic_report(days=days))
+
     @app.route("/api/admin/users", methods=["POST"])
     @require_admin
     def api_admin_users_create():
@@ -230,9 +284,16 @@ def register_admin_user_routes(app: Flask) -> None:
         # Validate the body once up front — anything we'd otherwise
         # discover deep inside the mutator (and then have to bubble out
         # via exceptions) becomes a plain 400 here.
+        if not isinstance(body, dict):
+            return jsonify({"error": "the body must be a JSON object"}), 400
+        unknown = sorted(set(body) - _USER_EDITABLE)
+        if unknown:
+            return jsonify({"error": f"not editable here: {', '.join(unknown)}"}), 400
         if "role" in body and body["role"] not in ("admin", "host", "visitor", "press"):
             return jsonify({"error": "invalid role"}), 400
         new_pw = body.get("password") or ""
+        if not isinstance(new_pw, str):
+            return jsonify({"error": "password must be a string"}), 400
         if new_pw and len(new_pw) < 14:
             # Same floor as /set-password and user-create; a PATCH must
             # not be a silent escape hatch around the policy.
@@ -242,37 +303,46 @@ def register_admin_user_routes(app: Flask) -> None:
         class _NotFound(Exception):
             pass
 
+        new_hash = generate_password_hash(new_pw) if new_pw else ""
+
         def _mutate(users: dict[str, UserConfig]) -> None:
             if username not in users:
                 raise _NotFound()
             u = users[username]
+            # Validate the edited account as a whole before touching it:
+            # attribute assignment does not validate, and users.yaml skips an
+            # entry that fails validation, so a stored null display_name
+            # left that account unable to sign in.
+            updates = {k: body[k] for k in ("display_name", "role", "stations") if k in body}
+            if "expires_at" in body:
+                updates["expires_at"] = body["expires_at"] or None
+            checked = validated_edit(u, updates, _USER_EDITABLE)
             # Track whether any privilege-relevant field actually changed so we
             # only bump the session epoch (which force-revalidates live
             # sessions) when role/stations/password/expiry move. A pure
             # display-name edit must not log the user out.
             privilege_changed = False
             if "display_name" in body:
-                u.display_name = body["display_name"]
+                u.display_name = checked.display_name
             if "role" in body:
                 # A role change invalidates any outstanding magic-login link:
                 # the link is a bearer credential issued against the old
                 # privilege level, so a host→admin promotion (or any change)
                 # must not let a stale token redeem at the new level.
-                if body["role"] != u.role:
+                if checked.role != u.role:
                     u.magic_token = None
                     privilege_changed = True
-                u.role = body["role"]
+                u.role = checked.role
             if "stations" in body:
-                if body["stations"] != u.stations:
+                if checked.stations != u.stations:
                     privilege_changed = True
-                u.stations = body["stations"]
+                u.stations = checked.stations
             if "expires_at" in body:
-                new_exp = body["expires_at"] or None
-                if new_exp != u.expires_at:
+                if checked.expires_at != u.expires_at:
                     privilege_changed = True
-                u.expires_at = new_exp
-            if new_pw:
-                u.password_hash = generate_password_hash(new_pw)
+                u.expires_at = checked.expires_at
+            if new_hash:
+                u.password_hash = new_hash
                 privilege_changed = True
             if privilege_changed:
                 # Bump the session epoch so the before_request revalidation
@@ -286,6 +356,15 @@ def register_admin_user_routes(app: Flask) -> None:
             _update_users(_mutate)
         except _NotFound:
             abort(404)
+        except RefusedEdit as exc:
+            # 400 like this route's other input errors; the users tab shows
+            # ``error`` whatever the status.
+            return jsonify({"error": str(exc)}), 400
+        if new_hash and session.get("user") == username:
+            # A new password ends every session of the account whose tag no
+            # longer matches (auth.revalidate_session); an admin changing
+            # their own password keeps this one by taking the new tag.
+            session["pw_fp"] = password_fingerprint(new_hash)
         return jsonify({"ok": True})
 
     @app.route("/api/admin/users/<username>/reset-password", methods=["POST"])
@@ -431,6 +510,33 @@ def register_admin_user_routes(app: Flask) -> None:
         """
         return jsonify(security.activity_log_stats())
 
+    @app.route("/api/admin/health/key_stores")
+    @require_admin
+    def api_admin_key_store_health():
+        """Whether the station and public-API key files load.
+
+        Each entry under ``failures`` reads, for example, "station_keys.yaml
+        unreadable since 21:29 UTC, serving last good keys until 21:44 UTC"
+        (``serving_stale_keys`` true) or failing closed. State is per gunicorn
+        worker; a reload is attempted first so the answer is current.
+        """
+        import api_keys
+        import station_keys
+
+        out: dict[str, Any] = {}
+        for name, mod in (("station_keys", station_keys), ("api_keys", api_keys)):
+            mod._get_indexes(mod.DEFAULT_KEYS_PATH)
+            out[name] = {"path": str(mod.DEFAULT_KEYS_PATH), "failures": mod._last_good.status()}
+        return jsonify(out)
+
+
+def _optional_float(value: Any) -> float | None:
+    """A form number that may be blank: None for a missing or empty value,
+    else the float. ``value or None`` turned az 0 (north) into None."""
+    if value is None or value == "":
+        return None
+    return float(value)
+
 
 def register_admin_network_routes(
     app: Flask,
@@ -439,14 +545,14 @@ def register_admin_network_routes(
     save_config: Callable[[], None],
     config_to_dict: Callable[[], dict[str, Any]],
     require_station: Callable[[str], StationConfig],
-    push_rotate_to_station: Callable[..., dict[str, Any]],
     session_for_url,
     config_path: "Path | None" = None,
+    config_store=None,
 ) -> None:
     """Attach the /api/admin/network-config + autodetect routes.
 
     The closure-bound helpers (``save_config`` / ``config_to_dict`` /
-    ``require_station`` / ``push_rotate_to_station``) are passed in from
+    ``require_station``) are passed in from
     ``create_app()`` rather than re-defined here — keeping the atomic
     write lock and tunnel reference shared with the rest of the dashboard.
     """
@@ -460,6 +566,25 @@ def register_admin_network_routes(
         if config_path:
             config_sync.sync_config(config_path)
 
+    @contextmanager
+    def mutate_config():
+        """Reload-from-disk, mutate, write -- then mirror the snapshot.
+
+        Every registry mutator runs inside this so a save starts from the
+        file, not from this worker's memory (see cache_store.ConfigStore):
+        two workers editing different cameras used to overwrite each other.
+        Falls back to the legacy whole-object save when no store is wired
+        (tests that build the routes without one).
+        """
+        if config_store is None:
+            yield config
+            save_config()
+            return
+        with config_store.mutation() as cfg:
+            yield cfg
+        if config_path:
+            config_sync.sync_config(config_path)
+
     @app.route("/api/admin/network-config")
     @require_admin
     def api_admin_network_config_get():
@@ -468,16 +593,15 @@ def register_admin_network_routes(
     @app.route("/api/admin/network-config/station/<host_key>", methods=["PATCH"])
     @require_admin
     def api_admin_network_config_station(host_key: str):
-        require_station(host_key)
-        st = config.stations[host_key]
         body = request.get_json(force=True) or {}
         allowed = {"ip", "label", "ssh_user", "proxy_media", "jump_hosts", "lat", "lon", "show_on_map", "public_tabs", "public", "location_name", "status", "push_enabled"}
-        updates = {k: v for k, v in body.items() if k in allowed}
         try:
-            config.stations[host_key] = st.model_copy(update=updates)
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"Validation failed: {exc}"}), 422
-        save_config()
+            with mutate_config():
+                require_station(host_key)
+                st = config.stations[host_key]
+                config.stations[host_key] = validated_edit(st, body, allowed)
+        except RefusedEdit as exc:
+            return jsonify({"ok": False, "error": str(exc)}), exc.status
         return jsonify({"ok": True})
 
     @app.route(
@@ -486,22 +610,24 @@ def register_admin_network_routes(
     )
     @require_admin
     def api_admin_network_config_camera_add(host_key: str):
-        require_station(host_key)
-        st = config.stations[host_key]
         body = request.get_json(force=True) or {}
         code = (body.get("code") or "").strip()
         if not code:
             return jsonify({"ok": False, "error": "code is required"}), 400
-        if any(c.code == code for c in st.cameras):
-            return jsonify({"ok": False, "error": f"Camera {code} already exists"}), 409
-        st.cameras.append(CameraConfig(
-            code=code,
-            cam_ip=body.get("cam_ip", ""),
-            rotate=bool(body.get("rotate", False)),
-            az=body.get("az") or None,
-            alt=body.get("alt") or None,
-        ))
-        save_config()
+        with mutate_config():
+            require_station(host_key)
+            st = config.stations[host_key]
+            if any(c.code == code for c in st.cameras):
+                return jsonify({"ok": False, "error": f"Camera {code} already exists"}), 409
+            st.cameras.append(CameraConfig(
+                code=code,
+                cam_ip=body.get("cam_ip", ""),
+                rotate=bool(body.get("rotate", False)),
+                az=_optional_float(body.get("az")),
+                alt=_optional_float(body.get("alt")),
+                host=(body.get("host") or "").strip(),
+                clips=bool(body.get("clips", True)),
+            ))
         return jsonify({"ok": True})
 
     @app.route(
@@ -510,31 +636,32 @@ def register_admin_network_routes(
     )
     @require_admin
     def api_admin_network_config_camera(host_key: str, cam_code: str):
-        require_station(host_key)
-        st = config.stations[host_key]
-        cam = next((c for c in st.cameras if c.code == cam_code), None)
-        if not cam:
-            abort(404)
         body = request.get_json(force=True) or {}
-        rotate_changed = "rotate" in body and bool(body["rotate"]) != bool(cam.rotate)
-        cam_allowed = {"cam_ip", "rotate", "az", "alt", "label", "code"}
-        cam_updates = {k: v for k, v in body.items() if k in cam_allowed}
+        cam_allowed = {"cam_ip", "rotate", "az", "alt", "label", "code", "host",
+                       "clips", "spectro"}
         try:
-            updated_cam = cam.model_copy(update=cam_updates)
-        except Exception as exc:
-            return jsonify({"ok": False, "error": f"Validation failed: {exc}"}), 422
-        idx = next(i for i, c in enumerate(st.cameras) if c.code == cam_code)
-        st.cameras[idx] = updated_cam
-        save_config()
+            with mutate_config():
+                require_station(host_key)
+                st = config.stations[host_key]
+                idx = next((i for i, c in enumerate(st.cameras) if c.code == cam_code), None)
+                if idx is None:
+                    abort(404)
+                updated_cam = validated_edit(st.cameras[idx], body, cam_allowed)
+                if not updated_cam.code.strip():
+                    raise RefusedEdit("Validation failed: code: must not be empty")
+                if updated_cam.code != cam_code and any(
+                        c.code == updated_cam.code for c in st.cameras):
+                    # Every per-camera lookup takes the first match, so a
+                    # second camera under one code would shadow the first.
+                    raise RefusedEdit(f"Camera {updated_cam.code} already exists", 409)
+                st.cameras[idx] = updated_cam
+        except RefusedEdit as exc:
+            return jsonify({"ok": False, "error": str(exc)}), exc.status
 
-        # Push rotate change to the station so its local config.json stays in
-        # sync with dashboard_config.yaml (the source of truth per PR #46).
-        # The station's `code` key in config.json matches the camera code here.
-        station_push = None
-        if rotate_changed:
-            target_code = body.get("code", cam_code)
-            station_push = push_rotate_to_station(host_key, target_code, bool(body["rotate"]))
-        return jsonify({"ok": True, "station_push": station_push})
+        # dashboard_config.yaml stays the source of truth; the rotate flag is
+        # no longer pushed to the station (read-only fleet, 2026-07) — the
+        # station picks it up on its next signed-bundle deploy.
+        return jsonify({"ok": True, "station_push": None})
 
     @app.route(
         "/api/admin/network-config/station/<host_key>/camera/<cam_code>",
@@ -542,38 +669,14 @@ def register_admin_network_routes(
     )
     @require_admin
     def api_admin_network_config_camera_delete(host_key: str, cam_code: str):
-        require_station(host_key)
-        st = config.stations[host_key]
-        st.cameras = [c for c in st.cameras if c.code != cam_code]
-        save_config()
+        with mutate_config():
+            require_station(host_key)
+            st = config.stations[host_key]
+            st.cameras = [c for c in st.cameras if c.code != cam_code]
         return jsonify({"ok": True})
 
-    @app.route("/api/admin/sync-rotate-all", methods=["POST"])
-    @require_admin
-    def api_admin_sync_rotate_all():
-        """Push the rotate flag from dashboard_config.yaml to every station's
-        live config.json via station API PATCH /api/settings.
-
-        One-shot repair for drift between dashboard config and deployed station
-        configs. Returns a per-camera result list."""
-        body = request.get_json(silent=True) or {}
-        only_host = body.get("host")
-        results: list[dict[str, Any]] = []
-        for host_key, st in config.stations.items():
-            if only_host and host_key != only_host:
-                continue
-            for cam in st.cameras:
-                push = push_rotate_to_station(host_key, cam.code, bool(cam.rotate))
-                results.append({
-                    "host": host_key,
-                    "cam": cam.code,
-                    "rotate": bool(cam.rotate),
-                    "ok": push["ok"],
-                    "error": push.get("error"),
-                })
-        total = len(results)
-        succeeded = sum(1 for r in results if r["ok"])
-        return jsonify({"ok": succeeded == total, "total": total, "succeeded": succeeded, "results": results})
+    # /api/admin/sync-rotate-all was removed 2026-07 (read-only fleet): rotate
+    # lives in dashboard_config.yaml and reaches stations via signed bundles.
 
     @app.route("/api/admin/autodetect", methods=["POST"])
     @require_admin
@@ -630,9 +733,6 @@ def register_admin_network_routes(
         host = body.get("host", "")
         if not re.match(r"^[a-z0-9_-]+$", host):
             return jsonify({"ok": False, "error": "Invalid host key"}), 400
-        if host in config.stations:
-            return jsonify({"ok": False, "error": f"Station '{host}' already exists"}), 409
-
         jump_raw = body.get("jump_hosts", [])
         jump_hosts = [j.strip() for j in jump_raw if j.strip()] if isinstance(jump_raw, list) else []
 
@@ -641,28 +741,31 @@ def register_admin_network_routes(
                 code=c.get("code", ""),
                 cam_ip=c.get("cam_ip", ""),
                 rotate=bool(c.get("rotate", False)),
+                host=(c.get("host") or "").strip(),
             )
             for c in (body.get("cameras") or [])
         ]
 
-        config.stations[host] = StationConfig(
-            ip=body.get("ip", ""),
-            label=body.get("label", host),
-            ssh_user=body.get("ssh_user", "gmn"),
-            proxy_media=bool(body.get("proxy_media", False)),
-            jump_hosts=jump_hosts,
-            cameras=cameras,
-            lat=body.get("lat") or None,
-            lon=body.get("lon") or None,
-            show_on_map=bool(body.get("show_on_map", True)),
-        )
-        save_config()
+        with mutate_config():
+            if host in config.stations:
+                return jsonify({"ok": False, "error": f"Station '{host}' already exists"}), 409
+            config.stations[host] = StationConfig(
+                ip=body.get("ip", ""),
+                label=body.get("label", host),
+                ssh_user=body.get("ssh_user", "gmn"),
+                proxy_media=bool(body.get("proxy_media", False)),
+                jump_hosts=jump_hosts,
+                cameras=cameras,
+                lat=body.get("lat") or None,
+                lon=body.get("lon") or None,
+                show_on_map=bool(body.get("show_on_map", True)),
+            )
         return jsonify({"ok": True})
 
     @app.route("/api/admin/network-config/station/<host_key>", methods=["DELETE"])
     @require_admin
     def api_admin_network_config_station_delete(host_key: str):
-        require_station(host_key)
-        config.stations.pop(host_key)
-        save_config()
+        with mutate_config():
+            require_station(host_key)
+            config.stations.pop(host_key)
         return jsonify({"ok": True})

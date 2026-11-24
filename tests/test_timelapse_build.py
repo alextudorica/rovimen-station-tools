@@ -39,6 +39,15 @@ def _base_cfg(tmp_path: Path, *, stacker_enabled: bool = True) -> dict:
     }
 
 
+def _ffmpeg(rc: int):
+    """A stand-in for ffmpeg that writes its output file (the last argument),
+    partially when it fails, and returns ``rc``."""
+    def run(cmd, *a, **k):
+        Path(cmd[-1]).write_bytes(b'mp4' if rc == 0 else b'partial')
+        return rc
+    return run
+
+
 # ---------------------------------------------------------------------------
 # build_timelapse
 # ---------------------------------------------------------------------------
@@ -53,7 +62,7 @@ class TestBuildTimelapse:
         result = build_timelapse('20260315', 'RO000H', stacks, out)
         assert result is None
 
-    @patch('timelapse_build.subprocess.call', return_value=0)
+    @patch('timelapse_build.subprocess.call', side_effect=_ffmpeg(0))
     def test_creates_output_dir(self, mock_call, tmp_path):
         stacks = tmp_path / 'stacks'
         _make_webp(stacks / 'RO000H_20260315_210000_stack.webp')
@@ -62,7 +71,7 @@ class TestBuildTimelapse:
         build_timelapse('20260315', 'RO000H', stacks, out)
         assert out.exists()
 
-    @patch('timelapse_build.subprocess.call', return_value=0)
+    @patch('timelapse_build.subprocess.call', side_effect=_ffmpeg(0))
     def test_output_filename_format(self, mock_call, tmp_path):
         stacks = tmp_path / 'stacks'
         _make_webp(stacks / 'RO000H_20260315_210000_stack.webp')
@@ -72,7 +81,7 @@ class TestBuildTimelapse:
         assert result.name == 'RO000H_20260315_timelapse.mp4'
         assert result.parent == out
 
-    @patch('timelapse_build.subprocess.call', return_value=0)
+    @patch('timelapse_build.subprocess.call', side_effect=_ffmpeg(0))
     def test_no_rotate(self, mock_call, tmp_path):
         """Without rotate, no vflip/hflip in ffmpeg command."""
         stacks = tmp_path / 'stacks'
@@ -82,7 +91,7 @@ class TestBuildTimelapse:
         cmd = mock_call.call_args[0][0]
         assert '-vf' not in cmd
 
-    @patch('timelapse_build.subprocess.call', return_value=0)
+    @patch('timelapse_build.subprocess.call', side_effect=_ffmpeg(0))
     def test_rotate_adds_vflip_hflip(self, mock_call, tmp_path):
         """rotate=True adds vflip,hflip filter."""
         stacks = tmp_path / 'stacks'
@@ -95,7 +104,7 @@ class TestBuildTimelapse:
         assert 'vflip' in vf_value
         assert 'hflip' in vf_value
 
-    @patch('timelapse_build.subprocess.call', return_value=1)
+    @patch('timelapse_build.subprocess.call', side_effect=_ffmpeg(1))
     def test_ffmpeg_failure_returns_none(self, mock_call, tmp_path):
         """Non-zero ffmpeg exit code returns None."""
         stacks = tmp_path / 'stacks'
@@ -104,7 +113,7 @@ class TestBuildTimelapse:
         result = build_timelapse('20260315', 'RO000H', stacks, out)
         assert result is None
 
-    @patch('timelapse_build.subprocess.call', return_value=0)
+    @patch('timelapse_build.subprocess.call', side_effect=_ffmpeg(0))
     def test_ffmpeg_command_structure(self, mock_call, tmp_path):
         """Verify key ffmpeg arguments."""
         stacks = tmp_path / 'stacks'
@@ -125,6 +134,14 @@ class TestBuildTimelapse:
 # ---------------------------------------------------------------------------
 
 class TestBuildNightStack:
+
+    @pytest.fixture(autouse=True)
+    def _no_rebalance(self, monkeypatch):
+        """These tests trace frame selection with saturated single-channel
+        markers; the composite white balance would pull those toward grey.
+        Its own behaviour is covered in test_night_composite_colour.py."""
+        monkeypatch.setattr(timelapse_build.cc, 'rebalance_composite',
+                            lambda img, cfg: img)
 
     def test_filters_to_2000_0200_window(self, tmp_path):
         """Only thumbnails between 20:00 and 02:00 UTC are included."""
@@ -170,16 +187,17 @@ class TestBuildNightStack:
     def test_per_pixel_maximum(self, tmp_path):
         """Night stack is the per-pixel maximum across frames."""
         thumbs = tmp_path / 'thumbs'
+        # 16:9, the sky of a 1280x720 stack; a taller thumbnail has a bar.
         # Frame 1: bright red in top-left
-        img1 = Image.new('RGB', (4, 4), (0, 0, 0))
+        img1 = Image.new('RGB', (16, 9), (0, 0, 0))
         img1.putpixel((0, 0), (255, 0, 0))
         p1 = thumbs / 'RO000H_20260315_210000_stack.webp'
         p1.parent.mkdir(parents=True, exist_ok=True)
         img1.save(str(p1), format='WEBP', lossless=True)
 
         # Frame 2: bright blue in bottom-right
-        img2 = Image.new('RGB', (4, 4), (0, 0, 0))
-        img2.putpixel((3, 3), (0, 0, 255))
+        img2 = Image.new('RGB', (16, 9), (0, 0, 0))
+        img2.putpixel((15, 8), (0, 0, 255))
         p2 = thumbs / 'RO000H_20260315_220000_stack.webp'
         img2.save(str(p2), format='WEBP', lossless=True)
 
@@ -189,7 +207,7 @@ class TestBuildNightStack:
         result = np.array(Image.open(out / 'RO000H_20260315_night_stack.webp').convert('RGB'))
         # Both bright pixels should be preserved
         assert result[0, 0, 0] == 255   # red at (0,0)
-        assert result[3, 3, 2] == 255   # blue at (3,3)
+        assert result[8, 15, 2] == 255  # blue at (15,8)
 
     def test_output_is_webp(self, tmp_path):
         thumbs = tmp_path / 'thumbs'
@@ -204,18 +222,18 @@ class TestBuildNightStack:
     def test_handles_different_sizes(self, tmp_path):
         """Images of different sizes are resized to match the first."""
         thumbs = tmp_path / 'thumbs'
-        # First image: 64x48
+        # First image: 64x36
         _make_webp(thumbs / 'RO000H_20260315_210000_stack.webp',
-                    width=64, height=48, color=(100, 0, 0))
-        # Second image: 128x96 (different size)
+                    width=64, height=36, color=(100, 0, 0))
+        # Second image: 128x72 (different size)
         _make_webp(thumbs / 'RO000H_20260315_220000_stack.webp',
-                    width=128, height=96, color=(0, 100, 0))
+                    width=128, height=72, color=(0, 100, 0))
         out = tmp_path / 'out'
         out.mkdir()
         build_night_stack('20260315', 'RO000H', thumbs, out)
         result = Image.open(out / 'RO000H_20260315_night_stack.webp')
         # Output should match first image dimensions
-        assert result.size == (64, 48)
+        assert result.size == (64, 36)
 
     def test_boundary_2000(self, tmp_path):
         """20:00 (hhmm=2000) is inside the window (>= 2000)."""
@@ -292,9 +310,11 @@ class TestBuild:
         build('RO000H', '20260315', cfg)
         mock_bt.assert_called_once_with(
             '20260315', 'RO000H', stacks, stacks.parent,
+            station_cfg=cfg.get('stations', {}).get('RO000H', {}), cfg=cfg,
         )
         mock_bns.assert_called_once_with(
-            '20260315', 'RO000H', thumbs, stacks.parent,
+            '20260315', 'RO000H', thumbs, stacks.parent, station_cfg={},
+            overlay_cfg=cfg.get('overlay'),
         )
 
     @patch('timelapse_build.build_night_stack')
@@ -349,3 +369,51 @@ class TestBuild:
         }
         build('RO000H', '20260315', cfg)
         mock_fm.mark_timelapse_done.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Size cap: the tunnel refuses a body over 100 MiB
+# ---------------------------------------------------------------------------
+
+class TestSizeCap:
+
+    @pytest.mark.parametrize('frames', [500, 1981, 2165, 3000])
+    def test_worst_case_fits_the_tunnel(self, frames):
+        """Budget over the whole clip plus one full VBV buffer stays under the
+        cap. 2165 frames is RO0017 (Tărâța) on 20260926, 151 MB at crf 18."""
+        args = timelapse_build._size_cap_args(frames)
+        kbps = int(args[args.index('-maxrate') + 1].rstrip('k'))
+        seconds = frames / timelapse_build._TIMELAPSE_FPS
+        worst = kbps * 1000 / 8 * (seconds + 1)
+        assert worst < timelapse_build.TUNNEL_MAX_BODY_BYTES
+
+    @patch('timelapse_build.subprocess.call', side_effect=_ffmpeg(0))
+    def test_plain_build_caps_the_bitrate(self, mock_call, tmp_path):
+        stacks = tmp_path / 'stacks'
+        for hhmmss in ('210000', '210020', '210040'):
+            _make_webp(stacks / f'RO000H_20260315_{hhmmss}_stack.webp')
+        build_timelapse('20260315', 'RO000H', stacks, tmp_path / 'out')
+        cmd = mock_call.call_args[0][0]
+        expected = timelapse_build._size_cap_args(3)
+        assert cmd[cmd.index('-maxrate'):cmd.index('-maxrate') + 4] == expected
+
+    @pytest.mark.skipif(__import__('shutil').which('ffmpeg') is None,
+                        reason='ffmpeg not installed')
+    def test_noisy_night_lands_under_the_budget(self, tmp_path, monkeypatch):
+        """Real ffmpeg: noise frames that crf 18 alone encodes far above a
+        small budget come out within budget plus one second of video."""
+        budget = 300_000
+        monkeypatch.setattr(timelapse_build, '_TIMELAPSE_MAX_BYTES', budget)
+        stacks = tmp_path / 'stacks'
+        stacks.mkdir()
+        rng = np.random.default_rng(0)
+        frames = 50
+        for i in range(frames):
+            noise = rng.integers(0, 256, (240, 320, 3), dtype=np.uint8)
+            Image.fromarray(noise).save(
+                stacks / f'RO000H_20260315_21{i // 3:02d}{i % 3 * 20:02d}_stack.webp',
+                format='WEBP', quality=90)
+        out = build_timelapse('20260315', 'RO000H', stacks, tmp_path / 'out')
+        assert out is not None
+        seconds = frames / timelapse_build._TIMELAPSE_FPS
+        assert out.stat().st_size < budget * (seconds + 1) / seconds

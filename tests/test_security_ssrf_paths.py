@@ -99,7 +99,7 @@ class TestAutodetectSSRFDenyList:
         pass with the default station API port."""
         assert validate_autodetect_target("100.64.0.3", 7779) is None
         assert validate_autodetect_target("100.64.0.1", 7779) is None
-        assert validate_autodetect_target("100.64.0.4", 7779) is None
+        assert validate_autodetect_target("100.64.0.5", 7779) is None
 
     def test_public_host_allowed(self) -> None:
         """An ordinary globally-routable host on a safe port is allowed.
@@ -246,7 +246,6 @@ def _make_autodetect_app(monkeypatch, audited: list[dict]):
         save_config=lambda: None,
         config_to_dict=lambda: {},
         require_station=lambda h: None,
-        push_rotate_to_station=lambda *a, **k: {},
         session_for_url=lambda url: _FakeSession(),
     )
     return app

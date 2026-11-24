@@ -47,9 +47,9 @@ def _seed_users(monkeypatch, **users: UserConfig) -> None:
 def test_status_picks_up_station_assigned_after_login(client, monkeypatch):
     # users.yaml now grants the host gmnro13 — but the live session predates it.
     _seed_users(monkeypatch,
-                andrei=UserConfig(role="host", stations=["gmnro13"]))
+                hostuser=UserConfig(role="host", stations=["gmnro13"]))
     with client.session_transaction() as sess:
-        sess["user"] = "andrei"
+        sess["user"] = "hostuser"
         sess["role"] = "host"
         sess["stations"] = []  # stale: assigned before gmnro13 existed
 
@@ -61,9 +61,9 @@ def test_status_picks_up_station_assigned_after_login(client, monkeypatch):
 
 def test_status_writes_refreshed_stations_back_into_session(client, monkeypatch):
     _seed_users(monkeypatch,
-                andrei=UserConfig(role="host", stations=["gmnro13"]))
+                hostuser=UserConfig(role="host", stations=["gmnro13"]))
     with client.session_transaction() as sess:
-        sess["user"] = "andrei"
+        sess["user"] = "hostuser"
         sess["role"] = "host"
         sess["stations"] = []
 
@@ -73,9 +73,9 @@ def test_status_writes_refreshed_stations_back_into_session(client, monkeypatch)
 
 
 def test_status_reflects_role_change(client, monkeypatch):
-    _seed_users(monkeypatch, alex=UserConfig(role="admin", stations=[]))
+    _seed_users(monkeypatch, operator=UserConfig(role="admin", stations=[]))
     with client.session_transaction() as sess:
-        sess["user"] = "alex"
+        sess["user"] = "operator"
         sess["role"] = "host"  # stale, since promoted to admin
         sess["stations"] = ["gmnro02"]
 
@@ -145,13 +145,14 @@ def _seed_auth_users(monkeypatch, **users: UserConfig) -> None:
 def test_revalidate_refreshes_stations_on_epoch_bump(gated_client, monkeypatch):
     # users.yaml now reflects a de-scope (gmnro13 removed) AND a bumped epoch.
     _seed_auth_users(monkeypatch,
-                     andrei=UserConfig(role="host", stations=[],
+                     hostuser=UserConfig(role="host", stations=[],
                                        session_epoch=1))
     with gated_client.session_transaction() as sess:
-        sess["user"] = "andrei"
+        sess["user"] = "hostuser"
         sess["role"] = "host"
         sess["stations"] = ["gmnro13"]   # stale grant from before the de-scope
         sess["session_epoch"] = 0        # pre-bump snapshot
+        sess["pw_fp"] = auth_module.password_fingerprint("")  # tagged session
 
     body = gated_client.get("/api/whoami").get_json()
     assert body["stations"] == []        # live value adopted
@@ -160,13 +161,14 @@ def test_revalidate_refreshes_stations_on_epoch_bump(gated_client, monkeypatch):
 
 def test_revalidate_demotes_admin_to_host_on_epoch_bump(gated_client, monkeypatch):
     _seed_auth_users(monkeypatch,
-                     alex=UserConfig(role="host", stations=["gmnro02"],
+                     operator=UserConfig(role="host", stations=["gmnro02"],
                                      session_epoch=5))
     with gated_client.session_transaction() as sess:
-        sess["user"] = "alex"
+        sess["user"] = "operator"
         sess["role"] = "admin"           # stale: was admin, now demoted
         sess["stations"] = []
         sess["session_epoch"] = 4
+        sess["pw_fp"] = auth_module.password_fingerprint("")  # tagged session
 
     body = gated_client.get("/api/whoami").get_json()
     assert body["role"] == "host"
@@ -176,10 +178,10 @@ def test_revalidate_demotes_admin_to_host_on_epoch_bump(gated_client, monkeypatc
 def test_revalidate_noop_when_epoch_matches(gated_client, monkeypatch):
     # No privilege change → session left exactly as-is, no surprise refresh.
     _seed_auth_users(monkeypatch,
-                     andrei=UserConfig(role="host", stations=["gmnro13"],
+                     hostuser=UserConfig(role="host", stations=["gmnro13"],
                                        session_epoch=3))
     with gated_client.session_transaction() as sess:
-        sess["user"] = "andrei"
+        sess["user"] = "hostuser"
         sess["role"] = "host"
         sess["stations"] = ["gmnro13"]
         sess["session_epoch"] = 3

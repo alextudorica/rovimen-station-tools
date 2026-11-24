@@ -14,6 +14,7 @@ config-model path is exercised, not a re-implementation.
 
 from __future__ import annotations
 
+import re
 import os
 import tempfile
 from pathlib import Path
@@ -134,7 +135,7 @@ def test_enabled_page_is_anon_reachable():
     app = _build_app(["overview", "station", "events", "live", "showers"])
     anon = app.test_client()
     assert anon.get("/events").status_code == 200
-    assert anon.get("/live").status_code == 200
+    assert anon.get("/live").headers.get("Location", "").endswith("/network#live")
     assert anon.get("/showers").status_code == 200
 
 
@@ -150,7 +151,7 @@ def test_disabled_page_is_gated_for_anon_but_ok_for_user():
         f"disabled page must be gated for anon, got {resp.status_code}"
     )
     # A still-enabled sibling remains reachable — proves it's a per-page flip.
-    assert anon.get("/live").status_code == 200
+    assert anon.get("/live").headers.get("Location", "").endswith("/network#live")
     # Logged-in operators are unaffected by the public toggle.
     assert _logged_in(app).get("/events").status_code == 200
 
@@ -217,8 +218,54 @@ def test_unknown_page_keys_are_dropped_not_exposed():
     # (neither is a page key — no @page= tag — so they can never go public).
     app = _build_app(["overview", "admin", "config"])
     anon = app.test_client()
+
     for path in ("/admin", "/config"):
         assert anon.get(path).status_code in (302, 401, 403), path
+
+
+def test_every_page_tag_is_eligible():
+    """Every ``@public_route(page=...)`` key must be in ``PUBLIC_PAGE_KEYS``.
+
+    The fail-closed drop in :func:`_drop_unknown_public_pages` is correct
+    security behaviour, but it turns a missing key into an *invisible dead
+    feature*: the route advertises itself as runtime-toggleable while the
+    config entry enabling it is silently discarded, so the page can never go
+    public without a code deploy. That is exactly how the /wiki build guide
+    shipped inert in #816. Cross-check the two sides so the next page-tagged
+    route can't repeat it.
+    """
+    from models import PUBLIC_PAGE_KEYS
+    from security import _PUBLIC_PAGE_ATTR
+
+    app = _build_app(sorted(PUBLIC_PAGE_KEYS))
+    tagged = {
+        page
+        for view in app.view_functions.values()
+        if (page := getattr(view, _PUBLIC_PAGE_ATTR, None)) is not None
+    }
+
+    assert tagged <= PUBLIC_PAGE_KEYS, (
+        f"page tags absent from PUBLIC_PAGE_KEYS (silently dropped, page stays "
+        f"login-gated forever): {sorted(tagged - PUBLIC_PAGE_KEYS)}"
+    )
+    assert PUBLIC_PAGE_KEYS <= tagged, (
+        f"eligible keys no route claims (dead vocabulary — an operator can "
+        f"enable them and nothing happens): {sorted(PUBLIC_PAGE_KEYS - tagged)}"
+    )
+
+
+def test_wiki_build_guide_is_anon_reachable_when_enabled():
+    """The build guide is the page a prospective operator reads *before* they
+    have an account, so it must survive the toggle end-to-end (#816 shipped it
+    unreachable). Both URLs are tagged; both must open, and both must re-gate
+    when the key is dropped."""
+    anon = _build_app(["wiki"]).test_client()
+    for path in ("/wiki", "/build"):
+        assert anon.get(path).status_code == 200, path
+
+    gated = _build_app(["events"]).test_client()
+    for path in ("/wiki", "/build"):
+        assert gated.get(path).status_code in (302, 401), path
 
 
 # ── 4. Sensitive routes can never be exposed by config ────────────────────
@@ -253,21 +300,21 @@ def test_sensitive_routes_never_public_even_if_key_added(path):
 # ── 5. Public front page renders for anon and shows only enabled pages ────
 
 
-def test_anon_root_is_map_with_hero_when_overview_on():
-    """With "overview" enabled, the anon landing at "/" is the fleet map (has a
-    Leaflet map element) plus the hero/intro block."""
+def test_anon_root_is_home_with_hero_when_overview_on():
+    """With "overview" enabled, the anon landing at "/" is the home page: the
+    hero/intro block and the latest plots (the map is on /network)."""
     app = _build_app(["overview", "live"])
     resp = app.test_client().get("/")
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
-    assert 'id="map"' in html                       # the fleet map itself
-    assert "GLOBAL METEOR NETWORK" in html          # hero title
+    assert 'id="ov-stacks"' in html                 # the latest plots
+    assert "ROVIMEN, Romanian Video Meteor Network" in html          # hero title
     assert "Explore the public data below" in html  # hero body
     # Top-nav tabs are gated on ``public_pages`` for anon: "overview" is on so
-    # the Stations tab renders, but events/showers/highlights are NOT public in
+    # the Network overview tab renders, but events/showers/highlights are NOT public in
     # this build, so those sibling tabs must be absent — a visible-but-gated tab
     # would just bounce an anonymous visitor to /login.
-    assert 'href="/map"' in html
+    assert 'href="/network"' in html
     assert 'href="/events"' not in html
     assert 'href="/showers"' not in html
     assert 'href="/highlights"' not in html
@@ -292,13 +339,12 @@ def test_anon_root_gated_when_overview_off():
     assert app.test_client().get("/").status_code in (302, 401)
 
 
-def test_logged_in_root_serves_operator_overview():
-    """Operators land on the operator overview dashboard (the map shell) — and
-    never see the anon hero/intro block."""
+def test_logged_in_root_serves_the_home_page():
+    """Operators land on the same home page as visitors, branded hero included."""
     app = _build_app(["overview"])
     html = _logged_in(app).get("/").get_data(as_text=True)
-    assert 'id="map"' in html                        # operator overview shell
-    assert "GLOBAL METEOR NETWORK" not in html       # hero is anon-only
+    assert 'id="ov-stacks"' in html                  # the latest plots
+    assert "ROVIMEN, Romanian Video Meteor Network" in html           # hero for everyone
 
 
 # ── 6. Default (key omitted) preserves the #628 public surface ────────────
@@ -312,8 +358,35 @@ def test_default_public_pages_preserves_all_eligible():
 
     app = _build_app(None)  # omit the key entirely
     anon = app.test_client()
-    for path in ("/events", "/live", "/showers"):
+    for path in ("/events", "/network", "/showers"):
         assert anon.get(path).status_code == 200, path
+    # /live is the live section of Network overview now
+    assert anon.get("/live").headers.get("Location", "").endswith("/network#live")
+
+
+# ── 6b. Build-guide language routing ──────────────────────────────────────
+#
+# ``/wiki`` and ``/wiki/<lang>`` resolve through an allow-list, so a language
+# code can never reach the template loader. Asserted logged-in: whether anon
+# may read the guide is the ``public_pages`` question above, independent of
+# which translation a URL selects.
+
+
+def test_wiki_language_routes_render_their_own_template():
+    client = _logged_in(_build_app(None))
+    assert "Build a meteor camera station" in client.get("/wiki").get_data(as_text=True)
+    assert "Build a meteor camera station" in client.get("/wiki/en").get_data(as_text=True)
+    ro = client.get("/wiki/ro").get_data(as_text=True)
+    assert "Cum construie" in ro, "/wiki/ro must render the Romanian template"
+    assert "Build a meteor camera station" not in ro
+
+
+def test_wiki_unknown_language_is_404():
+    """A wrong language code is a broken link somewhere; falling back to
+    English silently would hide it."""
+    client = _logged_in(_build_app(None))
+    for lang in ("de", "../admin", "wiki.html"):
+        assert client.get(f"/wiki/{lang}").status_code == 404, lang
 
 
 # ── 7. Operator's final public surface: [events, showers, highlights] ─────
@@ -479,12 +552,13 @@ def _map_app():
 @pytest.mark.parametrize(
     "path",
     [
-        "/", "/map", "/stations", "/events", "/showers", "/highlights",
+        "/", "/network", "/events", "/showers", "/highlights",
     ],
 )
 def test_map_surface_anon_pages_reachable(path):
-    """With overview on alongside the curated pages, the fleet-map page (/map,
-    /stations) plus the always-on landing render 200 for anon."""
+    """With overview on alongside the curated pages, the Network overview
+    (which carries the fleet map) plus the always-on landing render 200 for
+    anon."""
     assert _map_app().test_client().get(path).status_code == 200, path
 
 
@@ -532,23 +606,34 @@ def test_map_surface_anon_payloads_have_no_ip_or_cam_ip():
             assert banned not in raw, f"{path} leaked {banned}"
 
 
-def test_map_surface_root_is_map_with_hero_for_anon():
-    """The fleet map is the anon landing at '/' when overview is enabled: it
-    serves the Leaflet map shell plus the hero/intro block. '/map' is the same
-    shell (no hero)."""
-    root = _map_app().test_client().get("/").get_data(as_text=True)
-    assert "leaflet" in root.lower(), "'/' must serve the fleet map for anon"
-    assert "GLOBAL METEOR NETWORK" in root, "'/' must carry the anon hero"
-    # /map is the same shell, reachable, but without the hero (it's landing-only).
-    map_html = _map_app().test_client().get("/map").get_data(as_text=True)
-    assert "leaflet" in map_html.lower()
-    assert "GLOBAL METEOR NETWORK" not in map_html
+def test_map_surface_root_is_home_and_map_is_on_network_for_anon():
+    """With overview enabled, '/' is the home page (hero, numbers, latest
+    plots) and the fleet map is on the Network overview (Leaflet, no hero);
+    '/map' redirects there."""
+    client = _map_app().test_client()
+    root = client.get("/").get_data(as_text=True)
+    assert "ROVIMEN, Romanian Video Meteor Network" in root, "'/' must carry the anon hero"
+    assert 'id="ov-stacks"' in root
+    assert "leaflet" not in root.lower(), "the map is on /network"
+    net = client.get("/network").get_data(as_text=True)
+    assert "leaflet" in net.lower() and 'id="map"' in net
+    assert "ROVIMEN, Romanian Video Meteor Network" not in net
+    assert client.get("/map").status_code == 302
 
 
-def test_map_surface_logged_in_root_is_overview():
-    """Logged-in operators keep the operator overview at '/' (unchanged)."""
+def test_map_surface_network_overview_for_anon():
+    """'/network' is Network overview: the coverage numbers, the map, the
+    station status and the button-loaded live snapshot, under the same
+    overview toggle."""
+    html = _map_app().test_client().get("/network").get_data(as_text=True)
+    assert 'id="nw-section"' in html and 'id="ov-live-bar-btn"' in html
+    assert 'id="ov-net-stats"' in html and 'id="map"' in html
+
+
+def test_map_surface_logged_in_root_is_home():
+    """Logged-in operators get the same home page at '/'."""
     html = _logged_in(_map_app()).get("/").get_data(as_text=True)
-    assert "leaflet" in html.lower(), "operator '/' should still be the map"
+    assert 'id="ov-stacks"' in html
 
 
 @pytest.mark.parametrize(
@@ -566,3 +651,73 @@ def test_map_surface_mutations_still_blocked(method, path):
     assert not (200 <= resp.status_code < 300), (
         f"{method} {path} must never succeed for anon, got {resp.status_code}"
     )
+
+
+# ── 7. One shared nav on every page (templates/_nav.html) ──────────────────
+# Five templates used to hard-code their nav: "Stations" went to "/" there
+# and to "/map" elsewhere, Social was missing on two pages, Calibration had
+# no inbound link, and an anonymous visitor on a public station page saw
+# tabs that only bounced to /login.
+
+_NAV_PAGES = ["/", "/network", "/events", "/highlights", "/showers", "/wiki", "/wiki/ro",
+              "/calibration", "/station/pub_station", "/admin", "/config", "/social"]
+
+
+def _nav_html(html):
+    """The four main tabs plus the right-hand group (Build a station, Tools menu)."""
+    start = html.index('class="main-nav"')
+    return html[start:html.index("</details>", start)]
+
+
+def test_every_page_renders_the_same_nav():
+    app = _build_app(["overview", "station", "events", "showers"])
+    client = _logged_in(app)
+    for path in _NAV_PAGES:
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        html = resp.get_data(as_text=True)
+        assert html.count('class="main-nav"') == 1, path
+        assert 'href="/network" class="nav-tab' in html, f"{path}: must link to the Network overview"
+        assert 'href="/map"' not in html, f"{path}: the Map tab is gone (the map is on /network)"
+        assert 'href="/" class="nav-tab' not in html, path
+        for link_id in ("logo-dd-calibration", "logo-dd-social", "logo-dd-admin"):
+            assert f'id="{link_id}"' in html, f"{path}: missing {link_id}"
+        assert "openAppPanel('about')" in html, path
+
+
+def test_nav_marks_the_current_page():
+    app = _build_app(["overview", "station", "events"])
+    client = _logged_in(app)
+    cases = {
+        "/events": 'href="/events" class="nav-tab active"',
+        "/station/pub_station": 'href="/network" class="nav-tab active"',
+        "/network": 'href="/network" class="nav-tab active"',
+        "/wiki/ro": 'href="/wiki/ro" class="nav-tab nav-tab-guide active"',
+        "/calibration": 'class="nav-tab nav-tab-admin active" id="logo-dd-calibration"',
+        "/admin": 'class="nav-tab nav-tab-admin active" id="logo-dd-admin"',
+    }
+    for path, needle in cases.items():
+        nav = _nav_html(client.get(path).get_data(as_text=True))
+        assert needle in nav, path
+        # One destination is current (the mobile and desktop copies of
+        # "Build a station" share a URL).
+        current = set(re.findall(r'href="([^"]+)"[^>]*aria-current="page"', nav))
+        assert len(current) == 1, (path, current)
+
+
+def test_admin_links_render_hidden_except_on_their_own_page():
+    app = _build_app(["overview", "station", "events"])
+    html = _logged_in(app).get("/events").get_data(as_text=True)
+    assert 'id="logo-dd-admin" style="display:none"' in html
+    cal = _logged_in(app).get("/calibration").get_data(as_text=True)
+    assert 'id="logo-dd-calibration" style="display:none"' not in cal
+
+
+def test_anon_station_page_nav_hides_gated_tabs():
+    app = _build_app(["overview", "station"])  # events/highlights/showers off
+    resp = app.test_client().get("/station/pub_station")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert 'href="/network"' in html
+    for gated in ('href="/events"', 'href="/highlights"', 'href="/showers"'):
+        assert gated not in html, gated

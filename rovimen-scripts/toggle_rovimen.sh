@@ -24,11 +24,9 @@ dim()  { echo -e "${DIM}     $*${NC}"; }
 
 # ── Services ──────────────────────────────────────────────────────────────────
 SERVICES=(color-capture rovimen-station-api)
-[ -f /etc/systemd/system/camera-focus.service ] && SERVICES+=(camera-focus)
 [ -f /etc/systemd/system/detection-indexer.service ] && SERVICES+=(detection-indexer)
 # station-api is never stopped by 'off' — dashboard must stay reachable
 STOPPABLE_SERVICES=(color-capture)
-[ -f /etc/systemd/system/camera-focus.service ] && STOPPABLE_SERVICES+=(camera-focus)
 [ -f /etc/systemd/system/detection-indexer.service ] && STOPPABLE_SERVICES+=(detection-indexer)
 
 # ── Cron files ────────────────────────────────────────────────────────────────
@@ -54,31 +52,83 @@ _venv_python() {
 }
 
 # ── Cron content ──────────────────────────────────────────────────────────────
+# Root copies the cron files into /etc/cron.d, so they are staged in this
+# directory, which only the station user can write. A fixed /tmp name can be
+# created first by any local user, who then chooses what root installs.
+
+# Copy one staged cron file into /etc/cron.d with the exact command that
+# /etc/sudoers.d/rovimen allows (updater.sh _ensure_sudoers). A station with no
+# other sudo (gmnro07 București, gmnro08 Brașov, gmnde00 Johannismühle) has the
+# rule for this source only once the updater has rewritten that file, which it
+# does after this step in the same pass; until then only the old /tmp source is
+# allowed, so fall back to it. The /tmp copy is created with O_EXCL and no
+# symlink following, so a name someone else made first fails the install
+# instead of being copied by root.
+_install_cron_file() {
+    local job="$1"; shift
+    local src="$SCRIPTS_DIR/.rovimen_cron_$job" dst="/etc/cron.d/rovimen-$job"
+    local legacy="/tmp/rovimen_cron_$job" rc=0
+    "$@" cp "$src" "$dst" 2>/dev/null && return 0
+    rm -f "$legacy" 2>/dev/null || true
+    python3 - "$src" "$legacy" <<'PY' || return 1
+import os, sys
+try:
+    fd = os.open(sys.argv[2], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+except OSError as exc:
+    sys.exit("cannot create %s: %s" % (sys.argv[2], exc))
+with open(sys.argv[1], "rb") as src, os.fdopen(fd, "wb") as dst:
+    dst.write(src.read())
+PY
+    "$@" cp "$legacy" "$dst" || rc=$?
+    rm -f "$legacy"
+    return "$rc"
+}
+
 _write_crons() {
     local venv_python
     venv_python=$(_venv_python)
 
-    cat > /tmp/rovimen_cron_dawn <<EOF
+    # Both wall-clock schedules below are stated in UTC and are only in UTC
+    # because the fleet standard is a UTC host clock. Debian/Ubuntu cron
+    # (ISC/Vixie 3.0pl1) evaluates schedules in the daemon's timezone and has no
+    # per-file override: CRON_TZ is a cronie extension the binary does not
+    # implement, and TZ= reaches the child process only, never the scheduler.
+    # A station left on local time therefore runs these at the wrong UTC hour,
+    # and the only fix is `timedatectl set-timezone UTC` on the host.
+    cat > "$SCRIPTS_DIR/.rovimen_cron_dawn" <<EOF
 # ROVIMEN morning processing — every 15 min from 04:00-10:00 UTC
+# Times are host-local; the fleet standard is a UTC host clock.
 # Processes post-RMS pipeline: EON lock → stack → timelapse → reencode → upload
-*/15 4-10 * * * $INSTALL_USER nice -n 10 ionice -c 3 $venv_python $SCRIPTS_DIR/dawn_process.py >> $HOME/logs/rovimen_dawn.log 2>&1
+*/15 4-12 * * * $INSTALL_USER nice -n 10 ionice -c 3 $venv_python $SCRIPTS_DIR/dawn_process.py >> $HOME/logs/rovimen_dawn.log 2>&1
 EOF
 
-    cat > /tmp/rovimen_cron_janitor <<EOF
+    cat > "$SCRIPTS_DIR/.rovimen_cron_janitor" <<EOF
 # ROVIMEN janitor — disk retention + pressure escalation every 10 min
-*/10 * * * * $INSTALL_USER $venv_python $SCRIPTS_DIR/janitor_storage_watchdog.py -c $CONFIG >> $HOME/logs/rovimen_janitor.log 2>&1
+# Deprioritised: the sweep walks every retention tier, and on a constrained
+# host that I/O burst stalls the RTSP capture pipeline. Measured at Cahul
+# (Pi 5, 2 cams): capture stalls ran 22% per chunk in minutes 0-2 of each
+# 10-minute period against 4.6% in minutes 3-9 — a 4.6-5.0x excess aligned
+# with this job, reproduced on both cameras across three nights, while the
+# same janitor on a roomier host (Ghirdoveni, i7) costs nothing.
+# Best-effort class 7, NOT idle (ionice -c 3) like the dawn cron: the janitor
+# owns disk-pressure escalation, so it has to keep making progress on exactly
+# the full-disk host where an idle-class job would be starved indefinitely.
+*/10 * * * * $INSTALL_USER nice -n 19 ionice -c 2 -n 7 $venv_python $SCRIPTS_DIR/janitor_storage_watchdog.py -c $CONFIG >> $HOME/logs/rovimen_janitor.log 2>&1
 EOF
 
-    cat > /tmp/rovimen_cron_reboot <<EOF
-# ROVIMEN reboot guard — waits for morning_done before rebooting (4h timeout)
-0 12 * * * $INSTALL_USER $SCRIPTS_DIR/reboot_guard.sh >> $HOME/logs/rovimen_reboot.log 2>&1
+    cat > "$SCRIPTS_DIR/.rovimen_cron_reboot" <<EOF
+# ROVIMEN reboot guard — waits for morning_done, does not reboot on timeout
+# 13:45 UTC every day: 30 min after the 13:15 dawn deadline, 34 min before the
+# earliest sunset in the fleet (about 14:20 UTC, in December). Times are host-local;
+# the fleet standard is a UTC host clock.
+45 13 * * * $INSTALL_USER $SCRIPTS_DIR/reboot_guard.sh >> $HOME/logs/rovimen_reboot.log 2>&1
 EOF
 
     # Only write cron.d files (requires sudo) if content has changed
     local need_write=0
     for pair in "dawn:/etc/cron.d/rovimen-dawn" "janitor:/etc/cron.d/rovimen-janitor" "reboot:/etc/cron.d/rovimen-reboot"; do
         local key="${pair%%:*}" dst="${pair##*:}"
-        if ! diff -q "/tmp/rovimen_cron_${key}" "$dst" > /dev/null 2>&1; then
+        if ! diff -q "$SCRIPTS_DIR/.rovimen_cron_${key}" "$dst" > /dev/null 2>&1; then
             need_write=1
             break
         fi
@@ -89,13 +139,22 @@ EOF
 
     chmod +x "$SCRIPTS_DIR/reboot_guard.sh" 2>/dev/null || true
 
+    # Run the exact commands that /etc/sudoers.d/rovimen allows (updater.sh
+    # _ensure_sudoers). Probing with `sudo -n true` needs blanket sudo, so on
+    # a station that has only those rules (gmnro07 București, gmnro08 Brașov,
+    # gmnde00 Johannismühle) the probe failed and the crons stayed months old.
+    # Prompt for a password only when someone is at the terminal.
+    local sudo=(sudo -n)
+    [ -t 0 ] && sudo=(sudo)
+
     if [ "$need_write" -eq 1 ] || [ "$legacy_cron_exists" -eq 1 ]; then
-        if sudo -n true 2>/dev/null; then
-            sudo cp  /tmp/rovimen_cron_dawn    /etc/cron.d/rovimen-dawn
-            sudo cp  /tmp/rovimen_cron_janitor /etc/cron.d/rovimen-janitor
-            sudo cp  /tmp/rovimen_cron_reboot  /etc/cron.d/rovimen-reboot
-            sudo chmod 644 /etc/cron.d/rovimen-dawn /etc/cron.d/rovimen-janitor /etc/cron.d/rovimen-reboot
-            [ "$legacy_cron_exists" -eq 1 ] && sudo rm /etc/cron.d/daily-reboot && info "Removed old /etc/cron.d/daily-reboot"
+        if _install_cron_file dawn "${sudo[@]}" \
+            && _install_cron_file janitor "${sudo[@]}" \
+            && _install_cron_file reboot "${sudo[@]}" \
+            && "${sudo[@]}" chmod 644 /etc/cron.d/rovimen-dawn /etc/cron.d/rovimen-janitor /etc/cron.d/rovimen-reboot; then
+            if [ "$legacy_cron_exists" -eq 1 ] && "${sudo[@]}" rm /etc/cron.d/daily-reboot; then
+                info "Removed old /etc/cron.d/daily-reboot"
+            fi
             info "Cron files updated"
         else
             warn "Cron files need updating but sudo requires a password — run 'toggle_rovimen.sh on' manually to apply"
@@ -104,7 +163,7 @@ EOF
         info "Cron files already current"
     fi
 
-    rm /tmp/rovimen_cron_dawn /tmp/rovimen_cron_janitor /tmp/rovimen_cron_reboot
+    rm -f "$SCRIPTS_DIR/.rovimen_cron_dawn" "$SCRIPTS_DIR/.rovimen_cron_janitor" "$SCRIPTS_DIR/.rovimen_cron_reboot"
 
     # User crontab — fix_cam_encoding @reboot + updater
     # Always strip existing rovimen entries first so re-running toggle on is idempotent.
@@ -114,9 +173,15 @@ EOF
     existing="${existing}"$'\n'"@reboot sleep 120 && bash $SCRIPTS_DIR/fix_cam_encoding.sh"
     existing="${existing}"$'\n'"@reboot sleep 300 && nice -n 10 ionice -c 3 $venv_python $SCRIPTS_DIR/dawn_process.py >> $HOME/logs/rovimen_dawn.log 2>&1"
     existing="${existing}"$'\n'"30 15 * * * bash $SCRIPTS_DIR/fix_cam_encoding.sh >> $HOME/logs/rovimen_fixcam.log 2>&1"
-    existing="${existing}"$'\n'"30 12 * * * /usr/bin/bash $SCRIPTS_DIR/updater.sh >> $HOME/logs/updater.log 2>&1"
-    existing="${existing}"$'\n'"15 13 * * * /usr/bin/bash $SCRIPTS_DIR/updater.sh >> $HOME/logs/updater.log 2>&1"
+    # After the 13:45 reboot (never during it), around the earliest sunset
+    # (capture starts later, once the sun is well down); the updater adds up to
+    # 10 min of jitter.
     existing="${existing}"$'\n'"0  14 * * * /usr/bin/bash $SCRIPTS_DIR/updater.sh >> $HOME/logs/updater.log 2>&1"
+    existing="${existing}"$'\n'"15 14 * * * /usr/bin/bash $SCRIPTS_DIR/updater.sh >> $HOME/logs/updater.log 2>&1"
+    # Late-afternoon retry for a station that missed both (offline, or its
+    # updater deferred). 16:45 is after processing; on winter evenings it is
+    # after dusk, but the updater only restarts rovimen services, never RMS.
+    existing="${existing}"$'\n'"45 16 * * * /usr/bin/bash $SCRIPTS_DIR/updater.sh >> $HOME/logs/updater.log 2>&1"
     echo "$existing" | crontab -
     info "fix_cam_encoding @reboot + updater.sh crontab installed"
 }
@@ -270,7 +335,7 @@ cmd_status() {
         echo -e "    ${YLW}–${NC}  fix_cam_encoding @reboot + 15:30 UTC (not installed)"
     fi
     if echo "$tab" | grep -q "updater.sh"; then
-        echo -e "    ${GRN}✓${NC}  updater.sh (12:30, 13:15, 14:00 UTC)"
+        echo -e "    ${GRN}✓${NC}  updater.sh (14:00, 14:15 + 16:45 retry)"
     else
         echo -e "    ${YLW}–${NC}  updater.sh (not installed)"
     fi

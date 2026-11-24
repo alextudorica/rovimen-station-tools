@@ -79,14 +79,18 @@ test.describe('VDB modal lifecycle', () => {
     await page.click('#tab-btn-videodb');
     await page.waitForTimeout(500);
 
-    const clip = page.locator('.vdb-tile').first();
-    if (await clip.isVisible()) {
-      await clip.click();
-      await page.waitForTimeout(300);
+    // `.vdb-tile` is a class the renderer never emits; behind isVisible() that
+    // made this whole assertion silently no-op. The card class is
+    // `.vdb-chunk-card`, and the click must land on the thumbnail/placeholder
+    // rather than the card centre (a link post-#492) — same targeting as
+    // vdb-buttons.spec.js.
+    const clip = page.locator('.vdb-chunk-card').first();
+    await expect(clip).toBeVisible({ timeout: 5000 });
+    await clip.locator('.vdb-chunk-nostack, img').first().click();
 
-      const modal = page.locator('#vdb-modal');
-      await expect(modal).toBeVisible({ timeout: 2000 });
-    }
+    // The clip viewer is the shared VideoModal (.vm-backdrop.open), not a
+    // static #vdb-modal element.
+    await expect(page.locator('.vm-backdrop.open').first()).toBeVisible({ timeout: 3000 });
 
     expect(errors).toEqual([]);
   });
@@ -99,17 +103,22 @@ test.describe('VDB modal lifecycle', () => {
     await page.click('#tab-btn-videodb');
     await page.waitForTimeout(500);
 
-    const clips = page.locator('.vdb-tile');
-    if (await clips.first().isVisible()) {
-      await clips.first().click();
-      await page.waitForTimeout(300);
+    const clips = page.locator('.vdb-chunk-card');
+    const backdrop = page.locator('.vm-backdrop.open').first();
+    const openTarget = () => clips.first().locator('.vdb-chunk-nostack, img').first();
+    await expect(clips.first()).toBeVisible({ timeout: 5000 });
 
-      await page.keyboard.press('Escape');
-      await page.waitForTimeout(200);
+    await openTarget().click();
+    await expect(backdrop).toBeVisible({ timeout: 3000 });
 
-      await clips.first().click();
-      await page.waitForTimeout(300);
-    }
+    // Close via the modal's own button. Escape is deliberately not used:
+    // VideoModal binds no keydown handler (MultiDetModal does), so Escape is a
+    // no-op here — a separate gap, not something this test should assert.
+    await page.locator('.vm-backdrop.open .vm-close-btn').first().click();
+    await expect(page.locator('.vm-backdrop.open')).toHaveCount(0, { timeout: 3000 });
+
+    await openTarget().click();
+    await expect(page.locator('.vm-backdrop.open').first()).toBeVisible({ timeout: 3000 });
 
     expect(errors).toEqual([]);
   });

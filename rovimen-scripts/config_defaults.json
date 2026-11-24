@@ -9,46 +9,83 @@
       "enabled": true,
       "realtime": true,
       "nice": 10,
-      "cpu_quota": 50
+      "cpu_quota": 50,
+      "scope": "all"
     },
     "detection_lock": {
-      "enabled": true
+      "enabled": true,
+      "midnight_enabled": true
     },
     "archive_upload": {
-      "enabled": false
+      "enabled": true
     },
     "timelapse_build": {
       "enabled": true
     },
     "reencode": {
+      "enabled": true,
+      "full_night": "auto",
+      "meteor_clips": true
+    },
+    "overlay_details": {
+      "enabled": true
+    },
+    "fps_guard": {
+      "enabled": true,
+      "mode": "report"
+    },
+    "cam_stall": {
+      "enabled": true,
+      "mode": "report"
+    },
+    "sky_dome_render": {
+      "enabled": false,
+      "interval_s": 600
+    },
+    "fireball_watch": {
       "enabled": true
     }
   },
+  "push": {
+    "heartbeat_interval": 45,
+    "vitals_interval": 60,
+    "detections_interval": 300,
+    "media_interval": 900,
+    "live_thumb_interval": 30,
+    "ingest_fallback_url": "https://dashboard.example.net"
+  },
   "segment_duration": 20,
+  "chunk_names_utc": true,
   "rtsp_capture_delay_s": 6,
   "ff_idle_timeout_minutes": 30,
   "min_disk_gb_free": 10,
   "compression_level": 2,
   "encode_workers": 1,
+  "vaapi_driver": "auto",
+  "stacker_max_concurrent": "auto",
   "retention": {
     "color_days": 2,
     "locked_days": 7,
+    "uploaded_days": 7,
     "stacks_days": 7,
     "timelapse_days": 7
   },
   "disk": {
     "warn_pct": 85,
     "nuclear_pct": 90,
-    "extreme_pct": 95
+    "extreme_pct": 95,
+    "min_free_gb": 3,
+    "protect_hours": 24
   },
   "detection": {
     "pre_seconds": 3,
     "post_seconds": 12
   },
   "archive": {
-    "enabled": false,
+    "enabled": true,
     "host": "CHANGE_ME.example.net",
     "port": 22,
+    "user": "gmn",
     "base_path": "/srv/rovimen/archive",
     "upload_meteors": true,
     "upload_timelapses": true,
@@ -60,6 +97,9 @@
     "contrast": null,
     "brightness": null
   },
+  "watchdog": {
+    "allow_reboot": true
+  },
   "overlay": {
     "enabled": true,
     "style": "cinema",
@@ -69,8 +109,10 @@
     "network": "ROVIMEN",
     "coords": "",
     "text_opacity": 0.8,
-    "logo_opacity": 0.8,
-    "logo_size": 0,
+    "bar_logo_opacity": 0.9,
+    "gmn_logo": null,
+    "gmn_logo_opacity": 0.85,
+    "gmn_corner": "br",
     "show_logo": true,
     "show_network": true,
     "show_timestamp": true,

@@ -10,7 +10,8 @@ Proves that:
   its public contract (get/set status+vitals, snapshot bytes, diff-suppressed
   SSE fan-out);
 * the factory falls back to in-memory when ``ROVIMEN_REDIS_URL`` is unset,
-  guaranteeing zero behaviour change for single-worker dev + tests.
+  guaranteeing zero behaviour change for single-worker dev + tests, and keeps
+  the shared backend when Redis is down at boot (no per-worker latch).
 """
 
 from __future__ import annotations
@@ -231,17 +232,42 @@ class TestSeqRedisAtomicity:
         assert sum(1 for r in results if r) == 1  # exactly one accept
         assert workers[0].seq_get("gmn0002", "seq") == 101
 
-    def test_seq_bump_error_fails_closed_to_drop(self) -> None:
-        """A Redis error on bump must report a replay (drop), never accept —
-        so a blip can't double-apply a push."""
+    def test_seq_bump_error_fails_open_to_accept(self) -> None:
+        """A Redis error on bump must accept the push. Ingest answers a drop
+        with 200, which the pusher counts as delivered, so a drop on error lost
+        every push made during a Redis blip; every write behind the guard is a
+        last-value replace or a keyed upsert, so applying a duplicate is
+        harmless."""
         client = fakeredis.FakeStrictRedis(decode_responses=True)
         b = RedisStationStateBackend(client, prefix="sq", ttl_seconds=0)
+        assert b.seq_bump("gmn0002", "seq", 5) is True
 
         def _boom():
             raise RuntimeError("redis down")
 
         b._r.pipeline = _boom  # simulate the transaction blowing up
-        assert b.seq_bump("gmn0002", "seq", 1) is False
+        # Even a seq Redis has already seen: during the error there is no way
+        # to tell a replay from a new push, and losing a push costs more.
+        assert b.seq_bump("gmn0002", "seq", 5) is True
+        assert b.seq_bump("gmn0002", "seq", 6) is True
+
+    def test_replay_is_still_dropped_once_redis_answers(self) -> None:
+        client = fakeredis.FakeStrictRedis(decode_responses=True)
+        b = RedisStationStateBackend(client, prefix="sq", ttl_seconds=0)
+        assert b.seq_bump("gmn0002", "seq", 5) is True
+        real_pipeline = b._r.pipeline
+
+        def _boom():
+            raise RuntimeError("redis down")
+
+        b._r.pipeline = _boom
+        assert b.seq_bump("gmn0002", "seq", 6) is True
+        b._r.pipeline = real_pipeline
+        # The blip did not advance the stored seq, so 5 is still a replay and
+        # 6 (accepted unguarded during the blip) is accepted again.
+        assert b.seq_bump("gmn0002", "seq", 5) is False
+        assert b.seq_bump("gmn0002", "seq", 6) is True
+        assert b.seq_bump("gmn0002", "seq", 6) is False
 
 
 class TestCrossWorkerSharing:
@@ -345,12 +371,45 @@ class TestFactory:
             make_station_state_backend(redis_url=""), InMemoryStationStateBackend
         )
 
-    def test_unreachable_redis_falls_back_to_memory(self) -> None:
-        # A syntactically valid but dead address must degrade to in-memory,
-        # not crash the worker at startup.
+    def test_unreachable_redis_keeps_the_shared_backend(self) -> None:
+        # A dead address at boot must neither crash the worker nor latch it
+        # onto a per-process cache for life; calls degrade until Redis is back.
         backend = make_station_state_backend(
             redis_url="redis://127.0.0.1:6390/0"
         )
+        assert isinstance(backend, RedisStationStateBackend)
+        assert backend.get_status("gmn0002") is None
+        backend.set_status("gmn0002", {"online": True})  # must not raise
+
+    def test_misconf_ping_keeps_the_shared_backend(self, monkeypatch) -> None:
+        # 2026-09-22: a full root disk put Redis in MISCONF, which rejects PING.
+        # A worker booting then must still share state with the other workers.
+        import redis.exceptions
+
+        import cache_backend
+
+        real = fakeredis.FakeStrictRedis(decode_responses=True)
+
+        class _MisconfPing:
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def ping(self):
+                raise redis.exceptions.ResponseError("MISCONF Redis is configured to save RDB snapshots")
+
+        monkeypatch.setattr(cache_backend, "_redis_client_from_url", lambda url: _MisconfPing())
+        backend = make_station_state_backend(redis_url="redis://127.0.0.1:6379/0")
+        assert isinstance(backend, RedisStationStateBackend)
+        other = RedisStationStateBackend(real)
+        other.set_status("gmn0002", {"online": True})
+        assert backend.get_status("gmn0002") == {"online": True}
+
+        seq = cache_backend.make_seq_backend(redis_url="redis://127.0.0.1:6379/0")
+        assert isinstance(seq, RedisStationStateBackend)
+
+    def test_unbuildable_client_falls_back_to_memory(self) -> None:
+        # Only a URL no client can be built from (a config error) falls back.
+        backend = make_station_state_backend(redis_url="notredis://nowhere")
         assert isinstance(backend, InMemoryStationStateBackend)
 
 

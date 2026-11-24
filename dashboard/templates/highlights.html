@@ -4,13 +4,29 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>ROVIMEN — Meteor Highlights</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
+<meta name="description" content="The brightest meteors recorded by the ROVIMEN camera network, every camera that saw them, and the research on the fireballs.">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-overview.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-highlights.css', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard-video-modal.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-multi-det-modal.css', v=build_version) }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='dashboard-basket.css', v=build_version) }}">
 <script type="importmap">
 {
   "imports": {
+    "/static/dashboard-basket-add.js": "{{ url_for('static', filename='dashboard-basket-add.js', v=build_version) }}",
+    "/static/dashboard-grid.js": "{{ url_for('static', filename='dashboard-grid.js', v=build_version) }}",
+    "/static/dashboard-hidden.js": "{{ url_for('static', filename='dashboard-hidden.js', v=build_version) }}",
+    "/static/dashboard-map-point.js": "{{ url_for('static', filename='dashboard-map-point.js', v=build_version) }}",
+    "/static/dashboard-marker-layout.js": "{{ url_for('static', filename='dashboard-marker-layout.js', v=build_version) }}",
+    "/static/dashboard-hof-add.js": "{{ url_for('static', filename='dashboard-hof-add.js', v=build_version) }}",
+    "/static/dashboard-sky.js": "{{ url_for('static', filename='dashboard-sky.js', v=build_version) }}",
+    "/static/dashboard-hof.js": "{{ url_for('static', filename='dashboard-hof.js', v=build_version) }}",
+    "/static/dashboard-mask-editor.js": "{{ url_for('static', filename='dashboard-mask-editor.js', v=build_version) }}",
+    "/static/dashboard-nav-carts.js": "{{ url_for('static', filename='dashboard-nav-carts.js', v=build_version) }}",
+    "/static/dashboard-time-picker.js": "{{ url_for('static', filename='dashboard-time-picker.js', v=build_version) }}",
     "/static/dashboard-common.js":          "{{ url_for('static', filename='dashboard-common.js',          v=build_version) }}",
     "/static/dashboard-video-modal.js":     "{{ url_for('static', filename='dashboard-video-modal.js',     v=build_version) }}",
     "/static/dashboard-multi-det-modal.js": "{{ url_for('static', filename='dashboard-multi-det-modal.js', v=build_version) }}"
@@ -22,127 +38,118 @@
 </head>
 <body>
 
-<!-- ── Header ── -->
 <div class="ov-header">
-  <a href="/" class="nav-logo">ROVIMEN</a>
-  <nav class="main-nav">
-    {% if nav_show('overview') %}<a href="/map" class="nav-tab">Stations</a>{% endif %}
-    {% if nav_show('events') %}<a href="/events" class="nav-tab">Detections</a>{% endif %}
-    {% if nav_show('highlights') %}<a href="/highlights" class="nav-tab active">Highlights</a>{% endif %}
-    {% if nav_show('showers') %}<a href="/showers" class="nav-tab">Showers</a>{% endif %}
-    <a href="/social" class="nav-tab nav-tab-admin" id="logo-dd-social" style="display:none">Social</a>
-    <a href="/admin" class="nav-tab nav-tab-admin" id="logo-dd-admin" style="display:none">Admin</a>
-    <button class="nav-tab" onclick="openAppPanel('about')">About</button>
-  </nav>
-  <div style="margin-left:auto;display:flex;align-items:center;gap:14px">
-    <span id="utc-clock" class="hdr-clock"></span>
-    <div id="ov-auth"></div>
-  </div>
+  {% set nav_active = 'highlights' %}{% include "_nav.html" %}
 </div>
 
-<!-- ── Loading overlay ── -->
-<div id="hl-overlay" style="display:none">
-  <div class="hl-overlay-box">
-    <div class="hl-spinner"></div>
-    <div class="hl-overlay-msg" id="hl-overlay-msg">Loading data…</div>
-  </div>
-</div>
+<main class="hl-wrap">
 
-<!-- ── Main ── -->
-<div class="hl-wrap">
+  <header class="hl-hero">
+    <h1>Highlights</h1>
+    <p>The brightest meteors the ROVIMEN network recorded, every camera that saw each one,
+       and the research on the fireballs we analysed.</p>
+  </header>
 
-  <!-- Date picker -->
-  <div class="hl-picker-row">
-    <label for="hl-start">From</label>
-    <input type="date" id="hl-start">
-    <span class="hl-sep">—</span>
-    <label for="hl-end">to</label>
-    <input type="date" id="hl-end">
-    <button class="hl-submit" id="hl-submit">Load data</button>
-    <span class="hl-warn" id="hl-warn" style="display:none"></span>
-  </div>
+  <!-- Fireball research: one card per report, independent of the date range -->
+  <section id="hl-research" class="hl-section" hidden>
+    <div class="hl-section-head">
+      <h2>Fireball research</h2>
+      <span class="hl-section-sub">Trajectory, orbit and every camera view of the fireballs we analysed</span>
+    </div>
+    <div class="hl-research-grid" id="hl-research-grid"></div>
+  </section>
 
-  <!-- Results (hidden until first query) -->
-  <div id="hl-result-wrap" style="display:none">
+  <!-- Hall of Fame: every featured meteor, public; admins edit in place
+       (dashboard-hof.js). The landing page's "See all" links to #hall-of-fame. -->
+  <section id="hall-of-fame" class="hl-section" aria-labelledby="hof-heading" hidden>
+    <div class="hl-section-head">
+      <h2 id="hof-heading">Hall of Fame</h2>
+      <span class="hl-section-sub" id="hof-count"></span>
+    </div>
+    <div id="hof-gallery"></div>
+  </section>
 
-    <!-- Stats grid -->
-    <p class="hl-section-title">Period statistics</p>
-    <div class="hl-stats">
-      <div class="hl-stat">
-        <div class="hl-stat-label">Meteors detected</div>
-        <div class="hl-stat-value loading" id="hl-val-detections"></div>
+  <!-- Brightest events of the selected range -->
+  <section class="hl-section" id="hl-events">
+    <div class="hl-section-head">
+      <h2>Brightest events</h2>
+      <span class="hl-section-sub" id="hl-range-label"></span>
+    </div>
+
+    <div class="hl-toolbar">
+      <div class="hl-presets" role="group" aria-label="Date range">
+        <button type="button" class="hl-chip" data-days="7" aria-pressed="false">7 days</button>
+        <button type="button" class="hl-chip" data-days="30" aria-pressed="false">30 days</button>
+        <button type="button" class="hl-chip" data-days="90" aria-pressed="false">90 days</button>
+        <button type="button" class="hl-chip" data-days="365" aria-pressed="false">1 year</button>
       </div>
-      <div class="hl-stat">
-        <div class="hl-stat-label">Multi-station events</div>
-        <div class="hl-stat-value loading" id="hl-val-events"></div>
-      </div>
-      <div class="hl-stat">
-        <div class="hl-stat-label">Orbits computed (period)</div>
-        <div class="hl-stat-value loading" id="hl-val-orbits"></div>
-      </div>
-      <div class="hl-stat">
-        <div class="hl-stat-label">Orbits this month</div>
-        <div class="hl-stat-value loading" id="hl-val-orbits-month"></div>
-      </div>
-      <div class="hl-stat">
-        <div class="hl-stat-label">Active shower</div>
-        <div class="hl-stat-value loading" id="hl-val-shower"></div>
-      </div>
-      <div class="hl-stat">
-        <div class="hl-stat-label">Active cameras</div>
-        <div class="hl-stat-value loading" id="hl-val-cameras"></div>
-      </div>
-      <div class="hl-stat">
-        <div class="hl-stat-label">Active locations</div>
-        <div class="hl-stat-value loading" id="hl-val-locations"></div>
-      </div>
-      <div class="hl-stat">
-        <div class="hl-stat-label">2-station coverage 90 km</div>
-        <div class="hl-stat-value loading" id="hl-val-coverage"></div>
+      <div class="hl-custom">
+        <input type="date" id="hl-start" name="start" aria-label="From">
+        <span class="hl-sep">to</span>
+        <input type="date" id="hl-end" name="end" aria-label="To">
+        <button type="button" class="hl-submit" id="hl-submit">Load</button>
       </div>
     </div>
 
-    <!-- Monthly breakdown (shown only when range spans >1 month) -->
-    <div id="hl-months-wrap" style="display:none; margin-bottom:28px">
-      <p class="hl-section-title">Monthly breakdown</p>
+    <div class="hl-stats" id="hl-stats" aria-live="polite" aria-busy="false">
+      <div class="hl-stat"><div class="hl-stat-value" id="hl-val-detections"></div><div class="hl-stat-label">Meteors detected</div></div>
+      <div class="hl-stat"><div class="hl-stat-value" id="hl-val-events"></div><div class="hl-stat-label">Multi-station events</div></div>
+      <div class="hl-stat"><div class="hl-stat-value" id="hl-val-orbits"></div><div class="hl-stat-label">Orbits computed</div></div>
+      <div class="hl-stat"><div class="hl-stat-value" id="hl-val-orbits-month"></div><div class="hl-stat-label">Orbits this month</div></div>
+      <div class="hl-stat"><div class="hl-stat-value" id="hl-val-shower"></div><div class="hl-stat-label">Main shower</div></div>
+      <div class="hl-stat"><div class="hl-stat-value" id="hl-val-cameras"></div><div class="hl-stat-label">Active cameras</div></div>
+      <div class="hl-stat"><div class="hl-stat-value" id="hl-val-locations"></div><div class="hl-stat-label">Active locations</div></div>
+      <div class="hl-stat"><div class="hl-stat-value" id="hl-val-coverage"></div><div class="hl-stat-label">2-station coverage, 90 km</div></div>
+    </div>
+
+    <div class="hl-filters" role="group" aria-label="Filter events">
+      <button type="button" class="hl-chip active" data-filter="all" aria-pressed="true">All</button>
+      <button type="button" class="hl-chip" data-filter="fireball" aria-pressed="false">Fireballs</button>
+      <button type="button" class="hl-chip" data-filter="report" aria-pressed="false">With research</button>
+      <button type="button" class="hl-chip" data-filter="confirmed" aria-pressed="false">GMN trajectory</button>
+      <span class="hl-filter-note" id="hl-filter-note" aria-live="polite"></span>
+    </div>
+
+    <div class="hl-ev-grid" id="hl-grid"></div>
+
+    <details id="hl-months-wrap" class="hl-months" hidden>
+      <summary>Monthly breakdown</summary>
       <table class="hl-months-table">
-        <thead>
-          <tr>
-            <th>Month</th>
-            <th>Detections</th>
-            <th>Multi-station</th>
-          </tr>
-        </thead>
+        <thead><tr><th scope="col">Month</th><th scope="col">Detections</th><th scope="col">Multi-station</th></tr></thead>
         <tbody id="hl-months-tbody"></tbody>
       </table>
-    </div>
+    </details>
+  </section>
 
-    <!-- Top 10 meteors -->
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-      <p class="hl-section-title" style="margin:0">Top 10 impressive meteors</p>
-      <div id="hl-bulk-btns" style="display:none;gap:8px;align-items:center">
-        <button class="hl-submit" id="hl-dl-all-clips">&#8595; All clips</button>
-        <button class="hl-submit" id="hl-dl-all-stacks">&#8595; All stacks</button>
-      </div>
-    </div>
-    <div class="hl-grid" id="hl-grid"></div>
+</main>
 
-  </div><!-- #hl-result-wrap -->
+<!-- Event sheet: every camera of one event or report -->
+<div id="hl-sheet" class="hl-sheet-backdrop" hidden>
+  <div class="hl-sheet" role="dialog" aria-modal="true" aria-labelledby="hl-sheet-title">
+    <button type="button" class="hl-sheet-close" id="hl-sheet-close" aria-label="Close">&#x2715;</button>
+    <div id="hl-sheet-body"></div>
+  </div>
+  <div class="hl-lightbox" id="hl-lightbox" role="dialog" aria-modal="true" aria-label="Enlarged stack, click or press Escape to close" tabindex="-1" hidden>
+    <img alt="Enlarged stack">
+    <div class="hl-lightbox-cap"></div>
+  </div>
+</div>
 
-</div><!-- .hl-wrap -->
-
-<!-- Highlights video modal — shared VideoModal component -->
 <div id="hl-modal-container"></div>
+<div id="hl-mdm-container"></div>
+<div id="hof-modal-container"></div>
 
-<div id="app-panel" class="app-panel" onclick="appPanelClose(event)">
+<div id="app-panel" class="app-panel" onclick="appPanelClose(event)"
+     role="dialog" aria-modal="true" aria-labelledby="app-panel-title" aria-hidden="true">
   <div class="app-panel-inner">
     <div class="app-panel-header">
       <span id="app-panel-title" class="app-panel-title"></span>
-      <button class="cam-modal-close" onclick="appPanelClose(null)">&#x2715;</button>
+      <button type="button" class="cam-modal-close" onclick="appPanelClose(null)" aria-label="Close panel">&#x2715;</button>
     </div>
     <div id="app-panel-body"></div>
   </div>
 </div>
 
+  {% include "_license_footer.html" %}
 </body>
 </html>

@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 # Synthetic filename injected into the RMS plots list by the frontend and the
 # plot-image proxy so that the colour meteor stack can be fetched through the
 # same /api/rms/plot_image/... path as ordinary RMS plot images.  Must match
-# the value used in static JS (overview.js / view.js).
-COLOR_METEOR_STACK_FILENAME = "__color_meteor_stack__.webp"
+# the value used in static JS (overview.js / view.js). Defined with the other
+# Final Data Products names in fdp_products.
+from fdp_products import COLOR_METEOR_STACK_FILENAME  # noqa: E402,F401
 
 
 def lookup_station(config, host_key: str):
@@ -117,8 +118,15 @@ def compute_detection_offset(
     detection_time from state.json lock metadata.  Returns None when
     the filename doesn't match the standard chunk pattern or no
     usable time is available.
+
+    Accepts both the plain chunk form ``<cam>_<date>_<Tstart>_color.mkv`` and
+    the boundary-stitched form ``<cam>_<date>_<Tstart>_<Tend>_color.mkv`` that
+    detection_lock.py writes when a meteor lands near a chunk edge.  Both name
+    the clip's own start time first, so the offset arithmetic is identical.
     """
-    fn_m = re.match(r'^[A-Z0-9]+_\d{8}_(\d{6})_color\.mkv$', filename)
+    fn_m = re.match(
+        r'^[A-Z0-9]+_\d{8}_(\d{6})(?:_\d{6})?_color\.(mkv|mp4)$', filename
+    )
     if not fn_m:
         return None
     tp = fn_m.group(1)
@@ -146,3 +154,49 @@ def compute_detection_offset(
     except Exception:
         pass
     return None
+
+
+# A clip's stack shares its base name: ``X_color.mkv``, its faststart
+# ``X_color.mp4`` copy and the ``X_color.details.*`` overlay renders all map to
+# ``X_stack.webp``. The old ``.replace("_color.mkv", ...).replace(".mp4", ...)``
+# chain turned ``X_color.mp4`` into ``X_color_stack.webp``, so every .mp4 card
+# had no thumbnail.
+_CLIP_SUFFIXES = (".details.mkv", ".details.mp4", "_color.mkv", "_color.mp4", ".mkv", ".mp4")
+
+
+def clip_base(name: str) -> str:
+    """``X_color.mkv`` for any of a clip's video names (``.mp4`` copy and
+    ``.details`` renders included); other names come back unchanged."""
+    for suffix in (".details.mkv", ".details.mp4"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)] + ".mkv"
+            break
+    if name.endswith("_color.mp4"):
+        return name[: -len(".mp4")] + ".mkv"
+    return name
+
+
+def stack_name_for_clip(name: str) -> str | None:
+    """The stack webp for a clip video name, or None for a non-clip name."""
+    base = clip_base(name)
+    for suffix in ("_color.mkv", ".mkv", ".mp4"):
+        if base.endswith(suffix):
+            return base[: -len(suffix)] + "_stack.webp"
+    return None
+
+
+def listed_clip_names(meteor_files) -> list[str]:
+    """One name per clip for archive listings, in listing order: the base
+    ``_color.mkv`` (or a bare ``.mkv``/``.mp4``), with the faststart
+    ``_color.mp4`` copy listed only when its ``.mkv`` is gone, and the
+    ``.details`` renders never (callers swap those in for their base)."""
+    names = [n for n in meteor_files if n.endswith((".mkv", ".mp4"))]
+    present = set(names)
+    out: list[str] = []
+    for name in names:
+        if name.endswith((".details.mkv", ".details.mp4")):
+            continue
+        if name.endswith("_color.mp4") and clip_base(name) in present:
+            continue
+        out.append(name)
+    return out

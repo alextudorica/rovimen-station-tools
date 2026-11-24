@@ -55,9 +55,9 @@ class TestGenerateTotpSecret:
 class TestTotpProvisioningUri:
     def test_contains_username(self):
         secret = security.generate_totp_secret()
-        uri = security.totp_provisioning_uri(secret, "alex")
+        uri = security.totp_provisioning_uri(secret, "operator")
         assert "otpauth://totp/" in uri
-        assert "alex" in uri
+        assert "operator" in uri
 
     def test_contains_issuer(self):
         secret = security.generate_totp_secret()
@@ -295,3 +295,42 @@ class TestLockFilePerms:
         missing = tmp_path / "does_not_exist.yaml"
         # Should not raise
         security.lock_file_perms(missing)
+
+
+# ── CSRF origin gate: ingest exemption ────────────────────────────────────
+
+
+class TestCsrfOriginIngestExempt:
+    """The station ingest surface (X-Station-Key bearer auth, non-browser push
+    agents) must bypass the CSRF-origin gate — otherwise the octet-stream blob
+    upload is rejected by the headerless interim guard. CSRF cannot apply: a
+    browser cannot attach X-Station-Key, and no session cookie is involved."""
+
+    def _client(self):
+        app = Flask(__name__)
+        app.testing = True
+        security.install_csrf_origin_check(app)
+
+        @app.route("/api/ingest/v1/gmn0002/blob/RO/20260709/meteors/x_color.mkv",
+                   methods=["POST"])
+        def _blob():
+            return "ok", 200
+
+        @app.route("/api/other/mutate", methods=["POST"])
+        def _other():
+            return "ok", 200
+
+        return app.test_client()
+
+    def test_ingest_octet_stream_headerless_passes(self):
+        c = self._client()
+        r = c.post(
+            "/api/ingest/v1/gmn0002/blob/RO/20260709/meteors/x_color.mkv",
+            data=b"bytes", content_type="application/octet-stream")
+        assert r.status_code == 200  # gate did not reject the ingest surface
+
+    def test_non_ingest_octet_stream_headerless_rejected(self):
+        c = self._client()
+        r = c.post("/api/other/mutate", data=b"bytes",
+                   content_type="application/octet-stream")
+        assert r.status_code == 403  # gate still guards other /api/* mutations

@@ -19,7 +19,8 @@
  *   minutesOfDayToSliderVal(min, isEnd)
  *   sliderValToHHMM(v)
  *   parseHHMM(str)
- *   drawTwilightOnWrap(wrapEl, tw)
+ *   drawTwilightOnWrap(wrapEl, tw, domain?)
+ *   nightDomain(tw)                    // {lo, hi}: the footage window, sun -9° → -9° + 30 min (else civil sunset → sunrise + 30 min)
  *   computeTwilightClampRange(tw)
  *   mountTwilightSlider(host, opts)   // legacy factory shape; see below
  */
@@ -69,6 +70,27 @@
     };
   }
 
+  // ── Night domain ────────────────────────────────────────────────────────
+  // The span a night-only slider covers, in slider coordinates: civil sunset
+  // to 30 min after civil sunrise, the RMS capture window the full-day
+  // renderer leaves undimmed. Daylight times are not selectable at all.
+  function nightDomain(tw) {
+    // The footage window (sun -9° → -9° + 30 min: /api/twilight
+    // capture_start_min / capture_end_min, or the fleet's from
+    // /api/twilight/network) when the payload has it.
+    if (tw && tw.capture_start_min != null && tw.capture_end_min != null) {
+      const lo = utcMinToSliderVal(tw.capture_start_min);
+      const hi = utcMinToSliderVal(tw.capture_end_min);
+      if (hi > lo) return { lo, hi };
+    }
+    const cs = tw && tw.civil_sunset_min;
+    const cr = tw && tw.civil_sunrise_min;
+    if (cs == null || cr == null) return { lo: 0, hi: 1440 };
+    const lo = utcMinToSliderVal(cs);
+    const hi = Math.min(1440, utcMinToSliderVal(cr) + 30);
+    return hi > lo ? { lo, hi } : { lo: 0, hi: 1440 };
+  }
+
   // ── Renderer ────────────────────────────────────────────────────────────
   // Paints the 24h sky gradient + dim mask outside RMS capture window onto
   // the given .vdb-slider-wrap / .ev-slider-wrap element. Reads from tw the
@@ -76,10 +98,49 @@
   // illumination, phase_emoji/phase_name) and writes two CSS custom
   // properties: --tl-gradient (the track background) and --moon-gradient
   // (optional). The caller's CSS uses these on ::before / ::after etc.
-  function drawTwilightOnWrap(wrap, tw) {
+  /** The moon's lit shape as inline SVG: a disc whose terminator is an
+   *  ellipse of half-width |1 - 2·illumination|, lit on the right while
+   *  waxing and on the left while waning (northern-hemisphere view). Drawn
+   *  rather than an emoji, which depends on the viewer's fonts (minimal Linux
+   *  desktops show tofu; see LOCK_ICON in dashboard-common.js). */
+  function moonPhaseSvg(illumination, waning) {
+    const f = Math.min(1, Math.max(0, Number(illumination) || 0));
+    const k = Math.abs(1 - 2 * f).toFixed(3);
+    // Right half-disc, then back up the terminator: bulging right for a
+    // crescent (sweep 0), left for a gibbous moon (sweep 1).
+    const lit = `M0,-1 A1,1 0 0 1 0,1 A${k},1 0 0 ${f > 0.5 ? 1 : 0} 0,-1Z`;
+    const flip = waning ? ' transform="scale(-1,1)"' : '';
+    return '<svg class="moon-svg" viewBox="-1.1 -1.1 2.2 2.2" width="16" height="16" aria-hidden="true">'
+      + '<circle r="1" fill="#2a3550" stroke="rgba(241,230,200,.35)" stroke-width="0.08"/>'
+      + `<path d="${lit}" fill="#f1e6c8"${flip}/></svg>`;
+  }
+
+  /** Sky band of an hour (UTC) on the noon-anchored axis, from the same six
+   *  twilight edges drawTwilightOnWrap paints: 'day' | 'civ' | 'naut' |
+   *  'night', or null when the twilight data is missing. Used for the hour
+   *  dots in the time picker (dashboard-time-picker.js). */
+  function skyBandForHour(tw, h) {
+    if (!tw) return null;
+    const pos = (min) => (min == null ? null : utcMinToSliderVal(min));
+    const v = pos(h * 60 + 30);
+    const edges = [
+      [pos(tw.civil_sunset_min), 'day'], [pos(tw.nautical_sunset_min), 'civ'], [pos(tw.sunset_min), 'naut'],
+      [pos(tw.sunrise_min), 'night'], [pos(tw.nautical_sunrise_min), 'naut'], [pos(tw.civil_sunrise_min), 'civ'],
+    ];
+    if (edges.some(([e]) => e == null)) return null;
+    for (const [edge, band] of edges) if (v < edge) return band;
+    return 'day';
+  }
+
+  function drawTwilightOnWrap(wrap, tw, domain) {
     if (!wrap || !tw) return;
 
-    const p = min => min == null ? null : (utcMinToSliderVal(min) / 1440 * 100).toFixed(2);
+    // domain {lo, hi} (slider units, see nightDomain) draws only that span;
+    // the default is the full noon-to-noon day.
+    const lo0 = domain ? domain.lo : 0;
+    const span = domain ? Math.max(1, domain.hi - domain.lo) : 1440;
+    const p = min => min == null ? null
+      : Math.max(0, Math.min(100, (utcMinToSliderVal(min) - lo0) / span * 100)).toFixed(2);
     const cs = p(tw.civil_sunset_min);       // DAY → CIV
     const ns = p(tw.nautical_sunset_min);    // CIV → NAUT
     const ss = p(tw.sunset_min);             // NAUT → NGHT
@@ -89,7 +150,7 @@
 
     // RMS window ends 30 min past civil sunrise.
     const cr30 = cr != null
-      ? Math.min(100, parseFloat(cr) + (30 / 1440 * 100)).toFixed(2)
+      ? Math.min(100, parseFloat(cr) + (30 / span * 100)).toFixed(2)
       : cr;
 
     // 20px blend at every boundary (10px each side).
@@ -145,11 +206,16 @@
 
     // Moon phase icon — IDs differ per page (vdb-moon-icon / ev-moon-icon).
     // Both pages call this same helper, so we update whichever exists.
-    for (const moonIconId of ['vdb-moon-icon', 'ev-moon-icon']) {
-      const moonIcon = document.getElementById(moonIconId);
-      if (moonIcon && tw.phase_emoji) {
-        moonIcon.textContent = tw.phase_emoji;
-        moonIcon.title = `${tw.phase_name} — ${Math.round((tw.illumination ?? 0) * 100)}% illuminated`;
+    const moonSlots = [
+      ...['vdb-moon-icon', 'ev-moon-icon'].map(id => document.getElementById(id)),
+      ...document.querySelectorAll('.js-moon-icon'),
+    ];
+    for (const moonIcon of moonSlots) {
+      if (moonIcon && tw.phase_name) {
+        const pct = Math.round((tw.illumination ?? 0) * 100);
+        const waning = /Waning|Last Quarter/.test(tw.phase_name);
+        moonIcon.innerHTML = `${moonPhaseSvg(tw.illumination ?? 0, waning)}<span class="moon-pct">${pct}%</span>`;
+        moonIcon.title = `${tw.phase_name}: ${pct}% illuminated`;
       }
     }
 
@@ -202,12 +268,14 @@
 
   // ── Expose ──────────────────────────────────────────────────────────────
   window.twilightSlider = {
+    skyBandForHour,
     utcMinToSliderVal,
     minutesOfDayToSliderVal,
     sliderValToHHMM,
     parseHHMM,
     drawTwilightOnWrap,
     computeTwilightClampRange,
+    nightDomain,
     mountTwilightSlider,
   };
 })();

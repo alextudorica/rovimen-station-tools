@@ -3,17 +3,6 @@ import { state, escHtml, openAppPanel, appPanelClose } from './dashboard-common.
 // toggleLogoMenu / openAppPanel / appPanelClose / _APP_PANELS now live in
 // dashboard-common.js. Inline copies removed to avoid "Identifier
 // '_APP_PANELS' has already been declared" SyntaxError.
-(async function() {
-  try {
-    const auth = await (await fetch('/api/auth/status')).json();
-    if (auth.admin) {
-      const el = document.getElementById('logo-dd-admin');
-      if (el) el.style.display = '';
-      const socialEl = document.getElementById('logo-dd-social');
-      if (socialEl) socialEl.style.display = '';
-    }
-  } catch(e) {}
-})();
 
 // Hide header when embedded in admin iframe
 if (window.self !== window.top) {
@@ -78,7 +67,7 @@ const SECTIONS = [
     { label: 'coords',               path: ['overlay','coords'],            type: 'string' },
     { label: 'font_size',            path: ['overlay','font_size'],         type: 'number', min:8,   max:48,  step:1 },
     { label: 'text_opacity',         path: ['overlay','text_opacity'],      type: 'number', min:0,   max:1,   step:0.05 },
-    { label: 'logo_opacity',         path: ['overlay','logo_opacity'],      type: 'number', min:0,   max:1,   step:0.05 },
+    { label: 'bar_logo_opacity',     path: ['overlay','bar_logo_opacity'],  type: 'number', min:0,   max:1,   step:0.05 },
     { label: 'show_logo',            path: ['overlay','show_logo'],         type: 'bool' },
     { label: 'show_network',         path: ['overlay','show_network'],      type: 'bool' },
     { label: 'show_timestamp',       path: ['overlay','show_timestamp'],    type: 'bool' },
@@ -99,18 +88,6 @@ function getPath(obj, path) {
     cur = cur[k];
   }
   return cur;
-}
-
-function setPath(obj, path, value) {
-  // Build a nested object for PATCH payload
-  const result = {};
-  let cur = result;
-  for (let i = 0; i < path.length - 1; i++) {
-    cur[path[i]] = {};
-    cur = cur[path[i]];
-  }
-  cur[path[path.length - 1]] = value;
-  return result;
 }
 
 function consensus(values) {
@@ -138,144 +115,21 @@ function formatVal(val, type) {
 }
 
 // ---------------------------------------------------------------------------
-// Editing helpers
+// Cell rendering (read-only)
+//
+// The matrix used to offer in-place editing that PATCHed each station's
+// /api/settings. Stations are read-only from the dashboard (2026-07
+// hardening): the settings PATCH proxy is gone, so the matrix is now a pure
+// comparison/diff view — config changes are applied over SSH or shipped as
+// signed bundles.
 // ---------------------------------------------------------------------------
 
-let isAdmin = false;
-let _configDirty = false;
-
-// escAttr() was a local & + " escaper; superseded by the canonical escHtml()
-// from dashboard-common.js, which also handles <, >, and '.
-
-function markDirty(el) {
-  const changed = el.value !== el.dataset.orig;
-  el.style.borderColor = changed ? 'var(--yellow)' : '';
-  el.closest('td').style.background = changed ? 'rgba(210,153,34,.08)' : '';
-  if (changed) _configDirty = true;
-}
-
-window.addEventListener('beforeunload', e => {
-  if (_configDirty) { e.preventDefault(); }
-});
-
-function cfgStep(id, delta, min, max) {
-  const el = document.getElementById(id);
-  if (!el) return;
-  const v = Math.round((parseFloat(el.value || 0) + delta) * 10000) / 10000;
-  el.value = Math.min(max, Math.max(min, v));
-  markDirty(el);
-}
-
 function renderCell(val, field, hostKey, si, fi) {
-  const orig = val === undefined ? '' : String(val);
-  const id = `c-${si}-${fi}-${hostKey}`;
   // hostKey is admin-managed (dashboard_config.yaml). si/fi are local indices
   // but escape the lot for consistency in attribute context.
   const tdAttrs = `data-section="${si}" data-fi="${fi}" data-hk="${escHtml(hostKey)}"`;
-
-  if (!isAdmin || val === undefined) {
-    const { text, cls } = formatVal(val, field.type);
-    return `<td class="val ${cls}" ${tdAttrs}>${escHtml(text)}</td>`;
-  }
-
-  if (field.type === 'bool') {
-    return `<td class="val" ${tdAttrs}>
-      <select id="${escHtml(id)}" class="val-input" data-orig="${escHtml(orig)}" onchange="markDirty(this)" style="padding:2px 4px;width:68px">
-        <option value="true"  ${val===true ?'selected':''}>true</option>
-        <option value="false" ${val===false?'selected':''}>false</option>
-      </select></td>`;
-  }
-
-  if (field.type === 'enum') {
-    // field.options is a SECTIONS constant; orig is the API value to compare.
-    const opts = (field.options||[]).map(o=>`<option value="${escHtml(o)}"${orig===o?' selected':''}>${escHtml(o)}</option>`).join('');
-    return `<td class="val" ${tdAttrs}>
-      <select id="${escHtml(id)}" class="val-input" data-orig="${escHtml(orig)}" onchange="markDirty(this)" style="padding:2px 4px">
-        ${opts}
-      </select></td>`;
-  }
-
-  if (field.type === 'number') {
-    const mn = field.min??'', mx = field.max??'', st = field.step??1;
-    const lo = field.min??-1e9, hi = field.max??1e9;
-    return `<td class="val" ${tdAttrs}>
-      <div style="display:inline-flex;align-items:center;gap:2px">
-        <button type="button" class="spinner-btn" style="width:20px;height:20px;font-size:12px"
-                onclick="cfgStep('${escHtml(id)}',${-st},${lo},${hi})">&#x2212;</button>
-        <input type="number" id="${escHtml(id)}" min="${mn}" max="${mx}" step="${st}" value="${escHtml(orig)}"
-               data-orig="${escHtml(orig)}" oninput="markDirty(this)"
-               style="width:${st < 0.01 ? '80' : '52'}px;text-align:center;padding:2px 3px;background:var(--card);
-                      border:1px solid var(--border);color:var(--text);font-family:monospace;
-                      font-size:11px;border-radius:3px;outline:none">
-        <button type="button" class="spinner-btn" style="width:20px;height:20px;font-size:12px"
-                onclick="cfgStep('${escHtml(id)}',${st},${lo},${hi})">+</button>
-      </div></td>`;
-  }
-
-  // string -- escHtml supersedes escAttr (handles <, >, ' in addition to & and ")
-  return `<td class="val" ${tdAttrs}>
-    <input type="text" id="${escHtml(id)}" class="val-input" value="${escHtml(orig)}"
-           data-orig="${escHtml(orig)}" oninput="markDirty(this)" style="width:110px;padding:2px 5px">
-  </td>`;
-}
-
-async function saveSection(si, btn) {
-  const section = SECTIONS[si];
-  btn.disabled = true; btn.textContent = 'Saving…';
-
-  const patches = {};
-  document.querySelectorAll(`td[data-section="${si}"]`).forEach(td => {
-    const hk = td.dataset.hk;
-    const fi  = parseInt(td.dataset.fi);
-    const field = section.fields[fi];
-    if (!hk || !field) return;
-    const input = td.querySelector('input,select');
-    if (!input || input.value === input.dataset.orig) return;
-
-    if (!patches[hk]) patches[hk] = {};
-    let value = input.value;
-    if (field.type === 'bool')        value = value === 'true';
-    else if (field.type === 'number') value = Number(value);
-
-    let cur = patches[hk];
-    field.path.slice(0, -1).forEach(k => { if (!cur[k]) cur[k] = {}; cur = cur[k]; });
-    cur[field.path[field.path.length - 1]] = value;
-  });
-
-  if (!Object.keys(patches).length) {
-    btn.textContent = 'No changes';
-    setTimeout(() => { btn.textContent = 'Save'; btn.disabled = false; }, 1500);
-    return;
-  }
-
-  const sectionEl = btn.closest('.cfg-section');
-  const sectionBody = btn.closest('.cfg-section-body');
-  try {
-    await Promise.all(Object.entries(patches).map(([hk, payload]) =>
-      fetch(`/api/settings/${hk}`, {
-        method: 'PATCH',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify(payload),
-      }).then(r => { if (!r.ok) throw new Error(`${hk}: HTTP ${r.status}`); })
-    ));
-    _configDirty = false;
-    // Show loading in this section while the full reload happens
-    if (sectionBody) sectionBody.innerHTML = '<div class="cfg-loading">Loading config…</div>';
-    loadAndRender();
-  } catch(e) {
-    // Show error banner without destroying the form fields
-    let errBanner = sectionEl ? sectionEl.querySelector('.cfg-save-err-banner') : null;
-    if (!errBanner && sectionEl) {
-      errBanner = document.createElement('div');
-      errBanner.className = 'cfg-save-err-banner cfg-error';
-      errBanner.style.cssText = 'margin:8px 14px 0;font-size:12px';
-      sectionEl.insertBefore(errBanner, sectionBody);
-    }
-    if (errBanner) errBanner.textContent = 'Save failed: ' + e.message;
-    btn.disabled = false;
-    btn.textContent = 'Save';
-    if (errBanner) setTimeout(() => { errBanner.textContent = ''; }, 5000);
-  }
+  const { text, cls } = formatVal(val, field.type);
+  return `<td class="val ${cls}" ${tdAttrs}>${escHtml(text)}</td>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,7 +146,7 @@ function renderMatrix(stations, stationMeta, configs) {
     const label = stationMeta[hk]?.label || hk;
     const cls = !r ? 'offline' : r.ok ? 'online' : 'error';
     const title = r?.error ? ` title="${escHtml(r.error)}"` : '';
-    return `<span class="cfg-badge ${cls}"${title}>${escHtml(hk)} · ${escHtml(label)}</span>`;
+    return `<span class="cfg-badge ${cls}"${title}><span translate="no">${escHtml(hk)}</span> · ${escHtml(label)}</span>`;
   }).join('');
 
   const sections = SECTIONS.map((section, si) => {
@@ -316,8 +170,8 @@ function renderMatrix(stations, stationMeta, configs) {
     totalDiffs += sectionDiffs;
 
     const headerCells = section.fields.map((field, fi) => {
-      const diffMark = diffFields[fi] ? `<span style="color:var(--yellow);font-size:9px;margin-left:2px">▲</span>` : '';
-      return `<th style="text-align:center;font-size:11px;white-space:nowrap">${escHtml(field.label)}${diffMark}</th>`;
+      const diffMark = diffFields[fi] ? `<span style="color:var(--yellow);font-size:9px;margin-left:2px" role="img" aria-label="(stations differ)" title="Stations differ">▲</span>` : '';
+      return `<th scope="col" style="text-align:center;font-size:11px;white-space:nowrap" translate="no">${escHtml(field.label)}${diffMark}</th>`;
     }).join('');
 
     const rows = stations.map(hk => {
@@ -328,7 +182,7 @@ function renderMatrix(stations, stationMeta, configs) {
         return renderCell(val, field, hk, si, fi);
       }).join('');
       return `<tr>
-        <td class="station-name">${escHtml(hk)}<span class="st-lbl">${escHtml(label)}</span></td>
+        <td class="station-name"><span translate="no">${escHtml(hk)}</span><span class="st-lbl">${escHtml(label)}</span></td>
         ${cells}
       </tr>`;
     }).join('');
@@ -336,28 +190,20 @@ function renderMatrix(stations, stationMeta, configs) {
     const diffBadge = sectionDiffs > 0
       ? `<span class="diff-count">${sectionDiffs} diff${sectionDiffs > 1 ? 's' : ''}</span>` : '';
 
-    const saveBtn = isAdmin
-      ? `<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;justify-content:flex-end">
-           <button class="sync-btn" style="padding:4px 18px;font-size:12px"
-                   onclick="saveSection(${si}, this)">Save</button>
-         </div>`
-      : '';
-
     return `<div class="cfg-section">
-      <div class="cfg-section-hdr" onclick="toggleSection(this)">
+      <button type="button" class="cfg-section-hdr" aria-expanded="true" onclick="toggleSection(this)">
         <span>${escHtml(section.name)}</span>${diffBadge}
-        <span class="chevron">▾</span>
-      </div>
+        <span class="chevron" aria-hidden="true">▾</span>
+      </button>
       <div class="cfg-section-body">
         <div style="overflow-x:auto">
         <table class="cfg-table">
           <thead><tr>
-            <th style="position:sticky;left:0;background:rgba(48,54,61,.5);z-index:2">Station</th>
+            <th scope="col" style="position:sticky;left:0;background:rgba(48,54,61,.5);z-index:2">Station</th>
             ${headerCells}
           </tr></thead>
           <tbody>${rows}</tbody>
         </table></div>
-        ${saveBtn}
       </div>
     </div>`;
   }).join('');
@@ -377,6 +223,7 @@ function toggleSection(hdr) {
   const body = hdr.nextElementSibling;
   const collapsed = body.classList.toggle('hidden');
   hdr.classList.toggle('collapsed', collapsed);
+  hdr.setAttribute('aria-expanded', String(!collapsed));
 }
 
 // ---------------------------------------------------------------------------
@@ -385,10 +232,9 @@ function toggleSection(hdr) {
 
 async function loadAndRender() {
   try {
-    const [configsResp, stationsResp, authResp] = await Promise.all([
+    const [configsResp, stationsResp] = await Promise.all([
       fetch('/api/config/all'),
       fetch('/api/stations'),
-      fetch('/api/auth/status'),
     ]);
 
     if (configsResp.status === 401) {
@@ -399,16 +245,6 @@ async function loadAndRender() {
 
     const configs = await configsResp.json();
     const stationMeta = await stationsResp.json();
-    const auth = await authResp.json();
-    isAdmin = auth.admin;
-
-    const el = document.getElementById('cfg-auth');
-    if (auth.admin) {
-      el.innerHTML = `<span style="color:var(--green);margin-right:6px">${escHtml(auth.user)}</span>
-        <a href="/logout">Logout</a>`;
-    } else {
-      el.innerHTML = `<a href="/login">Login</a>`;
-    }
 
     const stations = Object.keys(stationMeta);
     renderMatrix(stations, stationMeta, configs);
@@ -423,9 +259,6 @@ loadAndRender();
 // ---------------------------------------------------------------------------
 // Window exposure for onclick handlers in HTML and dynamic template literals
 // ---------------------------------------------------------------------------
-window.saveSection = saveSection;
-window.cfgStep = cfgStep;
 window.toggleSection = toggleSection;
-window.markDirty = markDirty;
 window.openAppPanel = openAppPanel;
 window.appPanelClose = appPanelClose;

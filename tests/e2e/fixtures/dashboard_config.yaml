@@ -16,7 +16,7 @@ stations:
     ip: 127.0.0.1
     jump_hosts: []
     label: Test Station Alpha
-    lat: 52.52
+    lat: 52.15
     lon: 13.405
     proxy_media: false
     public_tabs: []
@@ -31,7 +31,7 @@ stations:
     ip: 127.0.0.1
     jump_hosts: []
     label: Test Station Beta
-    lat: 44.43
+    lat: 44.65
     lon: 26.1
     proxy_media: false
     public_tabs: []

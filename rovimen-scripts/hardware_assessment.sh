@@ -57,13 +57,32 @@ vaapi_device=""
 vaapi_driver=""
 vaapi_h264_encode=false
 
-if [ -e /dev/dri/renderD128 ]; then
+ensure_vaapi="$(dirname "$0")/ensure_vaapi.sh"
+if [ -e /dev/dri/renderD128 ] && [ -f "$ensure_vaapi" ]; then
+    # Same verification as the install ground rule (verify only): runs with the
+    # render group even from a shell that predates the usermod, and tries the
+    # i965 driver where libva's default (iHD) cannot init.
+    vaapi_device="/dev/dri/renderD128"
+    verdict=$(bash "$ensure_vaapi" --check 2>/dev/null | grep '^VAAPI:' | tail -1 || true)
+    case "$verdict" in
+        "VAAPI: PASS"*)
+            vaapi=true
+            vaapi_h264_encode=true
+            vaapi_device=$(echo "$verdict" | sed -n 's/.*device=\([^ ]*\).*/\1/p')
+            vaapi_driver=$(echo "$verdict" | sed -n 's/.*driver=\([^ ]*\).*/\1/p')
+            ;;
+        *)
+            warn "VAAPI encode test did not pass (${verdict:-no verdict}) — using CPU encoding"
+            ;;
+    esac
+elif [ -e /dev/dri/renderD128 ]; then
     vaapi_device="/dev/dri/renderD128"
 
-    # Prove H.264 encode works by actually doing it (32x32 synthetic test)
+    # Prove H.264 encode works by actually doing it (720p, the capture size:
+    # some drivers refuse tiny frames, e.g. AMD's 128x128 minimum)
     if ffmpeg -hide_banner -loglevel error \
               -vaapi_device "$vaapi_device" \
-              -f lavfi -i 'testsrc=duration=0.04:size=32x32:rate=25' \
+              -f lavfi -i 'testsrc=duration=0.08:size=1280x720:rate=25' \
               -vf 'format=nv12,hwupload' \
               -c:v h264_vaapi -qp 20 \
               -f null - 2>/dev/null; then

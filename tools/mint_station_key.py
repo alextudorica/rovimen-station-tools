@@ -23,9 +23,11 @@ To list existing (redacted) keys:
 To disable a key (row kept so the id/station stays reserved for audit):
     python3 tools/mint_station_key.py --disable <id>
 
-Operator-only: no daemons, no web UI. Run it as the user that owns
-``station_keys.yaml`` on the target host (typically ``root`` on the VPS), then
-``chown`` to the dashboard user if needed.
+Operator-only: no daemons, no web UI. Run it as root or as the file's owner.
+The rewritten file keeps the original owner, group and mode (a new file takes
+the directory's owner and mode 0600), so it stays readable for the dashboard
+user. The tool refuses, writing nothing, when the existing file cannot be read
+or parsed, or when it cannot give the new file the original owner.
 """
 
 from __future__ import annotations
@@ -44,9 +46,10 @@ for candidate in (_SCRIPT_DIR, _REPO_DASHBOARD_DIR):
         sys.path.insert(0, str(candidate))
 
 import station_keys  # noqa: E402  — sys.path injection above
+from keyfile_io import KeyFileError  # noqa: E402
 
 
-def main() -> int:
+def _run() -> int:
     parser = argparse.ArgumentParser(
         description="Mint or manage ROVIMEN per-station ingest keys.",
     )
@@ -133,6 +136,15 @@ def main() -> int:
     print(f"Saved to: {args.path} (hashed at rest)")
     print("This plaintext secret will NOT be shown again. Hand it to the station now.")
     return 0
+
+
+def main() -> int:
+    try:
+        return _run()
+    except KeyFileError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        print("Nothing was written; the file on disk is unchanged.", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

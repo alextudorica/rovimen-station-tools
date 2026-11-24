@@ -2,6 +2,12 @@
 Description=Color video capture for meteor clips
 After=network-online.target
 Wants=network-online.target
+# Never give up restarting: RestartSec=60 already paces the restarts, and a
+# start limit would leave colour capture dead for the night after a few
+# failed starts (the watchdog heals only 3 times an hour). These keys sat in
+# [Service] until 2026-10-05, where systemd ignores StartLimitIntervalSec
+# with an "Unknown key" warning on every station.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -13,8 +19,6 @@ Nice=5
 IOSchedulingClass=idle
 Restart=on-failure
 RestartSec=60
-StartLimitBurst=3
-StartLimitIntervalSec=300
 MemoryMax=2G
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONIOENCODING=utf-8

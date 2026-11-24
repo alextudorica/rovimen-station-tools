@@ -1,21 +1,34 @@
-import { state, escHtml, fetchJson, openAppPanel, appPanelClose, _modalOpen, _modalClose } from './dashboard-common.js';
+/*
+ * dashboard-overview.js
+ * ─────────────────────
+ * The Network overview "/network" (overview.html, ov_page 'network'): the
+ * fleet map with camera fields of view, coverage layers, the station
+ * selection band, Bortle and GMN orbit layers, the live snapshot view, the
+ * station status table and "Cameras at a point". The home page "/" runs
+ * dashboard-home.js instead and never loads this module; the top bar both
+ * pages share is drawn by renderOverviewSummary and loadOverviewNetStats in
+ * dashboard-common.js.
+ */
+import { state, escHtml, fetchJson, openAppPanel, appPanelClose, _modalOpen, _modalClose, createPollBackoff, serviceIsUp, SEGMENT_ALARM_TEXT, fetchAuthStatus, setPressed, renderOverviewSummary, loadOverviewNetStats } from './dashboard-common.js';
+import { hideTarget } from './dashboard-hidden.js';
 import { VideoModal } from './dashboard-video-modal.js';
+import {
+  PICK_ALT_MIN_KM, PICK_ALT_MAX_KM, altitudeSamples, camerasSeeingPoint, groupByStation,
+  stationLabel, nightForUtc, gridWindowFor, gridUrlFor, utcDateTimeParts,
+} from './dashboard-map-point.js';
+import { layoutStationMarkers } from './dashboard-marker-layout.js';
+
+const _BASE_LAYER_BTNS = '#map-layer-btns .map-seg .fov-btn';
+const _reducedMotion = () => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+// "HH:MM:SS" in UTC; the caller appends the " UTC" label.
+const _utcTimeFmt = new Intl.DateTimeFormat('en-GB', {
+  timeZone: 'UTC', hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23',
+});
 /* global _gmnOpenClipModal, _gmnCloseClipModal */
-(async function() {
-  try {
-    const auth = await fetchJson('/api/auth/status');
-    // Record the session identity so the shared VideoModal knows whether to
-    // show operator-only controls (it reads state.AUTH_USER). Anonymous
-    // visitors keep {user:null} → playback-only.
-    state.AUTH_USER = auth.user || null;
-    if (auth.admin) {
-      const el = document.getElementById('logo-dd-admin');
-      if (el) el.style.display = '';
-      const socialEl = document.getElementById('logo-dd-social');
-      if (socialEl) socialEl.style.display = '';
-    }
-  } catch(e) {}
-})();
+// The shared VideoModal shows operator-only controls off state.AUTH_USER,
+// which the page's one session request writes; anonymous visitors keep
+// {user:null} → playback-only.
+fetchAuthStatus();
 
 let STATION_COORDS = {};
 let PLATEPAR_DATA  = {};
@@ -214,8 +227,59 @@ function cameraFootprint(lat, lon, azDeg, altDeg, rotDeg, fovH, fovV, color, H,
     for(let k=1;k<=N;k++) pts.push(project(-1,1-(k/N)*2));
   }
   const center = project(0, 0);
+  if (color == null) return { pts, center };
   const polygon = L.polygon(pts,{color,fillColor:color,fillOpacity:0.18,weight:1.8,opacity:0.7});
   return { polygon, center };
+}
+
+// Ground distance (km) at which a meteor at height H sits 10 deg above the
+// horizon: the map draws no footprint beyond it.
+function _footprintCapKm(H) {
+  const ce=Math.cos(10*Math.PI/180);
+  const beta=10*Math.PI/180+Math.asin(R_EARTH_KM*ce/(R_EARTH_KM+H));
+  return R_EARTH_KM*(Math.PI/2-beta);
+}
+
+// Densify a footprint ring (24 points per edge) and pull every point beyond
+// `capKm` from the station back onto that radius. Pure: [lat, lon] pairs in
+// and out, so the map and the point picker share it.
+export function _capFootprintPts(pts, lat, lon, capKm) {
+  // The edge walk ends on its first point; drop the closing duplicate as
+  // L.polygon does, so the ring has no zero-length edge.
+  const last=pts[pts.length-1];
+  if(pts.length>1 && last[0]===pts[0][0] && last[1]===pts[0][1]) pts=pts.slice(0,-1);
+  const cosLat=Math.cos(lat*Math.PI/180);
+  const SEGS=24;
+  const out=[];
+  for(let j=0;j<pts.length;j++){
+    const a=pts[j], b=pts[(j+1)%pts.length];
+    for(let t=0;t<SEGS;t++){
+      const f=t/SEGS;
+      const pLat=a[0]+(b[0]-a[0])*f, pLon=a[1]+(b[1]-a[1])*f;
+      const dLat=pLat-lat, dLon=pLon-lon;
+      const dist=Math.sqrt((dLat*111)**2+(dLon*111*cosLat)**2);
+      if(dist<=capKm) { out.push([pLat,pLon]); continue; }
+      const s=capKm/dist;
+      out.push([lat+dLat*s, lon+dLon*s]);
+    }
+  }
+  return out;
+}
+
+// One camera's footprint at height H as capped [lat, lon] pairs plus the
+// optical-axis point, from its platepar (falling back to the registry az/alt).
+// Null when the camera has no pointing. The map draws exactly this ring.
+export function _cameraFootprintPts(lat, lon, cam, pp, H) {
+  const az=pp?.az_centre??cam.az, alt=pp?.alt_centre??cam.alt;
+  if(az==null||alt==null) return null;
+  const result=cameraFootprint(lat,lon,az,alt,pp?.rotation_from_horiz??0,pp?.fov_h??90,pp?.fov_v??50,null,H,
+    pp?.x_poly_fwd??pp?.x_poly, pp?.F_scale, pp?.X_res, pp?.Y_res,
+    pp?.equal_aspect??true, pp?.asymmetry_corr??true,
+    pp?.RA_d, pp?.dec_d, pp?.pos_angle_ref,
+    pp?.distortion_type, pp?.y_poly_fwd??pp?.y_poly,
+    pp?.mask_contour);
+  if(!result) return null;
+  return { pts: _capFootprintPts(result.pts, lat, lon, _footprintCapKm(H)), center: result.center };
 }
 
 function stationFovIds(key) {
@@ -378,8 +442,7 @@ function clearStationSelection({ silent = false } = {}) {
 
 function setFovAlt(km, btn) {
   FOV_ALT_KM = km;
-  document.querySelectorAll('.fov-control .fov-btn:not(#fov-toggle):not(#cov-toggle)').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
+  document.querySelectorAll('.fov-alt-group .fov-btn').forEach(b => setPressed(b, b === btn));
   if(mapData) {
     drawFootprints(mapData, km);
     if(state.selectedStations.size) _applySelectionFov();
@@ -394,7 +457,7 @@ let _covPrecomp = null;
 
 function toggleCovLayer(n, btn) {
   _covActive[n] = !_covActive[n];
-  btn.classList.toggle('active', _covActive[n]);
+  setPressed(btn, _covActive[n]);
   if (_covActive[n]) {
     _showCovLayer(n);
   } else if (_covLayers[n] && map) {
@@ -551,6 +614,23 @@ function _makeFovButton(key) {
   return btn;
 }
 
+// GMN orbit counts for the station band (the hover card is off on touch).
+function _orbitsText(key) {
+  if (!_stationOrbits?.ready) return 'GMN orbits loading…';
+  const o = _stationOrbits.stations?.[key] || { orbits_30d: 0, orbits_all: 0 };
+  return `GMN orbits: ${o.orbits_30d.toLocaleString('en-US')} (30 d) · ${o.orbits_all.toLocaleString('en-US')} all time`;
+}
+function _makeOrbitsSpan(key) {
+  const el = document.createElement('span');
+  el.className = 'sb-orbits';
+  el.dataset.orbitKey = key;
+  el.textContent = _orbitsText(key);
+  return el;
+}
+function _refreshBandOrbits() {
+  for (const el of document.querySelectorAll('.sb-orbits')) el.textContent = _orbitsText(el.dataset.orbitKey);
+}
+
 // Per-station remove (✕): deselect just this host, leaving the rest.
 function _makeRemoveButton(key, info) {
   const btn = document.createElement('button');
@@ -612,13 +692,14 @@ function _renderSingleStationCard(key, info, sbInner) {
   for (const c of (info.cameras || [])) {
     const a = document.createElement('a');
     a.className = 'sb-cam-badge';
-    a.href = `/station/${encodeURIComponent(key)}/rms?cam=${encodeURIComponent(c.code)}`;
+    a.href = `/station/${encodeURIComponent(key)}/videodb?cam=${encodeURIComponent(c.code)}`;
     a.style.cssText = `color:${color};border-color:${color}33;text-decoration:none`;
-    a.title = `Go to ${c.code} RMS detections`;
+    a.title = `Open ${c.code} in the Video DB`;
     a.textContent = c.code;
     camsDiv.appendChild(a);
   }
   infoRow.appendChild(camsDiv);
+  infoRow.appendChild(_makeOrbitsSpan(key));
 
   const actionsDiv = document.createElement('div');
   actionsDiv.className = 'sb-actions';
@@ -659,15 +740,16 @@ function _renderCompactRow(key, info, sbInner) {
   nameLink.title = info.label ? `${info.label} — go to station page` : 'Go to station page';
   nameLink.textContent = key;
   row.appendChild(nameLink);
+  row.appendChild(_makeOrbitsSpan(key));
 
   const camsDiv = document.createElement('div');
   camsDiv.className = 'sb-cams';
   for (const c of (info.cameras || [])) {
     const a = document.createElement('a');
     a.className = 'sb-cam-badge';
-    a.href = `/station/${encodeURIComponent(key)}/rms?cam=${encodeURIComponent(c.code)}`;
+    a.href = `/station/${encodeURIComponent(key)}/videodb?cam=${encodeURIComponent(c.code)}`;
     a.style.cssText = `color:${color};border-color:${color}33;text-decoration:none`;
-    a.title = `Go to ${c.code} RMS detections`;
+    a.title = `Open ${c.code} in the Video DB`;
     a.textContent = c.code;
     camsDiv.appendChild(a);
   }
@@ -741,7 +823,7 @@ function _isRmsActive(services) {
   if (!services) return false;
   for (const [key, val] of Object.entries(services)) {
     if (key.startsWith('rms-')) {
-      if (val === 'active' || val?.active === true || val?.state === 'active') return true;
+      if (serviceIsUp(val)) return true;
     }
   }
   return false;
@@ -749,6 +831,47 @@ function _isRmsActive(services) {
 
 let _sbThumbTimer = null;
 let _sbAgeTimer = null;
+let _sbThumbLoad = null;   // the band poller's tick, for the visibility catch-up
+
+// Both 15 s thumbnail pollers (station band, Live View) skip their ticks
+// while the tab is hidden: a map left open in a background tab polled
+// /api/latest_ff_maxpixel around the clock (134,675 requests, 26 Aug to
+// 26 Sep). Returning to the tab refreshes at once instead of waiting a tick.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if (_sbThumbTimer && _sbThumbLoad) _sbThumbLoad();
+  if (_liveVisible) _liveRefresh();
+});
+
+// Shared across the station band and Live View: both poll the same
+// /api/latest_ff_maxpixel/<host>/<cam> endpoint every 15 s, so a station that
+// is down should stop being probed by BOTH of them. Keyed per camera endpoint
+// (a station's cameras go quiet together, but one dead camera on a healthy
+// station must not silence its siblings). See createPollBackoff().
+const _ffThumbBackoff = createPollBackoff();
+
+// True when the overview's own /api/overview snapshot says the station is
+// down. Polling it at all is wasted: the endpoint answers 503 only AFTER
+// trying to reach the station, so every skipped call is an upstream timeout
+// avoided. Unknown/absent station -> treat as pollable (fail open).
+function _stationLooksOffline(hostKey) {
+  const info = mapData && mapData[hostKey];
+  return !!info && info.online === false;
+}
+
+// One gate for both pollers: skip while backed off or while the station is
+// known offline, and count the offline skip as a failure so a station that is
+// down for the whole night settles onto the 15 min ceiling instead of being
+// re-probed the moment it flickers back into the map data.
+function _ffThumbShouldSkip(hostKey, camCode) {
+  const key = hostKey + '/' + camCode;
+  if (_ffThumbBackoff.blocked(key)) return true;
+  if (_stationLooksOffline(hostKey)) {
+    _ffThumbBackoff.fail(key);
+    return true;
+  }
+  return false;
+}
 
 function _sbThumbRefresh(hostKey, cams, container) {
   if (_sbThumbTimer) clearInterval(_sbThumbTimer);
@@ -757,16 +880,26 @@ function _sbThumbRefresh(hostKey, cams, container) {
     if (!document.contains(container)) {
       clearInterval(_sbThumbTimer); _sbThumbTimer = null;
       clearInterval(_sbAgeTimer); _sbAgeTimer = null;
+      _sbThumbLoad = null;
       return;
     }
+    if (document.hidden) return;
     for (const c of cams) {
+      if (_ffThumbShouldSkip(hostKey, c.code)) continue;
+      const backoffKey = hostKey + '/' + c.code;
       const url = `/api/latest_ff_maxpixel/${encodeURIComponent(hostKey)}/${encodeURIComponent(c.code)}`;
       fetch(url).then(resp => {
         if (!resp.ok) {
+          _ffThumbBackoff.fail(backoffKey);
           const old = container.querySelector(`[data-cam="${c.code}"]`);
-          if (old) old.remove();
+          if (old) {
+            const _s = old.querySelector('img')?.src;
+            if (_s && _s.startsWith('blob:')) URL.revokeObjectURL(_s);
+            old.remove();
+          }
           return;
         }
+        _ffThumbBackoff.succeed(backoffKey);
         const ffTs = resp.headers.get('X-FF-Timestamp');
         return resp.blob().then(blob => {
           let card = container.querySelector(`[data-cam="${c.code}"]`);
@@ -789,9 +922,10 @@ function _sbThumbRefresh(hostKey, cams, container) {
           if (oldSrc.startsWith('blob:')) URL.revokeObjectURL(oldSrc);
           _sbUpdateLabel(card);
         });
-      }).catch(() => {});
+      }).catch(() => { _ffThumbBackoff.fail(backoffKey); });
     }
   };
+  _sbThumbLoad = load;
   load();
   _sbThumbTimer = setInterval(load, 15000);
   _sbAgeTimer = setInterval(_sbUpdateAllLabels, 5000);
@@ -822,33 +956,46 @@ let _liveTimer = null;
 let _liveAgeTimer = null;
 let _liveVisible = false;
 
+function _setLiveBtnLabel(label) {
+  for (const id of ['ov-live-bar-btn', 'ov-stacks-live-btn']) {
+    const b = document.getElementById(id);
+    if (b) b.textContent = label;
+  }
+}
+
 function toggleLiveView() {
   const el = document.getElementById('ov-live');
-  const btn = document.getElementById('ov-live-bar-btn');
+  if (!el) return;
   if (_liveVisible) {
     _liveVisible = false;
     el.style.display = 'none';
     if (_liveTimer) { clearInterval(_liveTimer); _liveTimer = null; }
     if (_liveAgeTimer) { clearInterval(_liveAgeTimer); _liveAgeTimer = null; }
-    if (btn) btn.textContent = btn.textContent.replace('Hide ', '');
+    // Release blob-backed thumbnails on hide; _liveRefresh rebuilds the grid
+    // from scratch on reopen, so stranding them here would leak until unload.
+    const liveGrid = document.getElementById('ov-live-grid');
+    if (liveGrid) {
+      for (const img of liveGrid.querySelectorAll('img')) {
+        if (img.src && img.src.startsWith('blob:')) URL.revokeObjectURL(img.src);
+      }
+      liveGrid.innerHTML = '';
+    }
+    _setLiveBtnLabel('View live snapshot of all cameras in the fleet');
   } else {
     _liveVisible = true;
     el.style.display = '';
     _liveRefresh();
     _liveTimer = setInterval(_liveRefresh, 15000);
     _liveAgeTimer = setInterval(_liveUpdateAges, 5000);
-    el.scrollIntoView({behavior: 'smooth', block: 'nearest'});
-    if (btn && !btn.textContent.startsWith('Hide')) btn.textContent = 'Hide ' + btn.textContent;
+    el.scrollIntoView({behavior: _reducedMotion() ? 'auto' : 'smooth', block: 'nearest'});
+    _setLiveBtnLabel('Hide the live snapshot');
   }
 }
 
+// Card width is a CSS variable, so cards the 15 s refresh adds pick it up too.
 function ovLiveUpdateZoom(val) {
   const px = parseInt(val, 10) || 160;
-  document.querySelectorAll('.ov-live-card').forEach(c => { c.style.width = px + 'px'; });
-  document.querySelectorAll('.ov-live-card img').forEach(img => {
-    img.style.width = px + 'px';
-    img.style.height = Math.round(px * 0.75) + 'px';
-  });
+  document.documentElement.style.setProperty('--ov-live-w', px + 'px');
 }
 
 // TODO(#340): _liveRefresh fires bare fetch() calls without an AbortController.
@@ -856,7 +1003,7 @@ function ovLiveUpdateZoom(val) {
 // complete and update the DOM after teardown. Consider wiring an AbortController
 // that is aborted in toggleLiveView's hide branch.
 function _liveRefresh() {
-  if (!mapData) return;
+  if (!mapData || document.hidden) return;
   const grid = document.getElementById('ov-live-grid');
   let count = 0;
   const stationColors = {};
@@ -883,25 +1030,34 @@ function _liveRefresh() {
     }
     const inner = groupEl.querySelector('.ov-live-group-cards');
     for (const c of (info.cameras || [])) {
+      // Counted before the backoff gate so the "N cameras capturing" label
+      // reads exactly as it did before: the grid still shows the station, we
+      // just stop re-asking a station that isn't answering.
       count++;
+      if (_ffThumbShouldSkip(hostKey, c.code)) continue;
+      const backoffKey = hostKey + '/' + c.code;
       const cardId = 'live-' + hostKey + '-' + c.code;
       const url = '/api/latest_ff_maxpixel/' + encodeURIComponent(hostKey) + '/' + encodeURIComponent(c.code);
       fetch(url).then(resp => {
-        if (!resp.ok) return;
+        if (!resp.ok) { _ffThumbBackoff.fail(backoffKey); return; }
+        _ffThumbBackoff.succeed(backoffKey);
         const ffTs = resp.headers.get('X-FF-Timestamp');
         return resp.blob().then(blob => {
+          if (!_liveVisible) return;
           let card = document.getElementById(cardId);
           if (!card) {
-            card = document.createElement('div');
+            card = document.createElement('button');
+            card.type = 'button';
             card.className = 'ov-live-card';
             card.id = cardId;
             card.dataset.host = hostKey;
             card.dataset.cam = c.code;
+            card.setAttribute('aria-label', c.code + ': open the latest frame and clip');
             card.onclick = () => _liveOpenVideo(hostKey, c.code);
             const img = document.createElement('img');
-            img.alt = c.code;
+            img.alt = '';
             if (c.rotate) img.style.transform = 'rotate(180deg)';
-            const meta = document.createElement('div');
+            const meta = document.createElement('span');
             meta.className = 'ov-live-meta';
             const codeSpan = document.createElement('span');
             codeSpan.textContent = c.code;
@@ -918,14 +1074,17 @@ function _liveRefresh() {
           if (oldSrc.startsWith('blob:')) URL.revokeObjectURL(oldSrc);
           _liveUpdateCardAge(card);
         });
-      }).catch(() => {});
+      }).catch(() => { _ffThumbBackoff.fail(backoffKey); });
     }
   }
   document.getElementById('ov-live-count').textContent =
-    count > 0 ? count + ' cameras capturing' : 'no active cameras';
+    count > 0 ? captureHeadline(captureSummary(mapData)) : 'no active cameras';
   for (const card of [...grid.querySelectorAll('.ov-live-card')]) {
     const h = card.dataset.host;
     if (!mapData[h] || !_isRmsActive(mapData[h].services)) {
+      const _s = card.querySelector('img')?.src;
+      if (_s && _s.startsWith('blob:')) URL.revokeObjectURL(_s);
+      _ffThumbBackoff.forget(h + '/' + card.dataset.cam);
       card.remove();
       const group = document.getElementById('live-group-' + h);
       if (group && !group.querySelector('.ov-live-card')) group.remove();
@@ -951,23 +1110,148 @@ function _liveUpdateAges() {
   }
 }
 
-function _liveOpenVideo(hostKey, camCode) {
-  fetchJson('/api/latest_chunk/' + encodeURIComponent(hostKey) + '/' + encodeURIComponent(camCode))
-    .then(data => {
-      if (data.error || !data.video_url) return;
-      const video = document.getElementById('ov-live-video');
-      const label = document.getElementById('ov-live-video-label');
-      video.src = data.video_url;
-      label.textContent = camCode + '  ' + (data.time || '') + ' UTC';
-      _modalOpen(document.getElementById('ov-live-modal'));
-    })
-    .catch(() => {});
+// Live-tile click: show the tile's FF maxpixel full size at once, then swap to
+// the latest clip when the station has it ready. The newest chunk is raw at
+// night and the station burns the overlay in before sending a byte (7-9 s on
+// VAAPI hosts, up to ~1 min on a Pi), so /api/latest_chunk starts that render
+// and we poll it for the same chunk. Every wait is bounded and every failure
+// is shown; the still stays up whatever happens.
+export const LIVE_CLIP_WAIT_MS = 120000;   // render + poll budget
+export const LIVE_CLIP_POLL_MS = 2500;
+export const LIVE_CLIP_LOAD_MS = 45000;    // overlaid clip -> first frame
+let _liveClip = null;  // {token, timers[]} for the modal's current attempt
+
+function _liveClipEls() {
+  return {
+    modal: document.getElementById('ov-live-modal'),
+    video: document.getElementById('ov-live-video'),
+    still: document.getElementById('ov-live-still'),
+    label: document.getElementById('ov-live-video-label'),
+    status: document.getElementById('ov-live-status'),
+  };
+}
+
+function _liveClipStop() {
+  if (_liveClip) for (const t of _liveClip.timers) clearTimeout(t);
+  _liveClip = null;
+}
+
+function _liveClipLater(clip, fn, ms) {
+  clip.timers.push(setTimeout(() => { if (_liveClip === clip) fn(); }, ms));
+}
+
+function _liveSetStatus(text, isError, retry) {
+  const { status } = _liveClipEls();
+  if (!status) return;
+  status.classList.toggle('error', !!isError);
+  status.textContent = text;
+  if (retry) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'Retry';
+    b.onclick = retry;
+    status.appendChild(b);
+  }
+}
+
+function _liveResetVideo(video) {
+  if (!video) return;
+  video.pause();
+  video.oncanplay = video.onerror = null;
+  video.removeAttribute('src');
+  video.load();
+  video.style.display = 'none';
+}
+
+export function _liveOpenVideo(hostKey, camCode) {
+  _liveClipStop();
+  const clip = { timers: [] };
+  _liveClip = clip;
+  const { modal, video, still, label } = _liveClipEls();
+  if (!modal || !video) return;
+  const retry = () => _liveOpenVideo(hostKey, camCode);
+
+  // 1) The still: the tile's own frame, already in memory, full size.
+  const card = document.getElementById('live-' + hostKey + '-' + camCode);
+  const tileImg = card && card.querySelector('img');
+  _liveResetVideo(video);
+  if (still) {
+    const ffUrl = '/api/latest_ff_maxpixel/' + encodeURIComponent(hostKey) + '/' +
+                  encodeURIComponent(camCode);
+    // The tile's blob URL is revoked when the tile refreshes (every 15 s);
+    // fall back to the endpoint if that happens before the still decodes.
+    still.onerror = () => { still.onerror = null; still.src = ffUrl; };
+    still.src = (tileImg && tileImg.src) || ffUrl;
+    still.style.transform = (tileImg && tileImg.style.transform) || '';
+    still.style.display = '';
+  }
+  if (label) {
+    const age = card && card.dataset.ts ? '  ' + _ffAge(card.dataset.ts) : '';
+    label.textContent = camCode + '  latest FF maxpixel' + age;
+  }
+  _liveSetStatus('Loading the latest clip…', false);
+  _modalOpen(modal);
+
+  const started = Date.now();
+  const fail = (msg) => { _liveSetStatus(msg, true, retry); _liveClip = null; };
+  const play = (data) => {
+    _liveSetStatus('Loading clip ' + (data.time || '') + ' UTC…', false);
+    video.oncanplay = () => {
+      if (_liveClip !== clip) return;
+      if (still) still.style.display = 'none';
+      video.style.display = '';
+      if (label) label.textContent = camCode + '  ' + (data.time || '') + ' UTC';
+      _liveSetStatus('', false);
+      _liveClipStop();
+    };
+    video.onerror = () => {
+      if (_liveClip !== clip) return;
+      _liveResetVideo(video);
+      fail('The clip for ' + (data.time || '') + ' UTC failed to load; showing the latest FF maxpixel.');
+    };
+    video.src = data.video_url;
+    _liveClipLater(clip, () => {
+      _liveResetVideo(video);
+      fail('The clip did not start within ' + Math.round(LIVE_CLIP_LOAD_MS / 1000) +
+           ' s; showing the latest FF maxpixel.');
+    }, LIVE_CLIP_LOAD_MS);
+  };
+  const base = '/api/latest_chunk/' + encodeURIComponent(hostKey) + '/' + encodeURIComponent(camCode);
+  const poll = (query) => {
+    fetchJson(base + query).then(data => {
+      if (_liveClip !== clip) return;
+      if (!data || !data.video_url) { fail('No clip available for ' + camCode + '.'); return; }
+      // rendering:false on a not-yet-overlaid chunk = the dashboard could not
+      // start a background render (per-worker cap); loading the clip directly
+      // makes the station render it, bounded by LIVE_CLIP_LOAD_MS.
+      if (data.overlaid || data.rendering === false) { play(data); return; }
+      if (Date.now() - started >= LIVE_CLIP_WAIT_MS) {
+        fail('The station has not finished preparing ' + (data.time || '') + ' UTC after ' +
+             Math.round(LIVE_CLIP_WAIT_MS / 1000) + ' s; showing the latest FF maxpixel.');
+        return;
+      }
+      const secs = Math.round((Date.now() - started) / 1000);
+      _liveSetStatus('Station is burning in the overlay for ' + (data.time || '') + ' UTC, ' +
+                     secs + ' s (up to a minute on a Raspberry Pi)…', false);
+      const next = '?date=' + encodeURIComponent(data.date) +
+                   '&filename=' + encodeURIComponent(data.filename);
+      _liveClipLater(clip, () => poll(next), LIVE_CLIP_POLL_MS);
+    }).catch(err => {
+      if (_liveClip !== clip) return;
+      fail(err && err.status === 404 ? 'No recent clip on ' + camCode + '.'
+                                     : 'Could not reach the station for ' + camCode + '.');
+    });
+  };
+  poll('');
 }
 
 function closeLiveModal() {
-  const video = document.getElementById('ov-live-video');
-  if (video) { video.pause(); video.src = ''; }
-  _modalClose(document.getElementById('ov-live-modal'));
+  _liveClipStop();
+  const { modal, video, still, status } = _liveClipEls();
+  _liveResetVideo(video);
+  if (still) { still.removeAttribute('src'); still.style.display = 'none'; }
+  if (status) status.textContent = '';
+  _modalClose(modal);
 }
 
 const COLORS=['#58a6ff','#3fb950','#d29922','#bc8cff','#f85149','#79c0ff','#e3b341'];
@@ -977,9 +1261,7 @@ function drawFootprints(data, H) {
   footprintLayer.clearLayers();
   camPolygons = {};
   camLabels   = {};
-  const _ce=Math.cos(10*Math.PI/180);
-  const _beta=10*Math.PI/180+Math.asin(R_EARTH_KM*_ce/(R_EARTH_KM+H));
-  const capKm=R_EARTH_KM*(Math.PI/2-_beta);
+  _loadStationOrbits();
   let i=0;
   for(const [key,info] of Object.entries(data)){
     const lat=info.lat??STATION_COORDS[key]?.lat;
@@ -989,40 +1271,11 @@ function drawFootprints(data, H) {
     stationColors[key]=color;
     const pps=PLATEPAR_DATA[key]||{};
     for(const cam of (info.cameras||[])){
-      const pp=pps[cam.code];
-      const az=pp?.az_centre??cam.az, alt=pp?.alt_centre??cam.alt;
-      if(az==null||alt==null) continue;
-      const result=cameraFootprint(lat,lon,az,alt,pp?.rotation_from_horiz??0,pp?.fov_h??90,pp?.fov_v??50,color,H,
-        pp?.x_poly_fwd??pp?.x_poly, pp?.F_scale, pp?.X_res, pp?.Y_res,
-        pp?.equal_aspect??true, pp?.asymmetry_corr??true,
-        pp?.RA_d, pp?.dec_d, pp?.pos_angle_ref,
-        pp?.distortion_type, pp?.y_poly_fwd??pp?.y_poly,
-        pp?.mask_contour);
-      if(!result) continue;
-      {
-        const cosLat=Math.cos(lat*Math.PI/180);
-        const SEGS=24;
-        const orig=result.polygon.getLatLngs()[0];
-        const dense=[];
-        for(let j=0;j<orig.length;j++){
-          const a=orig[j], b=orig[(j+1)%orig.length];
-          for(let t=0;t<SEGS;t++){
-            const f=t/SEGS;
-            dense.push(L.latLng(a.lat+(b.lat-a.lat)*f, a.lng+(b.lng-a.lng)*f));
-          }
-        }
-        const capped=dense.map(ll=>{
-          const dLat=ll.lat-lat, dLon=ll.lng-lon;
-          const dist=Math.sqrt((dLat*111)**2+(dLon*111*cosLat)**2);
-          if(dist<=capKm) return ll;
-          const s=capKm/dist;
-          return L.latLng(lat+dLat*s, lon+dLon*s);
-        });
-        result.polygon.setLatLngs(capped);
-      }
+      const fp=_cameraFootprintPts(lat,lon,cam,pps[cam.code],H);
+      if(!fp) continue;
       const id=`${key}_${cam.code}`;
-      camPolygons[id]=result.polygon;
-      camLabels[id]=L.marker(result.center,{
+      camPolygons[id]=L.polygon(fp.pts,{color,fillColor:color,fillOpacity:0.18,weight:1.8,opacity:0.7});
+      camLabels[id]=L.marker(fp.center,{
         icon:L.divIcon({
           className:'',
           html:`<span class="cam-fov-label">${cam.code}</span>`,
@@ -1050,12 +1303,12 @@ const BORTLE_REF = [
   { cls:2, pr:20,  pg:47,  pb:114, label:'Excellent dark sky' },          // Sahara (dark navy)
   { cls:3, pr:15,  pg:87,  pb:20,  label:'Rural sky' },                   // rural France (dark green)
   { cls:3, pr:33,  pg:84,  pb:216, label:'Rural sky' },                   // rural France (dark blue)
-  { cls:4, pr:110, pg:100, pb:30,  label:'Rural/suburban transition' },   // Valcele/Bistrita (olive)
+  { cls:4, pr:110, pg:100, pb:30,  label:'Rural/suburban transition' },   // small town (olive)
   { cls:5, pr:31,  pg:161, pb:42,  label:'Suburban sky' },                // suburban fringe (bright green)
-  { cls:5, pr:184, pg:166, pb:37,  label:'Suburban sky' },                // Ciocarlia (yellow-green)
-  { cls:6, pr:191, pg:100, pb:30,  label:'Bright suburban sky' },         // Vaslui (orange)
-  { cls:7, pr:251, pg:153, pb:138, label:'Suburban/urban transition' },   // Bucharest suburb (salmon)
-  { cls:8, pr:160, pg:160, pb:160, label:'City sky' },                    // Bucharest (gray)
+  { cls:5, pr:184, pg:166, pb:37,  label:'Suburban sky' },                // village near a city (yellow-green)
+  { cls:6, pr:191, pg:100, pb:30,  label:'Bright suburban sky' },         // town (orange)
+  { cls:7, pr:251, pg:153, pb:138, label:'Suburban/urban transition' },   // capital suburb (salmon)
+  { cls:8, pr:160, pg:160, pb:160, label:'City sky' },                    // capital centre (gray)
   { cls:9, pr:242, pg:242, pb:242, label:'Inner-city sky' },              // London/Paris (near-white)
 ];
 
@@ -1142,19 +1395,49 @@ const MAP_LAYERS = {
     opts: { attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, <a href="http://viewfinderpanoramas.org">SRTM</a> | <a href="https://opentopomap.org">OpenTopoMap</a>', maxZoom:17 },
   },
   short: {
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    opts: { attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>', subdomains:'abcd', maxZoom:19 },
+    // Esri Dark Gray Canvas — keyless. CARTO deprecated keyless basemap tiles,
+    // which now come back as an "API KEY REQUIRED" watermark. Esri REST tiles
+    // use {z}/{y}/{x} order, no {s} subdomains and no {r} retina suffix.
+    url: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    // The base is land + country outlines only; city labels, roads and finer
+    // borders come from this transparent Reference overlay (composited on top).
+    ref: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+    opts: { attribution:'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors', maxZoom:19, maxNativeZoom:16 },
   },
   std: {
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     opts: { attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors', maxZoom:19 },
   },
+  sat: {
+    // Esri World Imagery — keyless, global satellite/aerial mosaic.
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    opts: { attribution:'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Source: Esri, Maxar, Earthstar Geographics', maxZoom:19 },
+  },
+  light: {
+    // Esri Light Gray Canvas — keyless replacement for CARTO light_all (now key-gated).
+    url: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}',
+    ref: 'https://services.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}',
+    opts: { attribution:'Tiles &copy; <a href="https://www.esri.com/">Esri</a> &mdash; Esri, HERE, Garmin, &copy; OpenStreetMap contributors', maxZoom:19, maxNativeZoom:16 },
+  },
 };
 
 let _tileLayer  = null;
+let _refLayer   = null;   // Esri Reference overlay (labels/roads/borders) for the Gray Canvas bases
 let _lpLayer    = null;
 let _gmnLayer   = null;   // L.layerGroup holding track polylines + dot markers
 let _gmnActive  = false;
+
+// The Esri Gray Canvas bases carry only land + country outlines; a basemap
+// ``ref`` URL supplies the transparent labels/roads/borders overlay. Composite
+// it above the base tile but still below the marker / overlay panes.
+function _applyRefLayer(key) {
+  if (_refLayer) { map.removeLayer(_refLayer); _refLayer = null; }
+  const cfg = MAP_LAYERS[key];
+  if (cfg && cfg.ref) {
+    _refLayer = L.tileLayer(cfg.ref, cfg.opts).addTo(map);
+    _refLayer.bringToFront();
+  }
+}
 
 const LP_TILE_URL = 'https://djlorenz.github.io/astronomy/image_tiles/tiles2024/tile_{z}_{x}_{y}.png';
 const LP_OPTS = {
@@ -1167,11 +1450,11 @@ function toggleLpLayer(btn) {
   if (_lpLayer) {
     map.removeLayer(_lpLayer);
     _lpLayer = null;
-    btn.classList.remove('active');
+    setPressed(btn, false);
     localStorage.setItem('ov_lp_layer', '0');
   } else {
     _lpLayer = L.tileLayer(LP_TILE_URL, LP_OPTS).addTo(map);
-    btn.classList.add('active');
+    setPressed(btn, true);
     localStorage.setItem('ov_lp_layer', '1');
   }
 }
@@ -1182,19 +1465,26 @@ function setMapBrightness(val, save) {
   if (save) localStorage.setItem('ov_map_brightness', val);
 }
 
+function _setLayerMenuOpen(open) {
+  document.getElementById('map-layer-btns').classList.toggle('open', open);
+  document.getElementById('map-layer-toggle-btn')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
 function toggleLayerMenu() {
-  document.getElementById('map-layer-btns').classList.toggle('open');
+  _setLayerMenuOpen(!document.getElementById('map-layer-btns').classList.contains('open'));
 }
 function switchMapLayer(key, btn) {
-  document.getElementById('map-layer-btns').classList.remove('open');
-  document.querySelectorAll('.map-layer-btns .fov-btn').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
+  _setLayerMenuOpen(false);
+  // Base layers only: the Light Pollution overlay keeps its own state.
+  document.querySelectorAll(_BASE_LAYER_BTNS).forEach(b => setPressed(b, b === btn));
   if(_tileLayer) map.removeLayer(_tileLayer);
   const {url, opts} = MAP_LAYERS[key];
   _tileLayer = L.tileLayer(url, opts).addTo(map);
   _tileLayer.bringToBack();
+  _applyRefLayer(key);
   localStorage.setItem('ov_map_layer', key);
-  const isDark = key === 'short';
+  // Dark basemaps (Carto dark, satellite imagery) skip the brightness dimming
+  // — the filter exists to mute bright light-themed tiles on the dark UI.
+  const isDark = key === 'short' || key === 'sat';
   const tilePaneEl = document.querySelector('.leaflet-tile-pane');
   const brightnessRow = document.getElementById('brightness-row');
   if (isDark) {
@@ -1207,131 +1497,6 @@ function switchMapLayer(key, btn) {
   }
 }
 
-// ── Weather radar overlay (RainViewer) ───────────────────────────────────────
-
-let _wxFrames = [];
-let _wxLayers = {};   // idx -> L.tileLayer (preloaded cache)
-let _wxCurrent = null; // currently visible layer
-let _wxIdx = 0;
-let _wxTimer = null;
-let _wxActive = false;
-let _wxRefreshTimer = null;
-
-function toggleWeatherLayer(btn) {
-  if (_wxActive) {
-    _wxTeardown();
-    btn.classList.remove('active');
-    localStorage.setItem('ov_wx_layer', '0');
-  } else {
-    _wxActive = true;
-    btn.classList.add('active');
-    localStorage.setItem('ov_wx_layer', '1');
-    _wxFetch();
-  }
-}
-
-function _wxTeardown() {
-  _wxActive = false;
-  if (_wxTimer) { clearInterval(_wxTimer); _wxTimer = null; }
-  if (_wxRefreshTimer) { clearTimeout(_wxRefreshTimer); _wxRefreshTimer = null; }
-  for (const layer of Object.values(_wxLayers)) map.removeLayer(layer);
-  _wxLayers = {};
-  _wxCurrent = null;
-  _wxFrames = [];
-  document.getElementById('wx-inline').classList.remove('visible');
-}
-
-function _wxMakeLayer(url) {
-  return L.tileLayer(url, {
-    opacity: 0,
-    tileSize: 512,
-    zoomOffset: -1,
-    maxNativeZoom: 7,
-    maxZoom: 19,
-    pane: 'wxPane',
-    attribution: '<a href="https://www.rainviewer.com/" target="_blank">RainViewer</a>',
-  });
-}
-
-function _wxPreloadAll() {
-  for (let i = 0; i < _wxFrames.length; i++) {
-    if (_wxLayers[i]) continue;
-    const layer = _wxMakeLayer(_wxFrames[i].url);
-    layer.setOpacity(0);
-    layer.addTo(map);
-    _wxLayers[i] = layer;
-  }
-}
-
-function _wxFetch() {
-  fetch('https://api.rainviewer.com/public/weather-maps.json')
-    .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
-    .then(data => {
-      if (!_wxActive) return;
-      const host = data.host || 'https://tilecache.rainviewer.com';
-      const frames = (data.radar?.past || []).map(f => ({
-        time: f.time,
-        url: host + f.path + '/512/{z}/{x}/{y}/6/1_1.png',
-      }));
-      if (!frames.length) return;
-      // Clean old layers if frame set changed
-      const oldKeys = _wxFrames.map(f => f.url);
-      const newKeys = frames.map(f => f.url);
-      if (JSON.stringify(oldKeys) !== JSON.stringify(newKeys)) {
-        for (const layer of Object.values(_wxLayers)) map.removeLayer(layer);
-        _wxLayers = {};
-        _wxCurrent = null;
-      }
-      _wxFrames = frames;
-      _wxIdx = frames.length - 1;
-      _wxPreloadAll();
-      _wxShowFrame(_wxIdx);
-      const slider = document.getElementById('wx-slider');
-      slider.max = frames.length - 1;
-      slider.value = _wxIdx;
-      document.getElementById('wx-inline').classList.add('visible');
-    })
-    .catch(() => {});
-  _wxRefreshTimer = setTimeout(() => { if (_wxActive) _wxFetch(); }, 600000);
-}
-
-function _wxShowFrame(idx) {
-  const frame = _wxFrames[idx];
-  if (!frame) return;
-  if (_wxCurrent !== null && _wxLayers[_wxCurrent]) {
-    _wxLayers[_wxCurrent].setOpacity(0);
-  }
-  if (_wxLayers[idx]) {
-    _wxLayers[idx].setOpacity(0.5);
-  }
-  _wxCurrent = idx;
-  const d = new Date(frame.time * 1000);
-  document.getElementById('wx-time').textContent =
-    d.getUTCHours().toString().padStart(2,'0') + ':' +
-    d.getUTCMinutes().toString().padStart(2,'0') + ' UTC';
-}
-
-function wxSetFrame(idx) {
-  _wxIdx = idx;
-  _wxShowFrame(idx);
-}
-
-function wxTogglePlay() {
-  const btn = document.getElementById('wx-play');
-  if (_wxTimer) {
-    clearInterval(_wxTimer);
-    _wxTimer = null;
-    btn.textContent = '▶';
-  } else {
-    btn.textContent = '⏸';
-    _wxTimer = setInterval(() => {
-      _wxIdx = (_wxIdx + 1) % _wxFrames.length;
-      _wxShowFrame(_wxIdx);
-      document.getElementById('wx-slider').value = _wxIdx;
-    }, 700);
-  }
-}
-
 // ── GMN multi-station orbit layer ────────────────────────────────────────────
 
 function _gmnDefaultDate() {
@@ -1341,16 +1506,105 @@ function _gmnDefaultDate() {
   return d.toISOString().slice(0, 10);  // YYYY-MM-DD
 }
 
+/* Which night the layer opens on.
+
+   GMN solves a night 4-15 days after it happened, so seeding the picker
+   with "yesterday" reliably opened the overlay on an empty map. Prefer the
+   newest night upstream has actually published (from /api/gmn/latest_date)
+   and keep yesterday only as the fallback for when the backend can't name
+   one — a cold cache, or the call failing. */
+export function _gmnSeedDate(latest, fallback) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(latest || '') ? latest : fallback;
+}
+
+/* What to say when a night comes back with no orbits. Two very different
+   situations look identical in the payload's empty `events` list:
+   "GMN hasn't published this night yet" (normal, wait for it — neutral)
+   vs "published, but none of our cameras were on it" (pick another night
+   — red). `not_published_yet` from the backend separates them. */
+export function _gmnEmptyNotice(data) {
+  const d = data || {};
+  const latest = typeof d.latest_available_date === 'string' ? d.latest_available_date : null;
+  // The backend flag is authoritative; the date compare is a fallback for a
+  // payload cached before the flag existed.
+  const notPublished = !!latest && (d.not_published_yet === true ||
+                                    (typeof d.date === 'string' && d.date > latest));
+  if (notPublished) {
+    return {
+      tone: 'info',
+      text: `GMN has not published this night yet — newest available: ${latest}`,
+      jumpDate: latest,
+    };
+  }
+  return { tone: 'warn', text: 'No orbits for this night — try another date', jumpDate: null };
+}
+
+/* Paint the map banner. `tone: 'warn'` colours it red; `jumpDate` appends a
+   one-click control that reopens the layer on that night. Always rewrites
+   the whole banner so one branch's colour / tooltip / button can't leak
+   into the next. No-ops when the banner isn't in the DOM. */
+function _gmnSetBanner(banner, notice) {
+  if (!banner) return;
+  const n = notice || {};
+  banner.textContent = n.text || '';
+  banner.title = n.title || '';
+  banner.style.color = n.tone === 'warn' ? 'var(--red)' : '';
+  banner.classList.toggle('has-action', !!n.jumpDate);
+  if (!n.jumpDate) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'gmn-jump-btn';
+  btn.textContent = `Show ${n.jumpDate}`;
+  btn.addEventListener('click', () => {
+    const input = document.getElementById('gmn-date-input');
+    if (input) input.value = n.jumpDate;
+    _gmnFetchAndDraw(n.jumpDate);
+  });
+  banner.appendChild(btn);
+}
+
+/* Resolve the night to draw, seeding an untouched picker from the backend.
+   A date the user already picked always wins. */
+async function _gmnResolveOpenDate(dateInput) {
+  if (dateInput && dateInput.value) return dateInput.value;
+  let latest = null;
+  try {
+    const payload = await fetchJson('/api/gmn/latest_date');
+    latest = payload && payload.latest_available_date;
+  } catch (e) {
+    // Backend down or cache still cold — yesterday still draws something.
+  }
+  const date = _gmnSeedDate(latest, _gmnDefaultDate());
+  if (dateInput) dateInput.value = date;
+  return date;
+}
+
+/* Resolve once Leaflet's map object exists.
+
+   The layer button ships in the static template, so it can be clicked
+   before initMap() has run — on a slow first paint that is easy to hit.
+   Handing an undefined map to L.layerGroup().addTo() throws from inside
+   Leaflet, which is both a dead layer and a page error. */
+async function _gmnMapReady(timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!map && Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  return !!map;
+}
+
+async function _gmnOpenLayer() {
+  const dateInput = document.getElementById('gmn-date-input');
+  const date = await _gmnResolveOpenDate(dateInput);
+  if (!_gmnActive) return;   // toggled back off while the seed was in flight
+  _gmnFetchAndDraw(date);
+}
+
 function _gmnFormatTime(iso) {
   // "2026-05-21T01:23:45Z" => "2026-05-21 01:23:45 UTC"
   try {
     return iso.replace('T', ' ').replace('Z', '') + ' UTC';
   } catch(e) { return iso; }
-}
-
-/* YYYYMMDD => YYYYMMDD of the previous UTC day. */
-function _gmnPrevYmd(ymd) {
-  return _gmnShiftYmd(ymd, -1);
 }
 
 /* YYYYMMDD + offset days (UTC) => YYYYMMDD. */
@@ -1361,15 +1615,23 @@ function _gmnShiftYmd(ymd, off) {
   return dt.toISOString().slice(0, 10).replace(/-/g, '');
 }
 
-/* Whether a GMN station code is one of ours is decided by the config-derived
-   code→host map (hostByCode, built from /api/stations) — no hard-coded RO/DE
-   prefixes, so witness links work for any network's own station set. */
+/* GMN station codes we operate. RO* is a wildcard (we run the whole RO
+   prefix). DEZ0DQ/DEZ0S7/DEZ132 are our Berlin nodes — other DE codes belong to
+   unrelated German stations and don't link anywhere. Keep in sync with
+   gmn_data.DE_STATION_CODES. */
+const _GMN_DE_WITNESS_CODES = new Set(['DE0018', 'DE001B', 'DE001C', 'DE001D']);
+
+function _gmnIsOurWitness(code) {
+  return code.startsWith('RO') || _GMN_DE_WITNESS_CODES.has(code);
+}
+
 function _gmnStationList(stations, ymd, hostByCode) {
   if (!stations || !stations.length) return '—';
   return stations.map(s => {
     const sHtml = escHtml(s);
+    if (!_gmnIsOurWitness(s)) return sHtml;
     const host = hostByCode && hostByCode[s];
-    if (!host) return sHtml;  // not one of our stations → plain text, no link
+    if (!host) return `<b>${sHtml}</b>`;  // ours but not in our dashboard (shouldn't happen)
     // Deep-link to the station's RMS / Detection tab, pre-selected to this
     // camera and scrolled to the relevant night. Even if no local clip is
     // matched, the user can browse that night's locked detections directly.
@@ -1388,7 +1650,13 @@ function _gmnFmt(v, digits) {
 function _gmnPopupHtml(ev, localMatches, ymd, hostByCode) {
   const shower = escHtml(ev.shower || 'Sporadic');
   const mag = ev.peak_mag != null ? ev.peak_mag.toFixed(1) : '—';
-  const vel = ev.velocity  != null ? ev.velocity.toFixed(1)  : '—';
+  // Entry speed first (what the meteor hit the atmosphere at), then the
+  // geocentric Vg the orbit is computed from; Vg alone reads as impossible for
+  // a slow meteoroid (4.7 km/s against the 11.2 km/s minimum entry speed).
+  const vel = [
+    ev.velocity_init != null ? 'entry ' + ev.velocity_init.toFixed(1) : null,
+    ev.velocity      != null ? 'geo '   + ev.velocity.toFixed(1)      : null,
+  ].filter(Boolean).join(' · ') || '—';
   const altB = ev.altitude_begin != null ? ev.altitude_begin.toFixed(1) : '—';
   const altE = ev.altitude_end   != null ? ev.altitude_end.toFixed(1)   : '—';
 
@@ -1420,9 +1688,10 @@ function _gmnPopupHtml(ev, localMatches, ymd, hostByCode) {
   let localBlock = '';
   if (localMatches && localMatches.length) {
     const cells = localMatches.map(m => {
-      const videoUrl = m.source === 'archive'
+      // ?format=mp4: Safari and iOS cannot play the MKV originals.
+      const videoUrl = (m.source === 'archive'
         ? `/api/archive/file/${encodeURIComponent(m.cam)}/${m.date}/meteors/${encodeURIComponent(m.filename)}`
-        : `/video/${encodeURIComponent(m.host)}/${encodeURIComponent(m.cam)}/${m.date}/${encodeURIComponent(m.filename)}`;
+        : `/video/${encodeURIComponent(m.host)}/${encodeURIComponent(m.cam)}/${m.date}/${encodeURIComponent(m.filename)}`) + '?format=mp4';
       const stationUrl = `/station/${encodeURIComponent(m.host)}/rms?cam=${encodeURIComponent(m.cam)}&date=${encodeURIComponent(m.date)}`;
       // window = [offset - 2 s, offset + duration + 3 s], clamped to 0.
       const winStart = Math.max(0, m.offset_s - 2);
@@ -1436,6 +1705,10 @@ function _gmnPopupHtml(ev, localMatches, ymd, hostByCode) {
                data-win-start="${winStart}" data-win-end="${winEnd}"
                data-video-url="${escHtml(videoUrl)}"
                data-station-url="${escHtml(stationUrl)}"
+               data-host="${escHtml(m.host)}" data-cam="${escHtml(m.cam)}"
+               data-date="${escHtml(m.date)}" data-filename="${escHtml(m.filename)}"
+               data-offset="${escHtml(String(m.offset_s ?? ''))}"
+               data-mtime="${escHtml(m.meteor_time || '')}"
                data-clip-label="${clipLabel}"
                title="Click to enlarge"
                onclick="_gmnMaybeOpenClipModal(event,this)"
@@ -1507,6 +1780,11 @@ function _gmnMatchLocalChunks(ev, detectionsByDate, hostMap) {
       const chunks = st.cameras[code] || [];
       for (const c of chunks) {
         if (!c.meteor_time) continue;
+        // Clip-pending detections carry filename: null. The popup builds a
+        // <video src> straight from filename, so emitting one produces a
+        // witness row with a dead player instead of no row at all — the same
+        // filter the event modal applies to witnesses.
+        if (!c.filename) continue;
         const ct = Date.parse(c.meteor_time.endsWith('Z') ? c.meteor_time : c.meteor_time + 'Z');
         if (Number.isNaN(ct)) continue;
         if (Math.abs(ct - t) > 10000) continue;
@@ -1638,10 +1916,23 @@ window._gmnOpenClipModal = function(vidEl) {
   const titleHtml = stationUrl
     ? `<a href="${escHtml(stationUrl)}" target="_blank" style="color:inherit">${escHtml(label)}</a>`
     : escHtml(label);
-  // Use #t=start,end fragment so the browser seeks automatically
+  // Use #t=start,end fragment so the browser seeks automatically.
+  // station/camera/date/filename give the modal its "Open station / Video
+  // DB" links and "Download clip" hands out the original (archive, else
+  // station) via /download/.
+  const { host, cam, date, filename, offset, mtime } = vidEl.dataset;
+  const known = !!(host && cam && date && filename);
   _gmnClipModal.open({
     src:   `${url}#t=${winStart},${winEnd}`,
     title: label,
+    station: host || '', camera: cam || '', date: date || '', filename: filename || '',
+    detOffset: offset !== undefined && offset !== '' ? parseFloat(offset) : null,
+    download: known && /\.mkv$/.test(filename)
+      ? { originalUrl: `/download/${encodeURIComponent(host)}/${encodeURIComponent(cam)}/${encodeURIComponent(date)}/${encodeURIComponent(filename)}` }
+      : null,
+    // Hide as a false positive (dashboard-hidden.js; shown only to sessions
+    // that may hide). The popup lists only detections that are not hidden.
+    hide: cam && mtime ? { target: hideTarget({ meteor_time: mtime }, cam), hidden: false, page: 'overview' } : null,
   });
   // Overwrite title span innerHTML to support the station hyperlink
   const titleEl = _gmnClipModal._el?.querySelector('.vm-title');
@@ -1677,18 +1968,27 @@ async function _gmnFetchAndDraw(date) {
   const dateInput = document.getElementById('gmn-date-input');
   if (!_gmnActive) return;
 
+  if (banner) {
+    banner.style.display = 'block';
+    _gmnSetBanner(banner, { text: 'Loading GMN data…' });
+  }
+
+  if (!await _gmnMapReady()) {
+    _gmnSetBanner(banner, { text: 'Map is still loading — try the layer again', tone: 'warn' });
+    return;
+  }
+  if (!_gmnActive) return;   // toggled back off while the map was building
+
   // Clear existing layer
   if (_gmnLayer) { map.removeLayer(_gmnLayer); _gmnLayer = null; }
   _gmnLayer = L.layerGroup().addTo(map);
-
-  if (banner) { banner.style.display = 'block'; banner.textContent = 'Loading GMN data…'; }
 
   // Fan out fetches in parallel: GMN events + local detections + cam-code map.
   // Local detections are fetched for a 4-day window centered on the picked
   // night (-2 ... +1 day in UTC) so chunks from the night before / after
   // are also available — meteor_time on the GMN side is the trajectory
   // begin UTC, which can sit on either calendar day around midnight, and
-  // the storage-box archive fallback in _compute_detections_payload makes
+  // the storage-box archive fallback in compute_detections_payload makes
   // older dates still match if the station has long-rolled the locked
   // chunk off local disk.
   const ymd = date.replace(/-/g, '');
@@ -1710,22 +2010,19 @@ async function _gmnFetchAndDraw(date) {
   }
 
   if (!data) {
-    if (banner) banner.textContent = 'GMN data unavailable — network error';
+    _gmnSetBanner(banner, { text: 'GMN data unavailable — network error', tone: 'warn' });
     return;
   }
 
   if (data.error) {
-    if (banner) {
-      banner.textContent = 'GMN upstream unavailable — retrying every 2 h';
-      banner.title = data.error;
-    }
+    _gmnSetBanner(banner, {
+      text: 'GMN upstream unavailable — retrying every 2 h',
+      title: data.error,
+    });
     return;
   }
   if (!Array.isArray(data.events) || !data.events.length) {
-    if (banner) {
-      banner.textContent = 'No orbits for this night — try another date';
-      banner.style.color = 'var(--red)';
-    }
+    _gmnSetBanner(banner, _gmnEmptyNotice(data));
     return;
   }
 
@@ -1841,32 +2138,32 @@ async function _gmnFetchAndDraw(date) {
   } catch(e) {}
 
   if (banner) {
-    banner.style.color = '';
+    let text = `Showing ${data.events.length} GMN orbits for ${date}`;
     if (monthCount != null) {
       const now = new Date();
       const isCurrentMonth = selectedMonth === `${now.getUTCFullYear()}-${String(now.getUTCMonth()+1).padStart(2,'0')}`;
       const label = isCurrentMonth ? 'This month' : selectedMonth;
-      banner.textContent = `${label} RO cameras contributed to the calculation of ${monthCount} orbits`;
-    } else {
-      banner.textContent = `Showing ${data.events.length} GMN orbits for ${date}`;
+      text = `${label} RO cameras contributed to the calculation of ${monthCount} orbits`;
     }
+    _gmnSetBanner(banner, { text });
   }
 }
 
 function toggleGmnLayer(btn) {
   _gmnActive = !_gmnActive;
-  btn.classList.toggle('active', _gmnActive);
+  setPressed(btn, _gmnActive);
   localStorage.setItem('ov_gmn_layer', _gmnActive ? '1' : '0');
 
   const dateRow   = document.getElementById('gmn-date-row');
   const banner    = document.getElementById('gmn-banner');
-  const dateInput = document.getElementById('gmn-date-input');
 
   if (_gmnActive) {
-    if (dateInput && !dateInput.value) dateInput.value = _gmnDefaultDate();
     if (dateRow) dateRow.style.display = 'flex';
-    if (banner)  banner.style.display  = 'block';
-    _gmnFetchAndDraw(dateInput ? dateInput.value : _gmnDefaultDate());
+    if (banner) {
+      banner.style.display = 'block';
+      _gmnSetBanner(banner, { text: 'Loading GMN data…' });
+    }
+    _gmnOpenLayer();
   } else {
     if (_gmnLayer) { map.removeLayer(_gmnLayer); _gmnLayer = null; }
     if (dateRow) dateRow.style.display = 'none';
@@ -1903,7 +2200,6 @@ function initMap(data) {
   L.control.zoom({position: window.innerWidth <= 768 ? 'bottomright' : 'topright'}).addTo(map);
   // Custom pane for LP overlay — sits above tiles but not dimmed by tile brightness filter
   map.createPane('lpPane');
-  map.createPane('wxPane');
   // Restore saved layer + brightness
   const savedLayer = localStorage.getItem('ov_map_layer') || 'std';
   const savedBrightness = parseInt(localStorage.getItem('ov_map_brightness') || '50', 10);
@@ -1911,13 +2207,13 @@ function initMap(data) {
   if (brightnessSlider) brightnessSlider.value = savedBrightness;
   const savedLayerBtn = document.getElementById(`ml-${savedLayer}`);
   if (savedLayerBtn) {
-    document.querySelectorAll('.map-layer-btns .fov-btn').forEach(b=>b.classList.remove('active'));
-    savedLayerBtn.classList.add('active');
+    document.querySelectorAll(_BASE_LAYER_BTNS).forEach(b => setPressed(b, b === savedLayerBtn));
   }
   const {url, opts} = MAP_LAYERS[savedLayer] || MAP_LAYERS.std;
   _tileLayer = L.tileLayer(url, opts).addTo(map);
+  _applyRefLayer(savedLayer);
   const brightnessRow = document.getElementById('brightness-row');
-  if (savedLayer === 'short') {
+  if (savedLayer === 'short' || savedLayer === 'sat') {
     if (brightnessRow) brightnessRow.classList.add('hidden');
   } else {
     document.querySelector('.leaflet-tile-pane') && (document.querySelector('.leaflet-tile-pane').style.filter = `brightness(${savedBrightness/100})`);
@@ -1927,7 +2223,7 @@ function initMap(data) {
   if (localStorage.getItem('ov_lp_layer') === '1') {
     _lpLayer = L.tileLayer(LP_TILE_URL, LP_OPTS).addTo(map);
     const lpBtn = document.getElementById('ml-lp');
-    if (lpBtn) lpBtn.classList.add('active');
+    setPressed(lpBtn, true);
   }
 
   // Restore GMN orbit layer state
@@ -1935,25 +2231,41 @@ function initMap(data) {
     _gmnActive = true;
     const gmnBtn    = document.getElementById('ml-gmn');
     const dateRow   = document.getElementById('gmn-date-row');
-    const dateInput = document.getElementById('gmn-date-input');
-    if (gmnBtn) gmnBtn.classList.add('active');
-    if (dateInput && !dateInput.value) dateInput.value = _gmnDefaultDate();
+    setPressed(gmnBtn, true);
     if (dateRow) dateRow.style.display = 'flex';
     // defer draw until after map is fully set up (footprintLayer etc.)
-    setTimeout(() => { _gmnFetchAndDraw(dateInput ? dateInput.value : _gmnDefaultDate()); }, 0);
-  }
-
-  if (localStorage.getItem('ov_wx_layer') === '1') {
-    _wxActive = true;
-    const wxBtn = document.getElementById('ml-wx');
-    if (wxBtn) wxBtn.classList.add('active');
-    _wxFetch();
+    setTimeout(() => { _gmnOpenLayer(); }, 0);
   }
 
   footprintLayer=L.layerGroup().addTo(map);
   drawFootprints(data, FOV_ALT_KM);
 
-  map.on('click', ()=>{ closePanel(); });
+  map.on('click', e=>{
+    if (_pickMode) { _openPointPicker(e.latlng); return; }
+    closePanel();
+  });
+
+  // Zoomed out, the Romanian stations sit a few km apart, so the name labels
+  // drop the station ID (it stays in the hover title) to overlap less.
+  const syncLabelDetail = () => map.getContainer().classList.toggle('ov-labels-compact', map.getZoom() < 7);
+  map.on('zoomend', syncLabelDetail);
+  syncLabelDetail();
+  // Station dots and names double in size every two zoom levels in (0.6x to
+  // 2.4x around zoom 7), so they stay readable as the map zooms. Below zoom
+  // 5.5 the whole network fits in a few hundred px and the names would only
+  // overlap, so they hide and show on hover.
+  const syncMarkerScale = z => {
+    const c = map.getContainer();
+    c.style.setProperty('--ov-marker-scale', _markerScaleAt(z).toFixed(3));
+    c.classList.toggle('ov-labels-hidden', z < 5.5);
+    c.classList.toggle('ov-collapsed', z < 5);
+  };
+  map.on('zoomanim', e => syncMarkerScale(e.zoom));
+  map.on('zoomend', () => syncMarkerScale(map.getZoom()));
+  syncMarkerScale(map.getZoom());
+  // Stations a few pixels apart fan out and their names pick free sides;
+  // registered after syncMarkerScale so the layout reads the new scale.
+  map.on('zoomend moveend resize', _scheduleMarkerLayout);
 
   let i=0;
   for(const [key,info] of Object.entries(data)){
@@ -1963,26 +2275,185 @@ function initMap(data) {
     const online=info.online;
     const isCommissioning = info.status === 'commissioning';
     const dotColor = isCommissioning ? '#e89b3c' : (online ? '#3fb950' : '#f85149');
+    const place = info.label || key;
+    // The name sits beside the dot; the icon box stays the dot so the anchor
+    // is the station position. The body (dot + name) is what moves when
+    // _applyMarkerLayout fans out stations that sit on top of each other;
+    // the leader line then runs from the true position to the dot.
     const icon=L.divIcon({
-      className:'',
-      html:`<div class="ov-marker-dot" style="width:14px;height:14px;border-radius:50%;
+      className:'ov-marker',
+      html:`<div class="ov-marker-leader" hidden></div><div class="ov-marker-body">`
+        + `<div class="ov-marker-dot" style="width:14px;height:14px;border-radius:50%;
         background:${dotColor};
-        border:2px solid #0d1117;box-shadow:0 0 6px ${dotColor}"></div>`,
-      iconSize:[14,14],iconAnchor:[7,7],
+        border:2px solid #0d1117;box-shadow:0 0 6px ${dotColor}"></div>`
+        + `<span class="ov-marker-name" role="link">`
+        + `${escHtml(place)}<span class="ov-marker-id">${escHtml(key)}</span></span></div>`,
+      iconSize:[MARKER_DOT_PX,MARKER_DOT_PX],iconAnchor:[MARKER_DOT_PX/2,MARKER_DOT_PX/2],
     });
     const marker=L.marker([lat,lon],{icon}).addTo(map);
     stationMarkers[key] = marker;
     stationInfoByKey[key] = info;
+    // Hover card: cameras and GMN orbits. Built on open, so it shows the
+    // counts as soon as /api/overview/station_orbits has answered.
+    // A tap opens it on touch screens and hides the map; the band carries the orbits there.
+    if (!matchMedia('(hover: none)').matches) marker.bindTooltip(() => stationHoverHtml(key, info, _stationOrbits), {
+      direction: 'top', offset: [0, -TIP_LIFT_PX], opacity: 1, className: 'ov-station-tip',
+    });
+    // Handled here rather than with a native <a>: Leaflet drops the click that
+    // ends a map drag, so panning by grabbing a name doesn't navigate.
     marker.on('click', e=>{
       L.DomEvent.stopPropagation(e);
-      // Multi-select: toggle this station in/out of the selection WITHOUT
-      // zooming or recentring the map (issue #511).
+      const oe = e.originalEvent || {};
+      if (oe.target?.closest?.('.ov-marker-name') && !oe.shiftKey) {
+        // The name opens the station; Ctrl/Cmd-click opens it in a new tab.
+        const url = `/station/${encodeURIComponent(key)}`;
+        if (oe.ctrlKey || oe.metaKey) window.open(url, '_blank', 'noopener');
+        else window.location.href = url;
+        return;
+      }
+      // The dot (or Shift-click on the name) toggles this station's fields of
+      // view, adding to any already shown, WITHOUT zooming or recentring the
+      // map (issue #511).
       toggleStationSelection(key, info);
       // Re-assert the highlight: Leaflet may have re-rendered the icon element.
       _setMarkerSelected(key, state.selectedStations.has(key));
     });
     i++;
   }
+  _addZoomOutCard();
+  _scheduleMarkerLayout();
+  // The names' widths change when the web font arrives.
+  document.fonts?.ready?.then(_scheduleMarkerLayout);
+}
+
+// Zoomed far out the dots collapse into one card: station counts by state.
+// Clicking it zooms back to the network.
+function _addZoomOutCard() {
+  const counts = { online: 0, commissioning: 0, offline: 0 };
+  const pts = [];
+  for (const [key, m] of Object.entries(stationMarkers)) {
+    const info = stationInfoByKey[key];
+    counts[info.status === 'commissioning' ? 'commissioning' : info.online ? 'online' : 'offline']++;
+    pts.push(m.getLatLng());
+  }
+  const card = document.createElement('button');
+  card.className = 'ov-zoomout-card';
+  card.title = 'Zoom to the network';
+  card.innerHTML = [['online', '#3fb950'], ['commissioning', '#e89b3c'], ['offline', '#f85149']]
+    .map(([k, c]) => `<span><i style="background:${c}"></i><b>${counts[k]}</b> ${k}</span>`).join('');
+  card.onclick = () => map.fitBounds(L.latLngBounds(pts), { padding: [40, 40], maxZoom: 7 });
+  L.DomEvent.disableClickPropagation(card);
+  map.getContainer().appendChild(card);
+}
+
+// ── Station marker layout (overlapping stations) ────────────────────────────
+// Dot size at scale 1 (the CSS scales it by --ov-marker-scale), the gap
+// between a dot's edge and its name (.ov-marker-name `left`: 10px + 7px*s),
+// and how far above the dot the hover card sits.
+const MARKER_DOT_PX = 14;
+const MARKER_NAME_GAP_PX = 3;
+const TIP_LIFT_PX = 10;
+// --ov-marker-scale at zoom z (see syncMarkerScale in initMap).
+const _markerScaleAt = z => Math.min(2.4, Math.max(0.6, 2 ** ((z - 7) / 2)));
+
+let _markerLayoutRaf = 0;
+function _scheduleMarkerLayout() {
+  if (_markerLayoutRaf) return;
+  _markerLayoutRaf = requestAnimationFrame(() => { _markerLayoutRaf = 0; _applyMarkerLayout(); });
+}
+
+// Measure every station's screen position and name, lay them out
+// (dashboard-marker-layout.js), and move each body + name side. The marker
+// itself stays on the true position, so fields of view, the point picker and
+// popups are unaffected; the click and hover handlers sit on the marker and
+// fire from the moved dot and name.
+function _applyMarkerLayout() {
+  if (!map) return;
+  const s = _markerScaleAt(map.getZoom());
+  const named = !map.getContainer().classList.contains('ov-labels-hidden');
+  const items = [];
+  for (const [key, marker] of Object.entries(stationMarkers)) {
+    const el = marker.getElement?.();
+    if (!el) continue;
+    const name = named ? el.querySelector('.ov-marker-name') : null;
+    const p = map.latLngToContainerPoint(marker.getLatLng());
+    // The name's size at the new scale: its box now, over the scale it is
+    // drawn at now (mid-transition after a zoom), so sub-pixel widths count.
+    let w = 0;
+    let h = 0;
+    if (name) {
+      const r = name.getBoundingClientRect();
+      const cur = parseFloat(getComputedStyle(name).scale) || 1;
+      w = (r.width / cur) * s;
+      h = (r.height / cur) * s;
+    }
+    items.push({ key, x: p.x, y: p.y, w, h });
+  }
+  const layout = layoutStationMarkers(items, { dot: MARKER_DOT_PX * s, gap: MARKER_NAME_GAP_PX });
+  for (const { key } of items) _placeMarker(key, layout[key]);
+}
+
+function _placeMarker(key, place) {
+  const marker = stationMarkers[key];
+  const el = marker?.getElement?.();
+  if (!el || !place) return;
+  const { dx, dy, side } = place;
+  const moved = Math.hypot(dx, dy) >= 0.5;
+  const body = el.querySelector('.ov-marker-body');
+  const name = el.querySelector('.ov-marker-name');
+  const leader = el.querySelector('.ov-marker-leader');
+  if (body) body.style.translate = moved ? `${dx.toFixed(1)}px ${dy.toFixed(1)}px` : '';
+  if (name) name.dataset.side = side;
+  if (leader) {
+    leader.hidden = !moved;
+    if (moved) {
+      leader.style.width = `${Math.hypot(dx, dy).toFixed(1)}px`;
+      leader.style.rotate = `${Math.atan2(dy, dx).toFixed(4)}rad`;
+    }
+  }
+  const tip = marker.getTooltip?.();
+  if (tip) {
+    tip.options.offset = [dx, dy - TIP_LIFT_PX];
+    if (tip.isOpen?.()) tip.update();
+  }
+}
+
+// ── Station hover card (cameras + GMN orbits) ───────────────────────────────
+let _stationOrbits = null;  // /api/overview/station_orbits payload
+let _stationOrbitsTimer = null;
+
+async function _loadStationOrbits() {
+  clearTimeout(_stationOrbitsTimer);
+  try {
+    const r = await fetch('/api/overview/station_orbits');
+    if (r.ok) { _stationOrbits = await r.json(); _refreshBandOrbits(); }
+  } catch { /* keep the last payload; the card says "loading" without one */ }
+  // The server computes in the background: poll until the history is in.
+  if (!_stationOrbits?.ready || !_stationOrbits?.history_complete) {
+    _stationOrbitsTimer = setTimeout(_loadStationOrbits, 60_000);
+  }
+}
+
+const _MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+// Pure: HTML for one station's hover card. Exported for unit tests.
+export function stationHoverHtml(key, info, orbits) {
+  const fmt = n => Number(n).toLocaleString('en-US');
+  const nCams = (info.cameras || []).length;
+  const rows = [`${nCams} camera${nCams === 1 ? '' : 's'}`];
+  if (!orbits?.ready) {
+    rows.push('<span class="ov-tip-muted">GMN orbits loading&hellip;</span>');
+  } else {
+    const o = orbits.stations?.[key] || { orbits_30d: 0, orbits_all: 0, first_month: null };
+    const since = o.first_month
+      ? ` <span class="ov-tip-muted">since ${_MONTHS[+o.first_month.slice(4, 6) - 1]} ${o.first_month.slice(0, 4)}</span>`
+      : '';
+    const partial = orbits.history_complete ? '' : ' <span class="ov-tip-muted">(older years loading)</span>';
+    rows.push(`GMN orbits, last 30 days: <b>${fmt(o.orbits_30d)}</b>`);
+    rows.push(`GMN orbits, all time: <b>${fmt(o.orbits_all)}</b>${since}${partial}`);
+  }
+  return `<div class="ov-tip-title">${escHtml(info.label || key)} <span class="ov-tip-muted">${escHtml(key)}</span></div>`
+    + rows.map(r => `<div>${r}</div>`).join('');
 }
 
 // ── Network Status table (merged from /network page) ─────────────────────────
@@ -2025,10 +2496,163 @@ function _nwCamSvcStatus(camCode, services) {
   if (!services || !camCode) return 'svc-unknown';
   for (const [k, v] of Object.entries(services)) {
     if (k.includes(camCode)) {
-      return (v.active === true || v.state === 'active' || v.running === true) ? 'svc-ok' : 'svc-dead';
+      return serviceIsUp(v) ? 'svc-ok' : 'svc-dead';
     }
   }
   return 'svc-unknown';
+}
+
+// Small badge shown on the online cell when a stale station's quiet detection
+// feed is explained by cloud. Returns null when there's nothing to show, so a
+// healthy or clear-but-quiet station gets no badge (and never the ☁ marker).
+// `weather` comes from /api/overview: 'overcast' means stale + high cloud
+// fraction. Any other/absent value → no badge. Exported for unit tests.
+export function _nwWeatherBadge(row) {
+  if (!row || !row.detectionsStale) return null;
+  if (row.weather === 'overcast') {
+    return { icon: '☁', cls: 'overcast', title: 'Overcast — few stars detected last night; the quiet detection feed is weather, not a fault' };
+  }
+  return null;
+}
+
+// Colour-segment cadence badge. When a camera stream corrupts, ffmpeg's
+// segment muxer stops honouring -segment_time and cuts ~1 s clips instead of
+// 20 s ones (RO000Y once wrote 1543 in a single hour); when the stream stalls
+// it leaves multi-minute holes instead. Neither moves any other column in this
+// table — services, disk and heartbeat all stay green — which is why both used
+// to be found the morning after, with the night already lost.
+//
+// `segmentAlarm` comes from /api/overview as {camera code: 'storm'|'stalls'|
+// 'both'}; the station-side thresholds and the alarm decision both live server
+// side, so this only formats. Empty / absent (an older station bundle that
+// does not report cadence at all) → null, i.e. no badge. Exported for tests.
+export function _nwSegmentBadge(row) {
+  const alarms = (row && row.segmentAlarm) || {};
+  const codes = Object.keys(alarms).sort();
+  if (!codes.length) return null;
+  const kinds = codes.map(c => alarms[c]);
+  const storm = kinds.some(k => k === 'storm' || k === 'both');
+  const stalls = kinds.some(k => k === 'stalls' || k === 'both');
+  const kind = storm && stalls ? 'both' : storm ? 'storm' : 'stalls';
+  const health = new Map((row.cameras || []).map(c => [c.code, c.segment]));
+  const detail = codes.map(code => {
+    const h = health.get(code) || {};
+    const parts = [];
+    if (h.short) parts.push(`${h.short} back-to-back segments`);
+    if (h.stalls) parts.push(`${h.stalls} gaps`);
+    return `${code}: ${parts.length ? parts.join(', ') : alarms[code]}`;
+  });
+  return {
+    label: SEGMENT_ALARM_TEXT[kind],
+    cls: storm ? 'storm' : 'stalls',
+    title: `Colour capture cadence is broken in the last hour — ${detail.join('; ')}. `
+         + 'Check the camera stream now; tonight’s footage is being lost as this runs.',
+  };
+}
+
+// ── Camera capture state ────────────────────────────────────────────────
+// Each camera in /api/overview carries `capture` (dashboard/capture_state.py):
+// state recording | degraded | stalled | idle | no_rms | offline | unknown,
+// from the FF files RMS wrote, plus last_night {night, n_ff, expected,
+// verdict full | partial | poor | none}. The fleet headline counts cameras
+// by it, never by service state: a unit stays "active" in daylight and while
+// its camera is off the wire. Commissioning stations are left out.
+const _CAPTURE_LIVE = new Set(['recording', 'degraded', 'stalled']);
+
+export function captureSummary(overviewData) {
+  const sum = { total: 0, recording: 0, degraded: 0, stalled: 0, idle: 0,
+                notReporting: 0, noRms: 0,
+                lastNight: { night: null, full: 0, partial: 0, poor: 0, none: 0, known: 0 } };
+  for (const info of Object.values(overviewData || {})) {
+    if (!info || info.status === 'commissioning') continue;
+    for (const c of (info.cameras || [])) {
+      sum.total++;
+      const cap = c.capture || {};
+      const st = cap.state || 'unknown';
+      if (st === 'recording') sum.recording++;
+      else if (st === 'degraded') sum.degraded++;
+      else if (st === 'stalled') sum.stalled++;
+      else if (st === 'idle') sum.idle++;
+      else if (st === 'no_rms') sum.noRms++;
+      else sum.notReporting++;
+      const ln = cap.last_night;
+      if (ln && ln.verdict && ln.verdict in sum.lastNight) {
+        sum.lastNight[ln.verdict]++;
+        sum.lastNight.known++;
+        sum.lastNight.night = sum.lastNight.night || ln.night;
+      } else if (st === 'offline' || st === 'no_rms') {
+        sum.lastNight.none++;
+      }
+    }
+  }
+  return sum;
+}
+
+function _fmtNight(n) {
+  return n && n.length === 8 ? `${n.slice(0, 4)}-${n.slice(4, 6)}-${n.slice(6)}` : 'last night';
+}
+
+// One line for the Live bar and the live grid. At night: how many record now;
+// in daytime (nothing recording anywhere): how last night went.
+export function captureHeadline(sum) {
+  if (!sum || !sum.total) return 'No cameras';
+  const live = sum.recording + sum.degraded + sum.stalled;
+  if (live > 0) {
+    const rec = sum.recording + sum.degraded;
+    const extra = [];
+    if (sum.degraded) extra.push(`${sum.degraded} degraded`);
+    if (sum.stalled) extra.push(`${sum.stalled} stalled`);
+    const off = sum.total - rec - sum.stalled - sum.notReporting;
+    if (off) extra.push(`${off} not capturing`);
+    if (sum.notReporting) extra.push(`${sum.notReporting} not reporting`);
+    return `${rec} of ${sum.total} cameras recording` + (extra.length ? ` (${extra.join(', ')})` : '');
+  }
+  const ln = sum.lastNight;
+  // Stations on a bundle without capture evidence (and stations that stopped
+  // reporting) are named as such, not counted as cameras that missed the night.
+  if (!ln.known) return 'Daytime: RMS records at night. Capture state not reported yet.';
+  const notFull = ln.partial + ln.poor;
+  return `Daytime: RMS records at night. Night of ${_fmtNight(ln.night)}: ${ln.full} of ${sum.total} cameras recorded a full night`
+    + (notFull ? `, ${notFull} part of it` : '')
+    + (sum.notReporting ? `, ${sum.notReporting} not reporting` : '');
+}
+
+// Camera dot class and tooltip from its capture state. In daytime the dot
+// shows how last night went; at night, what the camera does now.
+export function _nwCaptureDot(cap) {
+  if (!cap || !cap.state || cap.state === 'unknown') return null;
+  const ln = cap.last_night;
+  const nightTxt = ln
+    ? `Night ${_fmtNight(ln.night)}: ${ln.n_ff}${ln.expected ? ' of ' + ln.expected : ''} FF files`
+    : '';
+  const parts = [cap.detail, nightTxt].filter(Boolean);
+  let cls;
+  switch (cap.state) {
+    case 'recording': cls = 'svc-ok'; break;
+    case 'degraded': cls = 'svc-warn'; break;
+    case 'stalled': case 'no_rms': cls = 'svc-dead'; break;
+    case 'offline': cls = 'svc-unknown'; break;
+    default: {  // idle: judge by last night
+      const v = ln && ln.verdict;
+      cls = v === 'full' ? 'svc-ok' : v === 'partial' ? 'svc-warn' : v ? 'svc-dead' : 'svc-unknown';
+    }
+  }
+  return { cls, title: parts.join('. ') };
+}
+
+// Per-camera sky marker from the latest night's star counts (share of FF
+// frames with too few stars, detection_indexer.py). Every camera with a sky
+// row gets one, so a quiet camera reads as weather or as a fault at a glance.
+export function _nwSkyMarker(sky) {
+  if (!sky || sky.cloud_fraction == null) return null;
+  const f = Number(sky.cloud_fraction);
+  if (!Number.isFinite(f)) return null;
+  const pct = Math.round(f * 100);
+  const stars = sky.median_stars != null ? `, median ${Math.round(sky.median_stars)} stars per frame` : '';
+  const title = `Night ${_fmtNight(sky.night)}: ${pct}% of frames clouded${stars}`;
+  if (f >= 0.8) return { icon: '☁', cls: 'overcast', title };
+  if (f >= 0.3) return { icon: '☁', cls: 'partly', title };
+  return { icon: '✦', cls: 'clear', title };
 }
 
 function nwBuildRows(overviewData, statusAllData) {
@@ -2036,8 +2660,15 @@ function nwBuildRows(overviewData, statusAllData) {
   for (const [key, info] of Object.entries(overviewData)) {
     const status = (statusAllData || {})[key] || {};
     const services = status.services || {};
+    const segmentAlarm = info.segment_alarm || {};
     const cameras = (info.cameras || []).map(c => ({
       code: c.code, svcCls: _nwCamSvcStatus(c.code, services),
+      // Capture state wins over the service guess when the station reports it.
+      capture: _nwCaptureDot(c.capture),
+      sky: _nwSkyMarker(c.sky),
+      // Per-camera cadence counters, null on stations that don't report them.
+      segment: c.segment_health || null,
+      segmentAlarm: segmentAlarm[c.code] || null,
     }));
     let diskPct = null;
     if (info.disk != null) {
@@ -2050,24 +2681,49 @@ function nwBuildRows(overviewData, statusAllData) {
     const stationStatus = info.status || 'active';
     rows.push({
       key, label: info.label || '', online: info.online ? 1 : 0,
+      captureRaw: (info.cameras || []).map(c => c.capture || null),
       stationStatus,
       last_seen: info.last_updated || null,
       cpu: info.cpu_pct ?? null, ram: info.ram_pct ?? null, temp: info.temp_c ?? null,
       diskPct, cameras,
+      // Detection-feed weather state (from /api/overview). Both may be absent
+      // on older payloads → null-safe reads below.
+      detectionsStale: !!info.detections_stale,
+      weather: info.weather || null,
+      // Colour-segment cadence alarms, {camera code: kind}. Absent on older
+      // station bundles → {} → no badge.
+      segmentAlarm,
     });
   }
   return rows;
 }
 
+function _nwMarkSort() {
+  document.querySelectorAll('.nw-table th').forEach(th => {
+    th.classList.remove('sort-asc', 'sort-desc');
+    const on = th.dataset.col === _nwSortCol;
+    if (on) th.classList.add(_nwSortDir === 1 ? 'sort-asc' : 'sort-desc');
+    if (th.hasAttribute('aria-sort')) {
+      th.setAttribute('aria-sort', on ? (_nwSortDir === 1 ? 'ascending' : 'descending') : 'none');
+    }
+  });
+}
+
 function nwSort(col) {
   if (_nwSortCol === col) _nwSortDir *= -1;
   else { _nwSortCol = col; _nwSortDir = col === 'key' ? 1 : -1; }
-  document.querySelectorAll('.nw-table th').forEach(th => {
-    th.classList.remove('sort-asc', 'sort-desc');
-    if (th.dataset.col === col) th.classList.add(_nwSortDir === 1 ? 'sort-asc' : 'sort-desc');
-  });
+  _nwMarkSort();
   _nwRenderTable();
 }
+
+// Sortable headers are focusable (tabindex in overview.html); Enter/Space sorts.
+document.querySelector('.nw-table thead')?.addEventListener('keydown', e => {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  const th = e.target.closest('th[data-col][tabindex]');
+  if (!th) return;
+  e.preventDefault();
+  nwSort(th.dataset.col);
+});
 
 function _nwSortRows(rows) {
   const col = _nwSortCol, dir = _nwSortDir;
@@ -2103,12 +2759,33 @@ function _nwRenderTable() {
     const onCls = isComm ? 'comm' : (r.online ? 'up' : 'down');
     const onTxt = isComm ? 'Commissioning' : (r.online ? 'Online' : 'Offline');
     const onColor = isComm ? '#e89b3c' : (r.online ? 'var(--green)' : 'var(--red)');
-    const camDots = r.cameras.map(c =>
-      `<div class="nw-cam-dot" title="${escHtml(c.code)}"><div class="nw-cam-dot-circle ${c.svcCls}"></div><span class="nw-cam-dot-label">${escHtml(c.code)}</span></div>`
-    ).join('');
+    // Weather badge: a stale (quiet) but clouded station reads as ☁ overcast
+    // rather than a fault. Null when there's nothing to flag.
+    const wx = _nwWeatherBadge(r);
+    const wxBadge = wx
+      ? ` <span class="nw-weather ${wx.cls}" title="${escHtml(wx.title)}">${wx.icon}</span>`
+      : '';
+    // Segment-cadence badge: a camera cutting 1 s clips or stalling is losing
+    // the night right now, and nothing else in this row would show it.
+    const seg = _nwSegmentBadge(r);
+    const segBadge = seg
+      ? ` <span class="nw-seg ${seg.cls}" title="${escHtml(seg.title)}">${escHtml(seg.label)}</span>`
+      : '';
+    const camDots = r.cameras.map(c => {
+      const segCls = c.segmentAlarm ? ' seg-alarm' : '';
+      const segTip = c.segmentAlarm
+        ? ` — ${c.segmentAlarm === 'stalls' ? 'capture stalling' : 'cutting short segments'}`
+        : '';
+      const dotCls = c.capture ? c.capture.cls : c.svcCls;
+      const capTip = c.capture && c.capture.title ? ` — ${c.capture.title}` : '';
+      const sky = c.sky
+        ? `<span class="nw-cam-sky ${c.sky.cls}" title="${escHtml(c.sky.title)}">${c.sky.icon}</span>`
+        : '';
+      return `<div class="nw-cam-dot${segCls}" title="${escHtml(c.code + capTip + segTip)}"><div class="nw-cam-dot-top"><div class="nw-cam-dot-circle ${dotCls}"></div>${sky}</div><span class="nw-cam-dot-label">${escHtml(c.code)}</span></div>`;
+    }).join('');
     html += `<tr class="${r.online ? '' : 'offline'}">
       <td><a class="nw-station-key" href="/station/${encodeURIComponent(r.key)}">${escHtml(r.key)}</a><div class="nw-station-label">${escHtml(r.label)}</div></td>
-      <td><div class="nw-online-cell"><span class="nw-dot ${onCls}"></span><span class="nw-online-text ${onCls}">${onTxt}</span></div></td>
+      <td><div class="nw-online-cell"><span class="nw-dot ${onCls}"></span><span class="nw-online-text ${onCls}">${onTxt}</span>${wxBadge}${segBadge}</div></td>
       <td><span class="nw-age ${age.cls}">${age.text}</span></td>
       <td><span class="nw-metric ${cpu.cls}">${cpu.text}</span></td>
       <td><span class="nw-metric ${ram.cls}">${ram.text}</span></td>
@@ -2117,8 +2794,8 @@ function _nwRenderTable() {
       <td><div class="nw-cam-dots">${camDots || '<span style="color:var(--muted)">—</span>'}</div></td>
     </tr>`;
     cardHtml += `<div class="nw-card ${r.online ? '' : 'offline'}">
-      <div class="nw-card-top"><span class="nw-dot ${onCls}"></span><a class="nw-card-key" href="/station/${encodeURIComponent(r.key)}">${escHtml(r.key)}</a><span class="nw-card-label">${escHtml(r.label)}</span></div>
-      <div class="nw-card-row"><span class="nw-card-field">Status: <b style="color:${onColor}">${onTxt}</b></span><span class="nw-card-field">Last polled: <b class="nw-age ${age.cls}">${age.text}</b></span></div>
+      <div class="nw-card-top"><span class="nw-dot ${onCls}"></span><a class="nw-card-key" href="/station/${encodeURIComponent(r.key)}">${escHtml(r.key)}</a><span class="nw-card-label">${escHtml(r.label)}</span>${wxBadge}${segBadge}</div>
+      <div class="nw-card-row"><span class="nw-card-field">Status: <b style="color:${onColor}">${onTxt}</b></span><span class="nw-card-field">Last contact: <b class="nw-age ${age.cls}">${age.text}</b></span></div>
       <div class="nw-card-row"><span class="nw-card-field">CPU: <b class="nw-metric ${cpu.cls}">${cpu.text}</b></span><span class="nw-card-field">RAM: <b class="nw-metric ${ram.cls}">${ram.text}</b></span><span class="nw-card-field">Temp: <b class="nw-metric ${temp.cls}">${temp.text}</b></span><span class="nw-card-field">Disk: <b class="nw-metric ${disk.cls}">${disk.text}</b></span></div>
       <div class="nw-cam-dots" style="margin-top:4px">${camDots || '<span style="color:var(--muted)">No cameras</span>'}</div>
     </div>`;
@@ -2142,35 +2819,19 @@ function _nwRenderSummary(rows) {
     <div class="nw-summary-item" style="color:#e89b3c"><b>${comm}</b>Commissioning</div>`;
   html += `
     <div class="nw-summary-item blue"><b>${totalCams}</b>Cameras</div>`;
+  const caps = rows.filter(r => r.stationStatus !== 'commissioning')
+    .flatMap(r => r.captureRaw || []);
+  const live = caps.filter(c => c && _CAPTURE_LIVE.has(c.state));
+  if (live.length) {
+    const rec = live.filter(c => c.state !== 'stalled').length;
+    html += `
+    <div class="nw-summary-item green" title="Cameras with an FF file in the last 2 minutes"><b>${rec}</b>Recording</div>`;
+  } else if (caps.some(c => c && c.last_night)) {
+    const full = caps.filter(c => c && c.last_night && c.last_night.verdict === 'full').length;
+    html += `
+    <div class="nw-summary-item green" title="Cameras whose last night's FF files cover 90% of the dark hours or more"><b>${full}</b>Full last night</div>`;
+  }
   el.innerHTML = html;
-}
-
-async function ovLoadNetStats() {
-  const el = document.getElementById('ov-net-stats');
-  if (!el) return;
-  try {
-    const r = await fetch('/api/network-stats');
-    if (!r.ok) return;
-    const d = await r.json();
-    const s = d.network_summary || {};
-    const dbl = d.double_station_coverage_km2 || {};
-    const fmt = v => v != null ? Math.round(v).toLocaleString() : '—';
-    el.style.display = '';
-    let html = `
-      <div class="ns-item"><span class="ns-val blue">${fmt(d.total_covered_area_km2)}</span><span class="ns-lbl">km&sup2; coverage (100 km)</span></div>
-      <div class="ns-item"><span class="ns-val green">${fmt(dbl['100km'])}</span><span class="ns-lbl">km&sup2; double-station</span></div>
-      <div class="ns-item"><span class="ns-val">${fmt(d.atmospheric_volume_km3)}</span><span class="ns-lbl">km&sup3; volume (25–130 km)</span></div>
-      <div class="ns-item"><span class="ns-val yellow">${fmt(d.expected_meteoric_flux_per_hour)}/hr</span><span class="ns-lbl">sporadic flux (&gt;+4.5 mag)</span></div>`;
-    const oc = d.orbit_counts;
-    if (oc) {
-      html += `
-        <div class="ns-item"><span class="ns-val blue">${fmt(oc.last_12_months)}</span><span class="ns-lbl">ROVIMEN orbits (12 mo)</span></div>
-        <div class="ns-item"><span class="ns-val">${fmt(oc.last_30_days)}</span><span class="ns-lbl">orbits (30 d)</span></div>
-        <div class="ns-item"><span class="ns-val green">${fmt(oc.last_night)}</span><span class="ns-lbl">orbits ${oc.last_night_date ? '(' + oc.last_night_date + ')' : '(last night)'}</span></div>
-        <div class="ns-item"></div>`;
-    }
-    el.innerHTML = html;
-  } catch(e) {}
 }
 
 async function nwFetch() {
@@ -2179,55 +2840,27 @@ async function nwFetch() {
     _nwRows = nwBuildRows(overview, statusAll);
     _nwRenderSummary(_nwRows);
     _nwRenderTable();
-    document.querySelectorAll('.nw-table th').forEach(th => {
-      th.classList.remove('sort-asc', 'sort-desc');
-      if (th.dataset.col === _nwSortCol) th.classList.add(_nwSortDir === 1 ? 'sort-asc' : 'sort-desc');
-    });
+    _nwMarkSort();
     const el = document.getElementById('nw-last-fetch');
-    if (el) {
-      const now = new Date();
-      el.textContent = String(now.getUTCHours()).padStart(2,'0') + ':' +
-        String(now.getUTCMinutes()).padStart(2,'0') + ':' +
-        String(now.getUTCSeconds()).padStart(2,'0') + ' UTC';
-    }
+    if (el) el.textContent = _utcTimeFmt.format(new Date()) + ' UTC';
   } catch(e) {
     const tbody = document.getElementById('nw-tbody');
-    if (tbody && !_nwRows.length) tbody.innerHTML = '<tr><td colspan="8" class="nw-error">Failed to load station data</td></tr>';
+    if (tbody && !_nwRows.length) tbody.innerHTML = '<tr><td colspan="8" class="nw-error">Failed to load station data; retrying in 30 s.</td></tr>';
   }
 }
 
 function renderSummary(data) {
-  const entries=Object.entries(data);
-  const comm=entries.filter(([,d])=>d.status==='commissioning').length;
-  const active=entries.filter(([,d])=>d.status!=='commissioning');
-  const onlineSt=active.filter(([,d])=>d.online).length;
-  const offlineSt=active.length-onlineSt;
-  const onlineCams=active.filter(([,d])=>d.online).reduce((s,[,d])=>s+(d.cameras?.length||0),0);
-  const offlineCams=active.filter(([,d])=>!d.online).reduce((s,[,d])=>s+(d.cameras?.length||0),0);
-  const commCams=entries.filter(([,d])=>d.status==='commissioning').reduce((s,[,d])=>s+(d.cameras?.length||0),0);
-  const summary=document.getElementById('ov-summary');
-  summary.innerHTML =
-    '<div class="ov-summary-hdr"></div>' +
-    '<div class="ov-summary-hdr">Online</div>' +
-    '<div class="ov-summary-hdr">Comm.</div>' +
-    '<div class="ov-summary-hdr">Offline</div>' +
-    '<div class="ov-summary-label">Stations</div>' +
-    '<div class="ov-summary-cell green">' + onlineSt + '</div>' +
-    '<div class="ov-summary-cell orange">' + comm + '</div>' +
-    '<div class="ov-summary-cell red">' + offlineSt + '</div>' +
-    '<div class="ov-summary-label">Cameras</div>' +
-    '<div class="ov-summary-cell green">' + onlineCams + '</div>' +
-    '<div class="ov-summary-cell orange">' + commCams + '</div>' +
-    '<div class="ov-summary-cell red">' + offlineCams + '</div>';
-  const capturingCams = entries.reduce((s, [,d]) => s + (_isRmsActive(d.services) ? (d.cameras?.length || 0) : 0), 0);
-  const liveBar = document.getElementById('ov-live-bar');
-  if (capturingCams > 0) {
-    liveBar.style.display = 'flex';
-    document.getElementById('ov-live-bar-btn').textContent = _liveVisible
-      ? 'Hide Live View (' + capturingCams + ')'
-      : 'Live View (' + capturingCams + ')';
-  } else {
-    liveBar.style.display = 'none';
+  renderOverviewSummary(data);
+  // Counted from each camera's FF files (captureSummary), not from service
+  // state: a unit stays "active" all day and while its camera is unplugged.
+  const capSum = captureSummary(data);
+  const capturingCams = capSum.recording + capSum.degraded;
+  // Network overview: the live snapshots load only from this button.
+  const liveBtn = document.getElementById('ov-live-bar-btn');
+  const liveNote = document.getElementById('ov-live-bar-note');
+  if (liveBtn) {
+    liveBtn.disabled = capturingCams === 0 && !_liveVisible;
+    if (liveNote) liveNote.textContent = captureHeadline(capSum);
   }
 }
 
@@ -2247,435 +2880,7 @@ function ovBuildStationSelector(data) {
   document.addEventListener('click', () => { const m = document.getElementById('ov-station-menu'); if (m) m.classList.remove('open'); });
 }
 
-// Build skeleton HTML — one shimmering card per camera across all online
-// stations, grouped by host so the cold-start layout previews the real grid.
-// Only used by fetchAndRenderStacks on its first call (retryCount === 0).
-function _ovBuildSkeletons(overviewData){
-  let html = '';
-  for (const [host, info] of Object.entries(overviewData || {})) {
-    if (!info.online) continue;
-    const cams = info.cameras || [];
-    if (!cams.length) continue;
-    let row = '';
-    for (let i = 0; i < cams.length; i++) {
-      row += `<div class="ov-stack-skeleton" aria-hidden="true">
-        <div class="ov-stack-skeleton-img"></div>
-        <div class="ov-stack-skeleton-meta"></div>
-      </div>`;
-    }
-    html += `<div class="ov-stack-skeleton-group" aria-hidden="true">
-      <div class="ov-stack-skeleton-label"></div>
-      <div class="ov-stack-skeleton-row">${row}</div>
-    </div>`;
-  }
-  return html;
-}
-
-/* Camera 180° rotation map keyed by ``host__cam``. Populated whenever
-   fetchAndRenderStacks runs from overviewData.cameras[].rotate. RMS plot
-   images (FF native sensor orientation) are now rotated client-side via
-   the ``.thumb-rotated`` CSS class instead of via a server-side PIL pass.
-   Station/archive colour stacks are pre-rotated upstream so they never
-   get the class. The colour meteor stack filename is excluded for the
-   same reason. See dashboard.css. */
-const COLOR_METEOR_STACK_FILENAME = '__color_meteor_stack__.webp';
-
-/* Colour the per-card date label by how recent the captured night is,
-   so an offline-for-days station is visually obvious in the stacks grid.
-   `dateYmd` is the upstream YYYYMMDD captured-night date (= the *start*
-   of the night, so 20260521 = night of May 21→22 UTC). "Last night" =
-   today UTC − 1 day → green; one day older → yellow; older still → red. */
-function _ovDateAgeClass(dateYmd) {
-  if (!dateYmd || dateYmd.length !== 8) return '';
-  const y = +dateYmd.slice(0,4), m = +dateYmd.slice(4,6), d = +dateYmd.slice(6,8);
-  const captured = Date.UTC(y, m - 1, d);
-  const now = new Date();
-  const todayUtc = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate());
-  const days = Math.round((todayUtc - captured) / 86400000);
-  if (days <= 1) return 'fresh';   // last completed night
-  if (days === 2) return 'stale';  // one extra day old
-  return 'old';
-}
-
-let _rotateByCam = {};
-function _ovBuildRotateMap(overviewData) {
-  const m = {};
-  for (const [host, info] of Object.entries(overviewData || {})) {
-    for (const c of (info.cameras || [])) {
-      if (c && c.code) m[`${host}__${c.code}`] = !!c.rotate;
-    }
-  }
-  return m;
-}
-function _ovCameraRotates(host, cam) {
-  return !!_rotateByCam[`${host}__${cam}`];
-}
-function _ovImgUrlNeedsRotation(host, cam, imgUrl) {
-  if (!_ovCameraRotates(host, cam)) return false;
-  // The `rotate` flag describes the camera's *sensor* orientation. Only
-  // raw frames inherit it — FF captured stacks, max/avepixel. Matplotlib
-  // charts (radiants, fieldsums, astrometry/calibration variation,
-  // FF intervals, observing periods) carry axis labels that must stay
-  // upright. The colour meteor stack is pre-rotated upstream by the
-  // station stacker, so it never qualifies either.
-  try {
-    const u = new URL(imgUrl, location.href);
-    const parts = u.pathname.split('/');
-    const i = parts.indexOf('plot_image');
-    if (i < 0 || parts.length < i + 5) return false;
-    const fn = decodeURIComponent(parts[i + 4]);
-    if (fn === COLOR_METEOR_STACK_FILENAME) return false;
-    return /_(stack|maxpixel|avepixel)\./i.test(fn);
-  } catch (e) {
-    return false;
-  }
-}
-
-async function fetchAndRenderStacks(overviewData, retryCount = 0) {
-  const grid = document.getElementById('ov-stacks-grid');
-  _rotateByCam = _ovBuildRotateMap(overviewData);
-  // On the very first call (cold start), paint skeleton placeholders so the
-  // stacks section is never blank while /api/overview/stacks is in flight.
-  // Subsequent retries leave the existing "Loading stacks…" message in place.
-  if (retryCount === 0 && grid) {
-    const skeletons = _ovBuildSkeletons(overviewData);
-    if (skeletons) grid.innerHTML = skeletons;
-  }
-  try {
-    const stacks = await fetchJson('/api/overview/stacks');
-    if (!stacks.length) {
-      // Cold dashboard restart — backend cache empty, prefetch in flight.
-      // Retry a few times with backoff before giving up.
-      if (retryCount < 6) {
-        const delay = [500, 1500, 3000, 5000, 8000, 12000][retryCount];
-        grid.innerHTML = `<div class="ov-stacks-loading">Loading stacks… (cache warming, retry ${retryCount + 1}/6)</div>`;
-        setTimeout(() => fetchAndRenderStacks(overviewData, retryCount + 1), delay);
-        return;
-      }
-      grid.innerHTML = '<div class="ov-stacks-loading">No captured stacks available</div>';
-      return;
-    }
-    // Group by host
-    const byHost = {};
-    for (const s of stacks) {
-      (byHost[s.host] = byHost[s.host] || []).push(s);
-    }
-    // Also include offline stations (no stacks) for completeness
-    // Track cameras that have stacks so we can fetch their plot lists
-    const camPlotTargets = [];
-    let html = '';
-    for (const [host, info] of Object.entries(overviewData)) {
-      const online = info.online;
-      const cams = byHost[host] || [];
-      const offlineCams = (info.cameras || []).filter(c => !cams.find(s => s.cam === c.code));
-      if (!cams.length && !offlineCams.length) continue;
-
-      html += `<div class="ov-station-group">
-        <div class="ov-station-label">
-          <span class="dot ${online ? 'up' : 'down'}"></span>
-          ${escHtml(host)} <span class="ov-station-loc">${escHtml(info.label)}</span>
-        </div>
-        <div class="ov-cam-grid">`;
-
-      // Cameras with stacks — card without per-camera button row.
-      // Plot switching is driven by the global toggle bar above the grid.
-      // Click opens fullscreen modal; the small "↗" badge navigates to
-      // the per-station detail page.
-      for (const s of cams) {
-        const imgUrl = `/api/rms/plot_image/${encodeURIComponent(s.host)}/${encodeURIComponent(s.cam)}/${encodeURIComponent(s.date)}/${encodeURIComponent(s.filename)}`;
-        const dateStr = String(s.date || '').replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3');
-        const ageCls = _ovDateAgeClass(s.date);
-        const imgId = `ov-cam-img-${s.host}-${s.cam}`;
-        // Captured stacks are FF-derived (native sensor orientation). Apply
-        // the 180° client-side rotation class when the camera's rotate flag
-        // is set; the colour meteor stack filename never qualifies (it's
-        // already station-rotated upstream).
-        const rotCls = _ovImgUrlNeedsRotation(s.host, s.cam, imgUrl) ? ' class="thumb-rotated"' : '';
-        // JSON.stringify gives a properly JS-escaped string literal; escHtml
-        // then makes it safe to embed inside an HTML attribute value.
-        const onclickArgs = `${escHtml(JSON.stringify(imgId))},${escHtml(JSON.stringify(s.host))},${escHtml(JSON.stringify(s.cam))},${escHtml(JSON.stringify(dateStr))}`;
-        html += `<div class="ov-cam-card-wrap">
-          <div class="ov-cam-card" role="button" tabindex="0"
-               title="${escHtml(s.cam)} — ${escHtml(dateStr)} (click to expand)"
-               onclick="ovOpenCardImg(${onclickArgs})"
-               onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();ovOpenCardImg(${onclickArgs})}">
-            <a class="ov-cam-jump" href="/station/${encodeURIComponent(s.host)}/rms?cam=${encodeURIComponent(s.cam)}"
-               title="Open station page" onclick="event.stopPropagation()">↗</a>
-            <img id="${escHtml(imgId)}"${rotCls} src="${escHtml(imgUrl)}" data-default-src="${escHtml(imgUrl)}" data-host="${escHtml(s.host)}" data-cam="${escHtml(s.cam)}" alt="${escHtml(s.cam)}" loading="lazy" decoding="async"
-                 onerror="this.style.opacity='0.3';this.onerror=null">
-            <div class="ov-cam-code">${escHtml(s.cam)} <span class="ov-cam-date ${ageCls}">${escHtml(dateStr)}</span></div>
-          </div>
-        </div>`;
-        camPlotTargets.push({ host: s.host, cam: s.cam, date: s.date, imgId });
-      }
-
-      // Cameras without stacks (offline or no data)
-      for (const c of offlineCams) {
-        html += `<div class="ov-cam-card-wrap">
-          <a href="/station/${encodeURIComponent(host)}/rms?cam=${encodeURIComponent(c.code)}" class="ov-cam-card no-stack" title="${escHtml(c.code)} — no data">
-            <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='120'%3E%3C/svg%3E" alt="${escHtml(c.code)}" decoding="async">
-            <div class="ov-cam-code">${escHtml(c.code)} <span class="ov-cam-date">no data</span></div>
-          </a>
-        </div>`;
-      }
-
-      html += '</div></div>';
-    }
-    grid.innerHTML = html;
-
-    // Fetch every camera's plot list in parallel, then build ONE global
-    // toggle row from the union of labels, rendered above the stacks grid.
-    // PRE-POPULATE plotsByCam with an empty entry for every imgId so failed
-    // fetches still appear in Object.entries() — otherwise the lazy refresh
-    // can't see them and they stay frozen forever.
-    const plotsByCam = {};  // imgId -> { label -> url }
-    for(const t of camPlotTargets) plotsByCam[t.imgId] = {};
-    await Promise.all(camPlotTargets.map(async (t) => {
-      try {
-        const r = await fetch(`/api/rms/plots/${t.host}/${t.cam}/${t.date}`);
-        if (!r.ok) return;
-        const plots = await r.json();
-        const m = {};
-        for (const p of plots) {
-          m[p.label] = `/api/rms/plot_image/${t.host}/${t.cam}/${t.date}/${encodeURIComponent(p.filename)}`;
-        }
-        plotsByCam[t.imgId] = m;
-      } catch(e) {}
-    }));
-    renderOverviewPlotToggle(plotsByCam);
-    // Cards whose plot-list fetch failed have empty {} entries here. Schedule
-    // aggressive early retries (3s, 8s, 20s) in addition to the 60s
-    // setInterval — the dashboard-side cache typically warms within a few
-    // seconds of restart, but during that window the first JS fetch may
-    // race ahead of the dashboard's own prefetch loop.
-    [3000, 8000, 20000].forEach(ms =>
-      setTimeout(() => { try { ovRefreshMissingPlotLists(); } catch(e) {} }, ms)
-    );
-  } catch (e) {
-    grid.innerHTML = '<div class="ov-stacks-loading">Failed to load stacks</div>';
-  }
-}
-
-// Short labels keyed by the server's label string. Order here controls the
-// displayed order of buttons in the global toggle bar.
-// Strict whitelist — only these plot labels render as toggle buttons on the
-// overview. Anything else returned by /api/rms/plots is ignored. Order here
-// controls the displayed order.
-const OV_PLOT_LABEL_ORDER = [
-  'Captured stack', 'Meteor stack', 'Radiants', 'Field sums',
-  'Astrometry calibration', 'Calibration variation',
-  'FF intervals', 'Observing periods',
-];
-const OV_PLOT_SHORT = {
-  'Captured stack':          'All stack',
-  'Meteor stack':            'Meteor stack',
-  'Radiants':                'Radiants',
-  'Field sums':              'Fieldsums',
-  'Astrometry calibration':  'Astrometry',
-  'Calibration variation':   'Calib var',
-  'FF intervals':            'FF intervals',
-  'Observing periods':       'Obs periods',
-};
-
-// `plotsByCam` is { imgId: { label: url } }. Render one button per unique
-// label that exists on at least one camera. Clicking a button swaps EVERY
-// camera card's thumbnail to that plot (cameras missing that plot keep
-// their default stack so the grid never goes blank).
-function renderOverviewPlotToggle(plotsByCam){
-  const bar = document.getElementById('ov-plot-toggle-bar');
-  if(!bar) return;
-  const union = new Set();
-  for(const m of Object.values(plotsByCam)) for(const lbl of Object.keys(m)) union.add(lbl);
-  // Strict whitelist: only render buttons for labels in OV_PLOT_LABEL_ORDER,
-  // in that exact order. Anything else the API returns (thumbs, detected,
-  // photometry, etc.) is intentionally hidden.
-  const ordered = OV_PLOT_LABEL_ORDER.filter(l => union.has(l));
-  if(!ordered.length){ bar.style.display = 'none'; return; }
-  const plotsByCamJson = JSON.stringify(plotsByCam).replace(/"/g, '&quot;');
-  bar.dataset.plotsByCam = plotsByCamJson;
-  const buttons = ordered.map(lbl => {
-    const short = OV_PLOT_SHORT[lbl] || lbl;
-    const active = lbl === 'Captured stack' ? ' active' : '';
-    return `<button class="ov-plot-toggle-btn${active}" data-label="${lbl}"
-              onclick="ovGlobalPlotSwitch(this,'${lbl.replace(/'/g,"\\'")}')">${short}</button>`;
-  }).join('');
-  bar.innerHTML = `<span class="ov-plot-toggle-bar-label">Show plot:</span>${buttons}`;
-  bar.style.display = 'flex';
-}
-
-function ovUpdateZoom(val){
-  const px = parseInt(val, 10) || 160;
-  // Scale every camera card + its image to the slider value.
-  document.querySelectorAll('.ov-cam-card-wrap').forEach(w => { w.style.width = px + 'px'; });
-  document.querySelectorAll('.ov-cam-card').forEach(c => { c.style.width = px + 'px'; });
-  document.querySelectorAll('.ov-cam-card img').forEach(img => {
-    img.style.width  = px + 'px';
-    img.style.height = Math.round(px * 0.75) + 'px';  // keep the 4:3 feel
-  });
-}
-
-/* Inline SVG placeholder rendered on cards that don't have the selected
-   plot type (e.g. clicking 'Meteor stack' on a station with zero meteors).
-   Without this, those cards keep showing their captured_stack thumbnail
-   and the toggle looks broken. */
-function _ovNoDataTile(label){
-  const t = (label || 'plot').replace(/[<>&"]/g, '');
-  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 120'>
-    <rect width='160' height='120' fill='#161b22'/>
-    <text x='50%' y='46%' fill='#6e7681' font-family='monospace' font-size='10'
-          text-anchor='middle' dominant-baseline='middle'>no data</text>
-    <text x='50%' y='62%' fill='#484f58' font-family='monospace' font-size='9'
-          text-anchor='middle' dominant-baseline='middle'>${t}</text>
-  </svg>`;
-  return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
-}
-
-function ovGlobalPlotSwitch(btn, label){
-  const bar = document.getElementById('ov-plot-toggle-bar');
-  if(!bar) return;
-  bar.querySelectorAll('.ov-plot-toggle-btn.active').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  bar.dataset.activeLabel = label;
-  const noDataTile = _ovNoDataTile(label);
-  let plotsByCam = {};
-  try {
-    plotsByCam = JSON.parse((bar.dataset.plotsByCam || '{}').replace(/&quot;/g, '"'));
-  } catch(e) {}
-  for(const [imgId, byLabel] of Object.entries(plotsByCam)){
-    const img = document.getElementById(imgId);
-    if(!img) continue;
-    const url = byLabel[label];
-    if(url){
-      img.src = url;
-      img.dataset.hasPlot = '1';
-    } else if(label === 'Captured stack'){
-      // Captured stack is the default; every camera has it (it's how they
-      // ended up in the grid in the first place). Restore the default src.
-      img.src = img.dataset.defaultSrc || img.src;
-      img.dataset.hasPlot = '1';
-    } else {
-      // No data for this plot type on this camera — show the placeholder.
-      img.src = noDataTile;
-      img.dataset.hasPlot = '0';
-    }
-    // Re-evaluate the rotation class against the new src. The inline SVG
-    // no-data placeholder never qualifies (it's not a station image).
-    const h = img.dataset.host || '';
-    const cam = img.dataset.cam || '';
-    if (_ovImgUrlNeedsRotation(h, cam, img.src)) img.classList.add('thumb-rotated');
-    else img.classList.remove('thumb-rotated');
-  }
-  // Lazy-refetch plot lists for any cards whose plotsByCam entry is empty
-  // or stale — this typically happens when /api/rms/plots calls failed
-  // during the initial fetchAndRenderStacks pass (cold cache, slow station).
-  ovRefreshMissingPlotLists();
-}
-
-/* Open the currently-displayed thumbnail in the fullscreen modal.
-   Pulls live src from the <img> so whatever plot is on screen — captured
-   stack, meteor stack, radiants, etc. — is what zooms. The .thumb-rotated
-   class is propagated to the modal img by ovPlotOpen so the 180° flip
-   stays consistent between card and fullscreen view. */
-function ovOpenCardImg(imgId, host, cam, dateStr){
-  const img = document.getElementById(imgId);
-  if(!img) return;
-  const bar = document.getElementById('ov-plot-toggle-bar');
-  const lbl = (bar && bar.dataset.activeLabel) || 'Captured stack';
-  ovPlotOpen(img.src, `${cam} · ${dateStr} · ${lbl}`, _ovImgUrlNeedsRotation(host, cam, img.src));
-}
-
-/* Re-fetch /api/rms/plots for cards whose plotsByCam entry is empty or
-   missing the labels we know exist on at least one camera. Patches the
-   stored plotsByCam in-place and reapplies the active label. Cheap on
-   warm cache; safe to call periodically. */
-async function ovRefreshMissingPlotLists(){
-  const bar = document.getElementById('ov-plot-toggle-bar');
-  if(!bar) return;
-  let plotsByCam = {};
-  try {
-    plotsByCam = JSON.parse((bar.dataset.plotsByCam || '{}').replace(/&quot;/g, '"'));
-  } catch(e) { return; }
-  const targets = [];
-  for(const [imgId, byLabel] of Object.entries(plotsByCam)){
-    if(!byLabel || !Object.keys(byLabel).length){
-      const img = document.getElementById(imgId);
-      if(!img) continue;
-      // The img's default src is /api/rms/plot_image/<host>/<cam>/<date>/<file>
-      // — parse it to recover host, cam, date for the refetch.
-      const u = new URL(img.dataset.defaultSrc || img.src, location.href);
-      const parts = u.pathname.split('/');
-      // /api/rms/plot_image/<host>/<cam>/<date>/<file>
-      const i = parts.indexOf('plot_image');
-      if(i < 0 || parts.length < i + 4) continue;
-      targets.push({ imgId, host: parts[i+1], cam: parts[i+2], date: parts[i+3] });
-    }
-  }
-  if(!targets.length) return;
-  let mutated = false;
-  await Promise.all(targets.map(async t => {
-    try {
-      const r = await fetch(`/api/rms/plots/${t.host}/${t.cam}/${t.date}`);
-      if(!r.ok) return;
-      const plots = await r.json();
-      const m = {};
-      for(const p of plots){
-        m[p.label] = `/api/rms/plot_image/${t.host}/${t.cam}/${t.date}/${encodeURIComponent(p.filename)}`;
-      }
-      if(Object.keys(m).length){
-        plotsByCam[t.imgId] = m;
-        mutated = true;
-      }
-    } catch(e) {}
-  }));
-  if(mutated){
-    bar.dataset.plotsByCam = JSON.stringify(plotsByCam).replace(/"/g, '&quot;');
-    // Re-render the toggle bar — if the initial fetch left every entry
-    // empty (all stations cold-cached) the bar was hidden by
-    // renderOverviewPlotToggle. Now that lazy refresh has filled in
-    // labels, redraw it. Preserve the currently-active label so the
-    // user's selection survives the redraw.
-    const prevActive = bar.querySelector('.ov-plot-toggle-btn.active');
-    const prevLabel = prevActive ? prevActive.dataset.label : (bar.dataset.activeLabel || 'Captured stack');
-    renderOverviewPlotToggle(plotsByCam);
-    // Restore active state on the matching button (default is 'Captured stack')
-    if(prevLabel && prevLabel !== 'Captured stack'){
-      bar.querySelectorAll('.ov-plot-toggle-btn').forEach(b => {
-        if(b.dataset.label === prevLabel){
-          bar.querySelectorAll('.ov-plot-toggle-btn.active').forEach(a => a.classList.remove('active'));
-          b.classList.add('active');
-        }
-      });
-    }
-    // Reapply the active label to swap thumbnails for newly-fetched cameras
-    const noDataTile = _ovNoDataTile(prevLabel);
-    for(const [imgId, byLabel] of Object.entries(plotsByCam)){
-      const img = document.getElementById(imgId);
-      if(!img) continue;
-      const url = byLabel[prevLabel];
-      if(url){ img.src = url; }
-      else if(prevLabel === 'Captured stack'){ img.src = img.dataset.defaultSrc || img.src; }
-      else { img.src = noDataTile; }
-      const h = img.dataset.host || '';
-      const cam = img.dataset.cam || '';
-      if (_ovImgUrlNeedsRotation(h, cam, img.src)) img.classList.add('thumb-rotated');
-      else img.classList.remove('thumb-rotated');
-    }
-  }
-}
-
 (async function(){
-  try{
-    const auth=await fetchJson('/api/auth/status');
-    const el=document.getElementById('ov-auth');
-    if(auth.user){
-      const color=auth.admin?'var(--green)':'var(--blue)';
-      el.innerHTML=`<span style="color:${color}">${escHtml(auth.user)}</span>
-        <a href="/logout" class="hdr-btn" style="font-size:11px;text-decoration:none;padding:3px 10px">Logout</a>`;
-    }else{
-      el.innerHTML=`<a href="/login" class="hdr-btn" style="font-size:11px;text-decoration:none;padding:3px 10px">Login</a>`;
-    }
-  }catch(e){}
-
   try{
     const meta=await fetchJson('/api/stations');
     for(const [key,m] of Object.entries(meta)){
@@ -2690,18 +2895,23 @@ async function ovRefreshMissingPlotLists(){
     // awaited every platepar before showing anything, blocking first paint
     // by ~N × RTT on top of the initial fetch.
     const data=await fetchJson('/api/overview');
-    initMap(data);
-    renderSummary(data);
-    ovBuildStationSelector(data);
-    // Stacks + Bortle don't block paint either — they fire in the background
-    // and self-render once data arrives.
-    fetchAndRenderStacks(data);
-    loadBortleData(data);
-    nwFetch();
-    // Platepars: parallel, non-blocking. Each one refines its map polygon
-    // when it arrives. Stations without a platepar just skip silently.
-    // Network stats load AFTER all platepars are fetched (they populate
-    // the server-side platepar_store that the stats endpoints read from).
+    // Start only the sections the page has (the home page "/" runs
+    // dashboard-home.js). The live view reads mapData without a map.
+    const has=id=>!!document.getElementById(id);
+    const onMap=has('map'), onNetwork=has('nw-section');
+    mapData=data;
+    if(onMap){ initMap(data); ovBuildStationSelector(data); }
+    if(has('ov-summary')) renderSummary(data);
+    // Bortle doesn't block paint either: it fires in the background and
+    // self-renders once data arrives.
+    if(onMap) loadBortleData(data);
+    if(onNetwork) nwFetch();
+    // The network numbers read the server's platepar_store, which the
+    // stations' pushed platepars keep current (#1248), so they load at once.
+    if(has('ov-net-stats')) loadOverviewNetStats();
+    // Platepars only refine the map's FOV polygons: fetched on the map page
+    // alone, in parallel and non-blocking, each redrawing its polygon when it
+    // arrives. Stations without a platepar just skip silently.
     const onlineKeys=Object.entries(data).filter(([,i])=>i.online).map(([k])=>k);
     let _ppRedrawScheduled=false;
     function _schedulePlateparRedraw(){
@@ -2712,7 +2922,7 @@ async function ovRefreshMissingPlotLists(){
         try{ if(footprintLayer&&map) drawFootprints(data, FOV_ALT_KM); }catch(e){}
       });
     }
-    Promise.allSettled(onlineKeys.map(async key=>{
+    if(onMap) Promise.allSettled(onlineKeys.map(async key=>{
       try{
         const pp=await fetchJson(`/api/platepar/${key}`);
         if(pp&&typeof pp==='object'&&!pp.error){
@@ -2720,101 +2930,43 @@ async function ovRefreshMissingPlotLists(){
           _schedulePlateparRedraw();
         }
       }catch(e){}
-    })).then(() => { ovLoadNetStats(); });
+    }));
     // Overview refresh — was 10 s, bumped to 30 s. Server cache TTL is 60 s
     // anyway and the response carries ETag/Cache-Control: max-age=30, so a
     // shorter interval just wastes round-trips. Also pause when tab hidden.
     setInterval(async()=>{
       if(document.hidden) return;
-      try{ renderSummary(await fetchJson('/api/overview')); }catch(e){}
-      try{ nwFetch(); }catch(e){}
+      try{ const d=await fetchJson('/api/overview'); mapData=d; if(has('ov-summary')) renderSummary(d); }catch(e){}
+      if(onNetwork) try{ nwFetch(); }catch(e){}
     },30000);
-    // Re-attempt plot-list fetches every 60s so cards whose initial fetch
-    // missed (cold cache, slow station) eventually fill in. Cheap on the
-    // warm dashboard-side cache.
-    setInterval(()=>{
-      if(document.hidden) return;
-      try{ ovRefreshMissingPlotLists(); }catch(e){}
-    }, 60000);
     // On tab refocus, catch up the paused pollers so the user doesn't stare
     // at up-to-30-s-stale data while the next setInterval tick is pending.
     document.addEventListener('visibilitychange', ()=>{
       if(document.hidden) return;
-      (async()=>{ try{ renderSummary(await fetchJson('/api/overview')); }catch(e){} })();
-      try{ nwFetch(); }catch(e){}
-      try{ ovRefreshMissingPlotLists(); }catch(e){}
+      (async()=>{ try{ const d=await fetchJson('/api/overview'); mapData=d; if(has('ov-summary')) renderSummary(d); }catch(e){} })();
+      if(onNetwork) try{ nwFetch(); }catch(e){}
     });
-    (function tickClock(){
-      const el=document.getElementById('utc-clock');
-      if(el){const n=new Date();el.textContent=String(n.getUTCHours()).padStart(2,'0')+':'+String(n.getUTCMinutes()).padStart(2,'0')+':'+String(n.getUTCSeconds()).padStart(2,'0')+' UTC';}
-      setTimeout(tickClock,1000);
-    })();
+    // The shared startUTCClock() in dashboard-common.js paints #utc-clock with
+    // the full "YYYY-MM-DD HH:MM:SS UTC" label every second; no local ticker.
   }catch(e){
-    document.getElementById('ov-summary').innerHTML='<div style="color:var(--red)">Failed to load station data</div>';
+    const sum=document.getElementById('ov-summary');
+    if(sum) sum.innerHTML='<div class="ov-summary-loading" style="color:var(--red)">Failed to load station data; reload the page to retry.</div>';
   }
 })();
 const _panelParam = new URLSearchParams(location.search).get('panel');
 if (_panelParam) openAppPanel(_panelParam);
 
-/* ── Overview plot modal with scroll-zoom ── */
-let _ovPz = { scale: 1, tx: 0, ty: 0 };
-/* When the card was 180°-rotated via the .thumb-rotated class, mirror that
-   onto the modal img and bake rotate(180deg) into every inline transform
-   the scroll-zoom handlers write (otherwise the inline style overrides the
-   class and the modal flips to right-side-up mid-zoom). Place rotate(...)
-   as the rightmost / first-applied op so user pan operates in screen
-   coordinates rather than the rotated image frame. */
-function _ovTransformSuffix(img) {
-  return img.classList.contains('thumb-rotated') ? ' rotate(180deg)' : '';
-}
-function ovPlotOpen(imgUrl, label, rotated = false) {
-  const modal = document.getElementById('ov-plot-modal');
-  const img = document.getElementById('ov-plot-modal-img');
-  document.getElementById('ov-plot-modal-title').textContent = label;
-  img.src = imgUrl;
-  document.getElementById('ov-plot-modal-dl').href = imgUrl;
-  _ovPz = { scale: 1, tx: 0, ty: 0 };
-  if (rotated) img.classList.add('thumb-rotated');
-  else img.classList.remove('thumb-rotated');
-  img.style.transform = rotated ? 'rotate(180deg)' : '';
-  img.style.cursor = 'zoom-in';
-  // _modalOpen handles the body-scroll lock now (in dashboard-common.js).
-  _modalOpen(modal);
-}
-function ovPlotClose() {
-  const img = document.getElementById('ov-plot-modal-img');
-  _modalClose(document.getElementById('ov-plot-modal'));
-  img.src = '';
-  img.classList.remove('thumb-rotated');
-  img.style.transform = '';
-}
-// Escape for ov-plot-modal is handled by the shared dispatcher in dashboard-common.js.
-(function() {
-  const img = document.getElementById('ov-plot-modal-img');
-  img.addEventListener('wheel', e => {
-    e.preventDefault();
-    _ovPz.scale = Math.max(1, Math.min(10, _ovPz.scale * (e.deltaY < 0 ? 1.2 : 0.83)));
-    if (_ovPz.scale <= 1.05) { _ovPz = { scale: 1, tx: 0, ty: 0 }; }
-    img.style.transform = `scale(${_ovPz.scale})${_ovTransformSuffix(img)}`;
-    img.style.cursor = _ovPz.scale > 1 ? 'grab' : 'zoom-in';
-  }, { passive: false });
-  let dragging = false, sx = 0, sy = 0;
-  img.addEventListener('mousedown', e => {
-    if (_ovPz.scale <= 1) return;
-    dragging = true; sx = e.clientX - _ovPz.tx; sy = e.clientY - _ovPz.ty;
-    img.style.cursor = 'grabbing';
-  });
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    _ovPz.tx = e.clientX - sx; _ovPz.ty = e.clientY - sy;
-    img.style.transform = `translate(${_ovPz.tx}px,${_ovPz.ty}px) scale(${_ovPz.scale})${_ovTransformSuffix(img)}`;
-  });
-  document.addEventListener('mouseup', () => {
-    if (!dragging) return;
-    dragging = false;
-    img.style.cursor = _ovPz.scale > 1 ? 'grab' : 'zoom-in';
-  });
-})();
+// Escape closes this page's own dialogs, topmost first. A shared VideoModal
+// (GMN clips) open on top keeps the key to itself.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || e.defaultPrevented) return;
+  if (document.querySelector('.vm-backdrop.open, .vm-backdrop[aria-hidden="false"]')) return;
+  const isOpen = id => document.getElementById(id)?.classList.contains('open');
+  if (isOpen('ov-live-modal')) closeLiveModal();
+  else if (isOpen('app-panel')) appPanelClose(null);
+  else return;
+  e.preventDefault();
+});
 
 // ── Window exposure for HTML onclick/oninput handlers ────────────────────────
 // Functions called from inline event handlers in the HTML template must be
@@ -2827,19 +2979,160 @@ window.toggleLayerMenu = toggleLayerMenu;
 window.toggleCovLayer = toggleCovLayer;
 window.toggleGmnLayer = toggleGmnLayer;
 window.toggleLpLayer = toggleLpLayer;
-window.toggleWeatherLayer = toggleWeatherLayer;
-window.ovPlotClose = ovPlotClose;
-window.ovPlotOpen = ovPlotOpen;
-window.ovGlobalPlotSwitch = ovGlobalPlotSwitch;
-window.ovOpenCardImg = ovOpenCardImg;
 window.openAppPanel = openAppPanel;
 window.appPanelClose = appPanelClose;
 window.nwSort = nwSort;
 window.closeLiveModal = closeLiveModal;
 window.toggleLiveView = toggleLiveView;
-window.wxTogglePlay = wxTogglePlay;
-window.wxSetFrame = wxSetFrame;
 window.onGmnDateChange = onGmnDateChange;
 window.ovLiveUpdateZoom = ovLiveUpdateZoom;
-window.ovUpdateZoom = ovUpdateZoom;
 window.setMapBrightness = setMapBrightness;
+
+// ── Cameras at a point ─────────────────────────────────────────────────────────
+// "Cameras at a point" arms a one-shot pick: the next map click opens a popup
+// that asks for the meteor height, lists the cameras whose footprint (the ring
+// the map draws, from each camera's last platepar) contains the point at that
+// height or anywhere in a height range, then takes a UTC time and opens the
+// Detections footage grid with only those cameras. Plain map clicks keep
+// closing the station panel, so the pick is behind the button.
+
+let _pickMode = false;
+let _pickMarker = null;
+
+function _setPickMode(on) {
+  _pickMode = !!on;
+  setPressed(document.getElementById('pick-point-btn'), _pickMode);
+  map?.getContainer().classList.toggle('ov-pick-mode', _pickMode);
+}
+
+function togglePointPick() {
+  _setPickMode(!_pickMode);
+}
+
+// Every camera the map can draw a footprint for, in station-number order,
+// with a footprint function per height. Built from the same station list and
+// platepars the map uses, so a station hidden from the map (or from an
+// anonymous visitor) is absent here too.
+function _pickCameras() {
+  const out = [];
+  if (!mapData) return out;
+  for (const key of Object.keys(mapData).sort()) {
+    const info = mapData[key];
+    const lat = info.lat ?? STATION_COORDS[key]?.lat;
+    const lon = info.lon ?? STATION_COORDS[key]?.lon;
+    if (!lat || !lon || info.show_on_map === false) continue;
+    const pps = PLATEPAR_DATA[key] || {};
+    for (const cam of (info.cameras || [])) {
+      const pp = pps[cam.code];
+      out.push({
+        key, cam: cam.code, label: info.label || '', lat, lon,
+        footprintAt: H => _cameraFootprintPts(lat, lon, cam, pp, H)?.pts || null,
+      });
+    }
+  }
+  return out;
+}
+
+function _pickCoordsHtml(ll) {
+  const ns = ll.lat >= 0 ? 'N' : 'S';
+  const ew = ll.lng >= 0 ? 'E' : 'W';
+  return `${Math.abs(ll.lat).toFixed(3)}&deg;&nbsp;${ns}, ${Math.abs(ll.lng).toFixed(3)}&deg;&nbsp;${ew}`;
+}
+
+function _openPointPicker(ll) {
+  _setPickMode(false);
+  if (_pickMarker) _pickMarker.remove();
+  const el = document.createElement('div');
+  el.className = 'pp-pick';
+  // The buttons re-render the popup, so a click's target is detached by the
+  // time it bubbles to the map; Leaflet then cannot tell it came from the
+  // popup (it walks the target's parents), takes it for a map click and
+  // closes the popup. Stop popup clicks at this stable container.
+  L.DomEvent.disableClickPropagation(el);
+  L.DomEvent.on(el, 'click', L.DomEvent.stopPropagation);
+  // Top padding keeps the popup clear of the FOV / altitude toolbar.
+  _pickMarker = L.popup({ className: 'gmn-popup pp-popup', maxWidth: 380, minWidth: 280,
+                          autoPanPaddingTopLeft: L.point(20, 70) })
+    .setLatLng(ll).setContent(el).openOn(map);  _renderPickHeight(el, ll, { mode: 'range', lo: PICK_ALT_MIN_KM, hi: PICK_ALT_MAX_KM, single: 90 });
+}
+
+function _renderPickHeight(el, ll, h) {
+  el.innerHTML = `
+    <div class="pp-title">Cameras at this point</div>
+    <div class="pp-sub">${_pickCoordsHtml(ll)}</div>
+    <div class="pp-q">Meteor height?</div>
+    <label class="pp-opt"><input type="radio" name="pp-mode" value="range"${h.mode === 'range' ? ' checked' : ''}>
+      Range <input type="number" class="pp-num" data-f="lo" min="10" max="200" step="1" value="${h.lo}" aria-label="Lowest height (km)">
+      to <input type="number" class="pp-num" data-f="hi" min="10" max="200" step="1" value="${h.hi}" aria-label="Highest height (km)"> km</label>
+    <label class="pp-opt"><input type="radio" name="pp-mode" value="single"${h.mode === 'single' ? ' checked' : ''}>
+      Single height <input type="number" class="pp-num" data-f="single" min="10" max="200" step="1" value="${h.single}" aria-label="Height (km)"> km</label>
+    <div class="pp-actions"><button type="button" class="fov-btn active" data-act="find">Find cameras</button></div>
+    <div class="pp-err" role="alert"></div>`;
+  // Typing in a field selects its option.
+  el.querySelectorAll('.pp-num').forEach(inp => inp.addEventListener('focus', () => {
+    const radio = inp.closest('.pp-opt')?.querySelector('input[type=radio]');
+    if (radio) radio.checked = true;
+  }));
+  el.querySelector('[data-act=find]').addEventListener('click', () => {
+    const num = f => Number(el.querySelector(`[data-f=${f}]`).value);
+    const mode = el.querySelector('input[name=pp-mode]:checked')?.value || 'range';
+    const next = { mode, lo: num('lo'), hi: num('hi'), single: num('single') };
+    const vals = mode === 'range' ? [next.lo, next.hi] : [next.single];
+    if (vals.some(v => !Number.isFinite(v) || v < 10 || v > 200)) {
+      el.querySelector('.pp-err').textContent = 'Heights must be between 10 and 200 km.';
+      return;
+    }
+    _renderPickResult(el, ll, next);
+  });
+  _pickMarker?.update();
+}
+
+function _renderPickResult(el, ll, h) {
+  const heights = h.mode === 'range' ? altitudeSamples(h.lo, h.hi) : [h.single];
+  const matches = camerasSeeingPoint(ll.lat, ll.lng, heights, _pickCameras());
+  const groups = groupByStation(matches);
+  const span = h.mode === 'range'
+    ? `${Math.min(h.lo, h.hi)}&ndash;${Math.max(h.lo, h.hi)}&nbsp;km` : `${h.single}&nbsp;km`;
+  const list = groups.map(g => `
+    <div class="pp-station">${escHtml(stationLabel(g.key, g.label))}</div>
+    <ul class="pp-cams">${g.cams.map(m => `
+      <li><span class="pp-cam" translate="no">${escHtml(m.cam)}</span>
+        <span class="pp-meta">${Math.round(m.distKm)}&nbsp;km away, ${Math.round(m.elevDeg)}&deg; up${
+          h.mode === 'range' ? `, seen at ${m.minH === m.maxH ? m.minH : `${m.minH}&ndash;${m.maxH}`}&nbsp;km` : ''}</span></li>`).join('')}
+    </ul>`).join('');
+  const now = utcDateTimeParts();
+  el.innerHTML = `
+    <div class="pp-title">${matches.length} camera${matches.length === 1 ? '' : 's'} see this point at ${span}</div>
+    <div class="pp-sub">${_pickCoordsHtml(ll)} &middot; <a href="#" data-act="height">change height</a></div>
+    <div class="pp-list">${list || '<div class="pp-none">No camera covers this point at that height.</div>'}</div>
+    <div class="pp-note">Geometry only: masks, obstructions and meteor brightness are not considered. Footprints come from each camera's last platepar.</div>
+    ${matches.length ? `
+    <div class="pp-q">Event time (UTC)</div>
+    <div class="pp-time">
+      <input type="date" class="pp-date" value="${now.date}" aria-label="Date (UTC)">
+      <input type="text" class="pp-hhmm" inputmode="numeric" placeholder="HH:MM" maxlength="5" value="${now.time}" aria-label="Time (UTC, HH:MM)">
+      <span class="muted">UTC</span>
+    </div>
+    <div class="pp-actions"><button type="button" class="fov-btn active" data-act="view">View these cameras</button></div>
+    <div class="pp-hint muted">Opens the footage grid with these cameras, 2&nbsp;min before to 3&nbsp;min after.</div>
+    <div class="pp-err" role="alert"></div>` : ''}`;
+  el.querySelector('[data-act=height]').addEventListener('click', e => {
+    e.preventDefault();
+    _renderPickHeight(el, ll, h);
+  });
+  el.querySelector('[data-act=view]')?.addEventListener('click', () => {
+    const date = el.querySelector('.pp-date').value;
+    const hhmm = el.querySelector('.pp-hhmm').value;
+    const night = nightForUtc(date, hhmm);
+    const win = gridWindowFor(hhmm);
+    if (!night || !win) {
+      el.querySelector('.pp-err').textContent = 'Enter a date and a UTC time as HH:MM.';
+      return;
+    }
+    window.location.href = gridUrlFor(night, win, matches.map(m => m.cam));
+  });
+  _pickMarker?.update();
+}
+
+window.togglePointPick = togglePointPick;
+

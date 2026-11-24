@@ -298,6 +298,250 @@ def test_covers_dates_fails_with_no_poll_state(populated_db):
     assert result is False, "covers_dates should fail with no poll_state (bootstrap-only DB)"
 
 
+def test_touch_poll_state_feeds_freshness_gate(populated_db):
+    """A push-ingest touch must satisfy covers_dates' liveness gate on its own.
+
+    Push stations are never polled — an accepted push is their only heartbeat.
+    Without the touch the gate goes permanently stale once the fleet converges
+    on push, silently disabling the index fast path (regression 2026-07-10)."""
+    assert detection_db.covers_dates(["20260623"], path=populated_db, poll_interval=300) is False
+    detection_db.touch_poll_state("gmnro10", path=populated_db)
+    assert detection_db.covers_dates(["20260623"], path=populated_db, poll_interval=300) is True
+    # A never-polled push station carries no poller bookkeeping.
+    state = detection_db.get_poll_state("gmnro10", path=populated_db)
+    assert state["last_polled"] == pytest.approx(time.time(), abs=5)
+    assert state["since_date"] is None
+
+
+def test_touch_poll_state_preserves_poller_bookkeeping(populated_db):
+    """Touching a station the poller also tracks must only refresh last_polled —
+    since_date/error_count are the poller's resume state and must survive."""
+    detection_db.set_poll_state("gmnro02", "20260601", error_count=3, path=populated_db)
+    before = detection_db.get_poll_state("gmnro02", path=populated_db)
+    detection_db.touch_poll_state("gmnro02", path=populated_db)
+    after = detection_db.get_poll_state("gmnro02", path=populated_db)
+    assert after["since_date"] == "20260601"
+    assert after["error_count"] == 3
+    assert after["last_polled"] >= before["last_polled"]
+
+
+def test_touch_poll_state_coalesces_within_window(populated_db):
+    """A second touch inside the throttle window is a no-op write: the stored
+    last_polled is unchanged, so a fleet of gunicorn workers collapses onto
+    one write per host per window instead of storming the single SQLite
+    writer (the dominant "database is locked" source on prod)."""
+    detection_db.touch_poll_state("gmnro10", path=populated_db)
+    first = detection_db.get_poll_state("gmnro10", path=populated_db)["last_polled"]
+    assert first is not None
+    # Immediately touch again — well inside _POLL_TOUCH_MIN_INTERVAL_S.
+    detection_db.touch_poll_state("gmnro10", path=populated_db)
+    second = detection_db.get_poll_state("gmnro10", path=populated_db)["last_polled"]
+    assert second == first, "second touch within the window must not rewrite"
+
+
+def test_touch_poll_state_writes_again_after_window(populated_db, monkeypatch):
+    """Once the window has elapsed (stored last_polled is stale) the touch
+    writes again, keeping the liveness gate fed."""
+    detection_db.touch_poll_state("gmnro10", path=populated_db)
+    first = detection_db.get_poll_state("gmnro10", path=populated_db)["last_polled"]
+    # Age the stored value past the window by shrinking the interval to 0 so the
+    # freshness check always fails and the write fires.
+    monkeypatch.setattr(detection_db, "_POLL_TOUCH_MIN_INTERVAL_S", 0.0)
+    time.sleep(0.01)
+    detection_db.touch_poll_state("gmnro10", path=populated_db)
+    second = detection_db.get_poll_state("gmnro10", path=populated_db)["last_polled"]
+    assert second > first, "a stale row must be refreshed"
+
+
+# ── Poller: skip the merge when the station index has not changed ─────────────
+#
+# The rolling 14-day window is re-fetched every cycle by design, so a quiet
+# daytime cycle re-delivers a window the DB already holds. Re-upserting it used
+# to rewrite thousands of identical rows fleet-wide every five minutes while
+# holding the single SQLite writer lock the ingest push path needs — measured as
+# the dominant lock holder behind the 2026-09-01 ingest 500/504 storm.
+
+
+class _FakeResponse:
+    """Minimal stand-in for a requests.Response from /api/detections-index."""
+
+    def __init__(self, payload: dict) -> None:
+        import json
+        self._payload = payload
+        self.content = json.dumps(payload).encode()
+
+    def raise_for_status(self) -> None:
+        return None
+
+    def json(self) -> dict:
+        return self._payload
+
+
+def _index_payload(n: int = 2, shower: str = "PER") -> dict:
+    return {
+        "ready": True,
+        "count": n,
+        "detections": [
+            {
+                "cam": "RO000M", "date": "20260623",
+                "ff_file": f"FF_RO000M_20260623_2000{i:02d}_000_0000000.fits",
+                "meteor_no": 1, "time_utc": f"2026-06-23T20:00:{i:02d}Z",
+                "shower": shower,
+            }
+            for i in range(n)
+        ],
+        "night_sky": [{"cam": "RO000M", "night": "20260623",
+                       "n_ff": 100, "median_stars": 42.0, "cloud_fraction": 0.1}],
+    }
+
+
+@pytest.fixture
+def poller(tmp_path, monkeypatch):
+    """index_poller wired to a temp DB, with the station HTTP call stubbed.
+
+    Yields a control object: set ``.payload`` to change what the station
+    'serves', read ``.upserts`` for the number of detection upserts performed.
+    """
+    import index_poller
+
+    db = tmp_path / "detections.db"
+    detection_db.open_db(db).close()
+    monkeypatch.setattr(index_poller, "DB_PATH", db)
+    index_poller._last_merge.clear()
+
+    class _Control:
+        payload = _index_payload()
+        upserts = 0
+        fetches = 0
+
+    ctl = _Control()
+
+    def _fake_get(url, params=None, timeout=None):
+        ctl.fetches += 1
+        return _FakeResponse(ctl.payload)
+
+    real_upsert = detection_db.upsert_detections
+
+    def _counting_upsert(rows, source="station", path=None, con=None):
+        ctl.upserts += 1
+        return real_upsert(rows, source=source, path=path, con=con)
+
+    monkeypatch.setattr(index_poller.requests, "get", _fake_get)
+    monkeypatch.setattr(index_poller.detection_db, "upsert_detections", _counting_upsert)
+
+    ctl.db = db
+    ctl.module = index_poller
+    ctl.info = {"ip": "10.0.0.1", "port": 7779, "cameras": ["RO000M"], "label": "test"}
+    yield ctl
+    index_poller._last_merge.clear()
+
+
+def _poll_and_record(ctl, host_key: str = "gmnro02"):
+    """One full cycle: poll, then persist the outcome exactly as _run_cycle does."""
+    result = ctl.module._poll_station(host_key, ctl.info)
+    detection_db.set_poll_state(
+        host_key, since_date="20260623", error_count=0,
+        path=ctl.db, index_hash=result.digest,
+    )
+    return result
+
+
+def test_first_poll_merges_and_stores_the_digest(poller):
+    result = _poll_and_record(poller)
+    assert result.rows == 2
+    assert result.digest is not None
+    stored = detection_db.get_poll_state("gmnro02", path=poller.db)["index_hash"]
+    assert stored == result.digest
+
+
+def test_unchanged_index_skips_the_upsert(poller):
+    _poll_and_record(poller)
+    assert poller.upserts == 1
+
+    second = _poll_and_record(poller)
+    assert second.rows == 0
+    assert second.digest is None, "nothing merged, so the stored digest stands"
+    assert poller.upserts == 1, "an unchanged window must not take the writer lock"
+    assert poller.fetches == 2, "the window is still fetched — only the write is skipped"
+    # The rows the first cycle merged are still there.
+    assert detection_db.aggregate_stats(["20260623"], path=poller.db)["total"] == 2
+
+
+def test_changed_index_merges_again(poller):
+    _poll_and_record(poller)
+    poller.payload = _index_payload(n=3)
+    result = _poll_and_record(poller)
+    assert result.rows == 3
+    assert poller.upserts == 2
+    assert detection_db.aggregate_stats(["20260623"], path=poller.db)["total"] == 3
+
+
+def test_reprocessed_night_with_same_row_count_still_merges(poller):
+    """The digest is over the response bytes, not the row count: a night
+    re-reduced into a different shower classification must still propagate."""
+    _poll_and_record(poller)
+    poller.payload = _index_payload(shower="GEM")
+    _poll_and_record(poller)
+    assert poller.upserts == 2
+    stats = detection_db.aggregate_stats(["20260623"], path=poller.db)
+    assert dict(stats["per_shower"]) == {"GEM": 2}
+
+
+def test_skipped_cycle_still_stamps_freshness(poller):
+    """A skipped merge must keep feeding covers_dates' liveness gate — the
+    station is being polled successfully, there is simply nothing new."""
+    _poll_and_record(poller)
+    stale = time.time() - 10_000
+    with sqlite3.connect(str(poller.db)) as con:
+        con.execute("UPDATE poll_state SET last_polled=?", (stale,))
+    assert detection_db.covers_dates(["20260623"], path=poller.db, poll_interval=300) is False
+
+    poller.module._run_cycle({"gmnro02": poller.info})
+
+    assert poller.upserts == 1, "still a skip"
+    assert detection_db.covers_dates(["20260623"], path=poller.db, poll_interval=300) is True
+
+
+def test_forced_resync_ignores_a_matching_digest(poller, monkeypatch):
+    """The digest skip is an optimisation, never the only path to correctness:
+    every FORCE_MERGE_INTERVAL_S the whole window is written back regardless."""
+    _poll_and_record(poller)
+    monkeypatch.setattr(poller.module, "FORCE_MERGE_INTERVAL_S", 0.0)
+    result = _poll_and_record(poller)
+    assert result.rows == 2
+    assert poller.upserts == 2
+
+
+def test_restart_re_merges_even_with_a_stored_digest(poller):
+    """_last_merge lives in-process, so the first cycle after a restart merges
+    unconditionally — a redeploy is always a full resync."""
+    _poll_and_record(poller)
+    poller.module._last_merge.clear()   # simulate process restart
+    result = _poll_and_record(poller)
+    assert result.rows == 2
+    assert poller.upserts == 2
+
+
+def test_error_cycle_preserves_the_stored_digest(poller):
+    """The poller's error branch rewrites poll_state without a digest; that must
+    not blank the digest and force a needless full merge next cycle."""
+    first = _poll_and_record(poller)
+    detection_db.set_poll_state(
+        "gmnro02", since_date="20260623", error_count=1, path=poller.db,
+    )
+    assert detection_db.get_poll_state("gmnro02", path=poller.db)["index_hash"] == first.digest
+
+
+def test_index_not_ready_is_not_cached_as_a_digest(poller):
+    """A station whose index is still building must not have its 'not ready'
+    response remembered as merged state."""
+    poller.payload = {"ready": False, "detections": [], "night_sky": []}
+    result = poller.module._poll_station("gmnro02", poller.info)
+    assert result.ready is False
+    assert result.digest is None
+    assert poller.upserts == 0
+
+
 # ── Bootstrap end-to-end ──────────────────────────────────────────────────────
 
 def test_bootstrap_scans_archive(tmp_path, session_dir, monkeypatch):

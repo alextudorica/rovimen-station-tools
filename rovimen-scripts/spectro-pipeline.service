@@ -1,0 +1,24 @@
+[Unit]
+Description=ROVIMEN meteor spectroscopy pipeline (post-night cut + reduce)
+After=network.target chrony-wait.service
+Wants=chrony-wait.service
+
+[Service]
+Type=oneshot
+User=gmn
+Group=gmn
+WorkingDirectory=/home/gmn/rovimen_scripts
+# Needs numpy/PIL/cv2 -> the RMS venv (updater._localise_unit rewrites this to
+# the station's actual venv interpreter). The script exits 0 immediately on
+# stations whose config carries no stations.<code>.spectro block, so shipping
+# the unit fleet-wide is harmless; only the spectro-equipped station does work.
+ExecStart=/home/gmn/RMS/venv/bin/python /home/gmn/rovimen_scripts/spectro_pipeline.py night
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=50%
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+Environment=LC_ALL=C.UTF-8
+
+[Install]
+WantedBy=multi-user.target

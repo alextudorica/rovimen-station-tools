@@ -383,10 +383,20 @@ class TestApplyCalibrationNp:
 
 class TestBuildFfmpegFilter:
 
-    def test_always_has_colorchannelmixer(self):
-        """Filter always starts with colorchannelmixer."""
-        filt = build_ffmpeg_filter(1.0, 1.0, 1.0, 1.0)
+    def test_non_identity_gains_start_with_colorchannelmixer(self):
+        """Non-identity gains lead with a colorchannelmixer node."""
+        filt = build_ffmpeg_filter(1.2, 0.9, 1.1, 1.0)
         assert filt.startswith('colorchannelmixer=')
+
+    def test_identity_gains_skip_colorchannelmixer(self):
+        """Identity gains produce no colorchannelmixer node (a no-op hop the
+        encoder must not emit), matching apply_calibration_np."""
+        filt = build_ffmpeg_filter(1.0, 1.0, 1.0, 1.0)
+        assert 'colorchannelmixer=' not in filt
+        assert filt == ''  # identity gains + identity gamma + identity contrast
+        filt_gamma = build_ffmpeg_filter(1.0, 1.0, 1.0, 0.75)
+        assert 'colorchannelmixer=' not in filt_gamma
+        assert filt_gamma.startswith('eq=')
 
     def test_non_unity_gains_in_mixer(self):
         """Non-unity gains appear in the colorchannelmixer values."""
@@ -456,3 +466,63 @@ class TestBuildFfmpegFilter:
         # Every comma-separated segment should be non-empty
         for part in filt.split(','):
             assert len(part.strip()) > 0
+
+
+# ---------------------------------------------------------------------------
+# Vibrance
+# ---------------------------------------------------------------------------
+
+class TestVibrance:
+
+    def test_default_is_off(self):
+        """FLEET_VIBRANCE defaults to 0 and resolve_color_post carries it."""
+        from color_calibration import FLEET_VIBRANCE
+        assert FLEET_VIBRANCE == 0.0
+        assert resolve_color_post({})['vibrance'] == 0.0
+
+    def test_zero_vibrance_is_identity(self):
+        """vibrance=0 must not change any pixel."""
+        img = _uniform_image(120, 90, 60)
+        a = apply_calibration_np(img, 1.0, 1.0, 1.0, 1.0, vibrance=0.0)
+        b = apply_calibration_np(img, 1.0, 1.0, 1.0, 1.0)
+        assert np.array_equal(a, b)
+
+    def test_neutral_pixels_stay_neutral(self):
+        """A grey image has no chroma to boost — vibrance leaves it alone."""
+        img = _uniform_image(128, 128, 128)
+        out = apply_calibration_np(img, 1.0, 1.0, 1.0, 1.0, vibrance=0.5)
+        assert np.array_equal(out, img)
+
+    def test_low_sat_boosted_more_than_high_sat(self):
+        """Chroma gain must be larger for a barely-tinted pixel than for a
+        strongly saturated one (that is the vibrance/saturation difference)."""
+        low = _uniform_image(130, 128, 126)    # sat ~0.03
+        high = _uniform_image(220, 80, 40)     # sat ~0.8
+        out_low = apply_calibration_np(low, 1.0, 1.0, 1.0, 1.0, vibrance=0.3)
+        out_high = apply_calibration_np(high, 1.0, 1.0, 1.0, 1.0, vibrance=0.3)
+        spread = lambda a: int(a[0, 0].astype(int).max() - a[0, 0].astype(int).min())
+        gain_low = spread(out_low) / max(spread(low), 1)
+        gain_high = spread(out_high) / max(spread(high), 1)
+        assert gain_low > gain_high
+
+    def test_output_stays_uint8_in_range(self):
+        img = _uniform_image(250, 10, 250)
+        out = apply_calibration_np(img, 1.0, 1.0, 1.0, 1.0, vibrance=0.6)
+        assert out.dtype == np.uint8
+
+    def test_ffmpeg_filter_emits_vibrance(self):
+        filt = build_ffmpeg_filter(1.0, 1.0, 1.0, 1.0, vibrance=0.05)
+        assert 'vibrance=intensity=0.0800' in filt
+
+    def test_ffmpeg_filter_zero_vibrance_omitted(self):
+        filt = build_ffmpeg_filter(1.0, 1.0, 1.0, 0.75, vibrance=0.0)
+        assert 'vibrance' not in filt
+
+    def test_ffmpeg_vibrance_before_flip(self):
+        filt = build_ffmpeg_filter(1.2, 0.9, 1.1, 0.75, rotate=True,
+                                   contrast=1.1, vibrance=0.1)
+        parts = filt.split(',')
+        vib_idx = next(i for i, p in enumerate(parts) if p.startswith('vibrance='))
+        vflip_idx = next(i for i, p in enumerate(parts) if p == 'vflip')
+        eq_idx = next(i for i, p in enumerate(parts) if p.startswith('eq='))
+        assert eq_idx < vib_idx < vflip_idx

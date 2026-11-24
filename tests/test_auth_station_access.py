@@ -39,6 +39,11 @@ def client():
     def admin_thing():
         return jsonify(ok=True)
 
+    @app.route("/api/lock/<host_key>/<filename>", methods=["POST"])
+    @auth.require_station_lock
+    def lock(host_key: str, filename: str):
+        return jsonify(ok=True)
+
     return app.test_client()
 
 
@@ -134,3 +139,54 @@ def test_guest_blocked_from_admin_route(client):
 def test_admin_allowed_on_admin_route(client):
     _login(client, "admin")
     assert client.get("/api/admin/thing").status_code == 200
+
+
+# ── Clip lock: fleet-wide to lock, owner-scoped to unlock ────────────────
+
+_LOCK_URL = "/api/lock/gmnro07/RO0015_20260710_223000_123.mkv"
+
+
+@pytest.mark.parametrize("role", ["admin", "host", "visitor", "press"])
+def test_any_account_can_lock_any_station(client, role):
+    """Locking is a data-preserving write, so it follows the read rule: every
+    signed-in account may pin a clip on a station it does not own."""
+    _login(client, role, stations=["gmnro02"])
+    assert client.post(_LOCK_URL, json={"locked": True}).status_code == 200
+
+
+def test_lock_without_body_is_treated_as_lock(client):
+    """No body means locked=true on the station API — the gate must agree, not
+    read the missing key as an unlock that bypasses the write check."""
+    _login(client, "press")
+    assert client.post(_LOCK_URL).status_code == 200
+
+
+def test_guest_cannot_lock(client):
+    assert client.post(_LOCK_URL, json={"locked": True}).status_code == 401
+
+
+def test_unrecognised_role_cannot_lock(client):
+    _login(client, "bogus")
+    assert client.post(_LOCK_URL, json={"locked": True}).status_code == 403
+
+
+@pytest.mark.parametrize("role", ["visitor", "press"])
+def test_read_only_roles_cannot_unlock(client, role):
+    """Unlocking re-exposes the clip to the janitor, so it keeps the write gate."""
+    _login(client, role)
+    assert client.post(_LOCK_URL, json={"locked": False}).status_code == 403
+
+
+def test_host_cannot_unlock_other_station(client):
+    _login(client, "host", stations=["gmnro02"])
+    assert client.post(_LOCK_URL, json={"locked": False}).status_code == 403
+
+
+def test_host_can_unlock_own_station(client):
+    _login(client, "host", stations=["gmnro07"])
+    assert client.post(_LOCK_URL, json={"locked": False}).status_code == 200
+
+
+def test_admin_can_unlock_any_station(client):
+    _login(client, "admin")
+    assert client.post(_LOCK_URL, json={"locked": False}).status_code == 200

@@ -80,9 +80,15 @@ class TunnelManager:
         station = self._config.stations.get(host_key)
         return station is not None and len(station.jump_hosts) > 0
 
-    def get_api_base(self, host_key: str) -> str | None:
+    def get_api_base(self, host_key: str, path: str = "") -> str | None:
         """Return the base URL to reach a station's API, or None when no
         tunnel is live for a tunnel-only station.
+
+        ``path`` is the request path being built. It is used only to decide
+        WHICH BOX a camera-scoped request belongs to when the station spans
+        more than one host (see ``StationConfig.host_for_path``); it is not
+        appended here. Callers that omit it get the station ``ip``, which is
+        the correct answer for every single-box station.
 
         This is on the request hot path; it MUST be non-blocking. If the
         tunnel is down we kick the watchdog (via _reconnect_events) and
@@ -96,6 +102,10 @@ class TunnelManager:
                 return f"http://127.0.0.1:{tunnel['local_port']}"
 
         if self.needs_tunnel(host_key):
+            # A tunnelled station forwards to StationConfig.ip only, so a
+            # per-camera host override cannot be reached through it. Split
+            # stations must be directly routable; this is asserted by
+            # test_split_host_stations_have_no_jump_hosts.
             with self._lock:
                 if host_key in self._reconnect_pending:
                     self._reconnect_pending[host_key] = True
@@ -103,7 +113,7 @@ class TunnelManager:
             return None
 
         station = self._config.stations[host_key]
-        return f"http://{station.ip}:{self._config.station_api_port}"
+        return f"http://{station.host_for_path(path)}:{self._config.station_api_port}"
 
     def start_all(self) -> None:
         for host_key in self._config.stations:

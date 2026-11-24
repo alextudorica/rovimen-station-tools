@@ -3,75 +3,113 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#161b22">
 <title>ROVIMEN — Enable 2FA</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='img/favicon.svg', v=build_version) }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='img/apple-touch-icon.png', v=build_version) }}">
 <link rel="stylesheet" href="{{ url_for('static', filename='dashboard.css', v=build_version) }}">
 <style>
 /* :root tokens (--bg, --card, --border, --text, --muted, --green, --red,
    --blue) come from dashboard.css. Auth-only layout overrides below. */
-body{display:flex;align-items:center;justify-content:center;padding:20px;min-height:100vh}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;
+  gap:24px;min-height:100vh;padding:16px;font-family:var(--ui-font)}
 .box{background:var(--card);border:1px solid var(--border);border-radius:10px;
   padding:32px 36px;width:440px;max-width:100%}
-.logo{font-size:18px;font-weight:700;color:var(--blue);letter-spacing:1.5px;
-  text-align:center;margin-bottom:6px}
-.subtitle{font-size:11px;color:var(--muted);text-align:center;margin-bottom:6px;
+.box .logo{text-align:center;margin-bottom:8px}
+.box .logo img{max-width:100%;height:auto}
+.subtitle{font-size:11px;font-weight:600;color:var(--muted);text-align:center;margin-bottom:6px;
   text-transform:uppercase;letter-spacing:1px}
 .notice{font-size:11px;color:var(--muted);text-align:center;margin-bottom:18px;
   line-height:1.5;padding:10px;background:rgba(88,166,255,.06);
-  border:1px solid rgba(88,166,255,.15);border-radius:5px}
+  border:1px solid rgba(88,166,255,.15);border-radius:6px}
 .qr{display:flex;justify-content:center;margin-bottom:14px}
 .qr img{background:#fff;border-radius:6px;padding:6px;max-width:100%;height:auto}
 .secret-label{font-size:10px;color:var(--muted);text-transform:uppercase;
   letter-spacing:1px;text-align:center;margin-bottom:4px}
-.secret{font-size:13px;color:var(--text);background:var(--bg);
-  border:1px solid var(--border);border-radius:5px;padding:8px;
-  text-align:center;margin-bottom:18px;user-select:all;word-break:break-all}
-.field{margin-bottom:14px}
+.secret{font-family:var(--mono-font,monospace);font-size:13px;color:var(--text);background:var(--bg);
+  border:1px solid var(--border);border-radius:6px;padding:8px;
+  text-align:center;margin-bottom:16px;user-select:all;word-break:break-all}
+.field{margin-bottom:16px}
 .field label{display:block;font-size:10px;text-transform:uppercase;
   letter-spacing:1px;color:var(--muted);margin-bottom:6px}
 .field input{width:100%;background:var(--bg);border:1px solid var(--border);
-  color:var(--text);font-family:inherit;font-size:18px;letter-spacing:6px;
-  padding:10px 12px;border-radius:6px;text-align:center;box-sizing:border-box}
-.field input:focus{outline:none;border-color:var(--blue)}
+  color:var(--text);font-family:var(--mono-font,monospace);font-variant-numeric:tabular-nums;font-size:18px;letter-spacing:6px;
+  padding:10px 12px;border-radius:6px;text-align:center;box-sizing:border-box;
+  transition:border-color .15s,box-shadow .15s}
+.field input:focus{outline:none;border-color:var(--blue);box-shadow:0 0 0 2px rgba(88,166,255,.35)}
+.field input[aria-invalid="true"]{border-color:var(--red)}
 .btn{width:100%;background:rgba(88,166,255,.12);border:1px solid rgba(88,166,255,.35);
-  color:var(--blue);font-family:inherit;font-size:13px;font-weight:600;padding:10px;
-  border-radius:6px;cursor:pointer;letter-spacing:.5px;margin-top:6px}
+  color:var(--blue);font-family:var(--ui-font);font-size:13px;font-weight:600;padding:10px;
+  border-radius:6px;cursor:pointer;margin-top:8px;touch-action:manipulation;
+  transition:background-color .15s}
 .btn:hover{background:rgba(88,166,255,.22)}
+.btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.btn:disabled{opacity:.6;cursor:progress}
 .error{background:rgba(248,81,73,.08);border:1px solid rgba(248,81,73,.25);
   border-radius:6px;padding:10px;color:var(--red);font-size:12px;text-align:center;
-  margin-bottom:14px}
+  margin-bottom:16px}
+.error:empty{display:none}
 /* Phone: tighten side padding so the 440-px design fits a 375-px
    viewport, and reduce the wide 6 px letter-spacing on the OTP input
    slightly so 6 digits don't wrap to two lines on small screens. */
 @media(max-width:540px){
   body{padding:12px}
-  .box{padding:22px 16px;border-radius:12px}
+  .box{padding:24px 16px}
   .field input{letter-spacing:4px;font-size:18px;min-height:48px}
   .btn{font-size:14px;padding:14px;min-height:44px}
   .notice{font-size:12px;line-height:1.55}
   .qr img{width:180px;height:180px}
 }
+@media(prefers-reduced-motion:reduce){
+  .field input,.btn{transition:none}
+}
 </style>
+<script type="module" src="{{ url_for('static', filename='dashboard-common.js', v=build_version) }}"></script>
 </head>
 <body>
-<form class="box" method="POST" action="/totp/setup">
+<div class="auth-time" title="Current UTC time and tonight's RMS capture window at the centre of Romania">
+  <span id="utc-clock" class="hdr-clock" translate="no">&mdash;</span>
+  <span class="nav-rms js-rms-window" translate="no" hidden></span>
+</div>
+<form class="box" id="totp-setup-form" method="POST" action="/totp/setup">
   <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-  <div class="logo">ROVIMEN</div>
-  <div class="subtitle">Enable Two-Factor Authentication</div>
-  <div class="notice">
+  <div class="logo"><img src="{{ url_for('static', filename='img/rovimen_logo.svg', v=build_version) }}" alt="ROVIMEN, Romanian Video Meteor Network" width="260" height="121" decoding="async" fetchpriority="high"></div>
+  <h1 class="subtitle">Enable Two-Factor Authentication</h1>
+  <p class="notice">
     Scan the QR with your authenticator app (Google Authenticator,
     1Password, Authy, …), then enter the 6-digit code shown to confirm.
     Save the secret somewhere safe so you can re-enrol if you lose the device.
-  </div>
-  <div class="qr"><img src="{{ qr_data_uri }}" alt="TOTP QR" width="180" height="180"></div>
-  <div class="secret-label">Secret (if you can't scan)</div>
-  <div class="secret">{{ secret }}</div>
-  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  </p>
+  <div class="qr"><img src="{{ qr_data_uri }}" alt="QR code for your authenticator app" width="180" height="180"></div>
+  <div class="secret-label" id="totp-secret-label">Secret (if you can’t scan)</div>
+  <div class="secret" aria-labelledby="totp-secret-label" translate="no">{{ secret }}</div>
+  <div class="error" id="totp-error" role="alert" aria-live="assertive">{% if error %}{{ error }}{% endif %}</div>
   <div class="field">
     <label for="totp-setup-code">Code from your app</label>
     <input id="totp-setup-code" type="text" name="code" inputmode="numeric" pattern="[0-9]{6}"
-           maxlength="6" autocomplete="one-time-code" autofocus required>
+           maxlength="6" autocomplete="one-time-code" spellcheck="false" autofocus required
+           {% if error %}aria-invalid="true" aria-describedby="totp-error"{% endif %}>
   </div>
   <button type="submit" class="btn">Enable 2FA</button>
 </form>
+{# Auth pages load no app panel, so the footer leaves out its About button. #}
+{% set no_app_panel = true %}{% include "_license_footer.html" %}
+<script>
+/* Disable the submit button only once the request starts; re-enable it when
+   the page comes back from the back/forward cache. */
+(function () {
+  var form = document.getElementById('totp-setup-form');
+  var btn = form.querySelector('button[type="submit"]');
+  var idle = btn.textContent;
+  form.addEventListener('submit', function () {
+    btn.disabled = true;
+    btn.textContent = 'Verifying…';
+  });
+  window.addEventListener('pageshow', function () {
+    btn.disabled = false;
+    btn.textContent = idle;
+  });
+})();
+</script>
 </body>
 </html>

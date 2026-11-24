@@ -40,6 +40,11 @@ def _ff_block_start(ff_file: str) -> datetime | None:
         return None
 
 
+def _iso_ms(dt: datetime | None) -> str | None:
+    """``YYYY-MM-DDTHH:MM:SS.mmm`` (the station's rovimen_rms.iso_ms)."""
+    return dt.isoformat(timespec="milliseconds") if dt is not None else None
+
+
 def _opt(s: str) -> float | None:
     s = s.strip()
     return None if s in ("None", "") else float(s)
@@ -72,7 +77,7 @@ def _radiant_rows(path: Path) -> list[dict]:
                 shower = "SPO"
             results.append({
                 "_begin_dt": begin_dt,
-                "time_utc": begin_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+                "time_utc": _iso_ms(begin_dt),
                 "jd": float(parts[1]),
                 "solar_lon": _opt(parts[2]),
                 "shower": shower,
@@ -147,6 +152,7 @@ def _ftp_rows(path: Path) -> list[dict]:
                     try:
                         frames.append({
                             "frame": float(fp[0]),
+                            "x": float(fp[1]), "y": float(fp[2]),
                             "ra": float(fp[3]), "dec": float(fp[4]),
                             "azim": float(fp[5]), "elev": float(fp[6]),
                             "mag": float(fp[8]),
@@ -179,10 +185,16 @@ def _ftp_rows(path: Path) -> list[dict]:
                     "num_segments": num_segments,
                     "fps": fps,
                     "peak_mag": min(f["mag"] for f in frames),
+                    "ra_beg": frames[0]["ra"],
+                    "dec_beg": frames[0]["dec"],
+                    "ra_end": frames[-1]["ra"],
+                    "dec_end": frames[-1]["dec"],
                     "azim_beg": frames[0]["azim"],
                     "elev_beg": frames[0]["elev"],
                     "azim_end": frames[-1]["azim"],
                     "elev_end": frames[-1]["elev"],
+                    "x_beg": frames[0]["x"],
+                    "y_beg": frames[0]["y"],
                 })
             continue
         i += 1
@@ -271,14 +283,30 @@ def parse_session_detections(rms_dir: Path) -> list[dict]:
     return rows
 
 
+def _coalesce(*values: float | None) -> float | None:
+    """First non-None value, preserving a literal 0.0 (a plain ``or`` would not)."""
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
 def _merge_row(ftp: dict, rad: dict | None) -> dict:
-    """One detection from an FTP block, enriched with radiants if matched."""
+    """One detection from an FTP block, enriched with radiants if matched.
+
+    Astrometry (begin/end RA-Dec) is taken from radiants when the join matched,
+    else from the FTPdetectinfo frame data — both files carry per-frame RA/Dec,
+    so a detection RMS actually measured never comes back with null begin/end
+    coordinates just because it was filtered out of the radiants file.
+    """
+    # The meteor's first frame is the most precise time there is (same rule
+    # as the station's rovimen_rms.merge_row).
+    bdt = ftp.get("_begin_dt")
     if rad is not None:
-        time_utc = rad.get("time_utc")
+        time_utc = _iso_ms(bdt) if bdt is not None else rad.get("time_utc")
         mag_apparent = rad.get("mag_apparent")
     else:
-        bdt = ftp.get("_begin_dt")
-        time_utc = bdt.strftime("%Y-%m-%dT%H:%M:%S") if bdt is not None else None
+        time_utc = _iso_ms(bdt) if bdt is not None else None
         mag_apparent = ftp.get("peak_mag")
     rad = rad or {}
     return {
@@ -294,10 +322,10 @@ def _merge_row(ftp: dict, rad: dict | None) -> dict:
         "angular_velocity": ftp.get("angular_velocity"),
         "num_segments": ftp.get("num_segments"),
         "fps": ftp.get("fps"),
-        "ra_beg": rad.get("ra_beg"),
-        "dec_beg": rad.get("dec_beg"),
-        "ra_end": rad.get("ra_end"),
-        "dec_end": rad.get("dec_end"),
+        "ra_beg": _coalesce(rad.get("ra_beg"), ftp.get("ra_beg")),
+        "dec_beg": _coalesce(rad.get("dec_beg"), ftp.get("dec_beg")),
+        "ra_end": _coalesce(rad.get("ra_end"), ftp.get("ra_end")),
+        "dec_end": _coalesce(rad.get("dec_end"), ftp.get("dec_end")),
         "ra_radiant": rad.get("ra_radiant"),
         "dec_radiant": rad.get("dec_radiant"),
         "radiant_elev": rad.get("radiant_elev"),
@@ -305,6 +333,8 @@ def _merge_row(ftp: dict, rad: dict | None) -> dict:
         "elev_beg": ftp.get("elev_beg"),
         "azim_end": ftp.get("azim_end"),
         "elev_end": ftp.get("elev_end"),
+        "x_beg": ftp.get("x_beg"),
+        "y_beg": ftp.get("y_beg"),
     }
 
 
@@ -335,4 +365,90 @@ def _radiant_only_row(rad: dict) -> dict:
         "elev_beg": None,
         "azim_end": None,
         "elev_end": None,
+        "x_beg": None,
+        "y_beg": None,
     }
+
+
+# Fields RMS produces directly in the single-station source files. A measured
+# detection carrying a null here despite the FTPdetectinfo/radiants files
+# holding a value is a silent-drop regression — the coverage check below flags
+# it so it never ships unnoticed. Higher-order trajectory fields (geocentric
+# radiant, Vg, orbit) are NOT in this set: they only exist for triangulated
+# meteors and are attached separately by the GMN join.
+_SOURCE_SCIENCE_FIELDS = (
+    "time_utc", "jd", "solar_lon", "shower",
+    "mag_apparent", "mag_absolute", "duration_s", "angular_velocity",
+    "ra_beg", "dec_beg", "ra_end", "dec_end",
+    "ra_radiant", "dec_radiant", "radiant_elev",
+    "azim_beg", "elev_beg", "azim_end", "elev_end",
+    "num_segments", "fps",
+)
+
+
+def missing_source_fields(row: dict, ftp: dict | None, rad: dict | None) -> list[str]:
+    """Names of science fields null in ``row`` although a source carried a value.
+
+    A merged detection row should never drop a measurement RMS actually wrote:
+    if the FTPdetectinfo block (``ftp``) or the radiants row (``rad``) it was
+    built from holds a non-null value for a field, the merged row must too.
+    Returns the offending field names (empty list = fully covered). Fields the
+    sources themselves left null are not flagged — RMS genuinely didn't measure
+    them for that detection.
+    """
+    ftp = ftp or {}
+    rad = rad or {}
+    missing: list[str] = []
+    for field in _SOURCE_SCIENCE_FIELDS:
+        if row.get(field) is not None:
+            continue
+        source_field = "mag_apparent" if field == "mag_apparent" else field
+        source_has_value = (
+            rad.get(source_field) is not None
+            or ftp.get(field) is not None
+            or (field == "mag_apparent" and ftp.get("peak_mag") is not None)
+        )
+        if source_has_value:
+            missing.append(field)
+    return missing
+
+
+def audit_session_coverage(rms_dir: Path) -> list[tuple[str, int, list[str]]]:
+    """Flag detections in a session dir whose merged row dropped a source value.
+
+    Re-runs the parse+join and, for every detection, compares the merged row to
+    the raw FTP/radiants inputs it came from. Returns one
+    ``(ff_file, meteor_no, missing_fields)`` tuple per detection that lost a
+    value present in its source files. An empty result means every measured
+    detection in the session carries everything RMS produced for it.
+    """
+    ftp_by_key: dict[tuple[str, int], dict] = {}
+    for f in _filtered_ftp_paths(rms_dir):
+        for r in _ftp_rows(f):
+            ftp_by_key[(r["ff_file"], r["meteor_no"])] = r
+
+    radiants: list[dict] = []
+    for f in sorted(rms_dir.glob("*_radiants.txt")):
+        radiants.extend(_radiant_rows(f))
+
+    used = [False] * len(radiants)
+    findings: list[tuple[str, int, list[str]]] = []
+
+    for key, ftp in ftp_by_key.items():
+        match: dict | None = None
+        if ftp["_begin_dt"] is not None:
+            best_idx, best_dt = -1, _JOIN_TOLERANCE_S + 1.0
+            for idx, rad in enumerate(radiants):
+                if used[idx]:
+                    continue
+                diff = abs((ftp["_begin_dt"] - rad["_begin_dt"]).total_seconds())
+                if diff < best_dt:
+                    best_dt, best_idx = diff, idx
+            if best_idx >= 0 and best_dt <= _JOIN_TOLERANCE_S:
+                used[best_idx] = True
+                match = radiants[best_idx]
+        row = _merge_row(ftp, match)
+        gaps = missing_source_fields(row, ftp, match)
+        if gaps:
+            findings.append((key[0], key[1], gaps))
+    return findings

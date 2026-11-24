@@ -1,0 +1,148 @@
+/* dashboard-spectro.css — Spectro tab (grating-camera spectroscopy).
+   Card grid + image lightbox. Colours come from the dashboard's own tokens so
+   the tab follows the light/dark theme like every other pane. */
+
+.spectro-header-card { padding: 10px 14px; margin-bottom: 12px; }
+
+.spectro-hdr-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; flex-wrap: wrap;
+}
+.spectro-sub {
+  font-size: var(--fs-xs); color: var(--muted); font-weight: 400; margin-left: 8px;
+}
+#spectro-night {
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 4px 8px; font-size: var(--fs-md); font-family: var(--mono-font);
+  font-variant-numeric: tabular-nums;
+}
+
+.spectro-summary {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 2px;
+}
+.spectro-chip {
+  font-size: var(--fs-sm); color: var(--muted);
+  background: var(--chip-bg, rgba(255, 255, 255, .04));
+  border: 1px solid var(--border); border-radius: var(--radius-pill);
+  padding: 3px 10px; white-space: nowrap;
+}
+.spectro-chip b {
+  color: var(--text); font-weight: 600;
+  font-family: var(--mono-font); font-variant-numeric: tabular-nums;
+}
+.spectro-chip.ok b   { color: #6cc4ff; }
+.spectro-chip.good b { color: #63d29a; }
+
+.spectro-warn {
+  margin-top: 8px; font-size: var(--fs-sm); color: #e0b050;
+}
+
+.spectro-filters { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+.spectro-filter {
+  font: inherit; font-family: var(--ui-font); font-size: var(--fs-sm); cursor: pointer;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 4px 10px;
+}
+.spectro-filter:hover  { color: var(--text); }
+.spectro-filter.active {
+  color: var(--text); border-color: #6cc4ff;
+  background: rgba(108, 196, 255, .10);
+}
+
+/* One column per event: the three pictures of one event belong together and
+   read left to right, so the card is the grid cell, not the image. */
+.spectro-grid {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+}
+@media (max-width: 520px) {
+  .spectro-grid { grid-template-columns: 1fr; }
+}
+
+.spectro-card {
+  background: var(--card);
+  border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: var(--radius-md); padding: 10px 12px;
+}
+.spectro-card.spectro-state-spectrum  { border-left-color: #63d29a; }
+.spectro-card.spectro-state-transient { border-left-color: #6cc4ff; }
+.spectro-card.spectro-state-none      { border-left-color: var(--border); }
+
+.spectro-card-hdr {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.spectro-time {
+  font-size: var(--fs-base); font-weight: 600; color: var(--text);
+  font-family: var(--mono-font); font-variant-numeric: tabular-nums;
+}
+.spectro-id {
+  font-size: var(--fs-xs); color: var(--muted); font-family: var(--mono-font);
+  margin-left: auto; overflow-wrap: anywhere;
+}
+.spectro-badge {
+  font-size: var(--fs-xs); padding: 2px 7px; border-radius: var(--radius-xs);
+  border: 1px solid var(--border); color: var(--muted);
+}
+.spectro-trigger-rms  { border-color: #7a6ad0; color: #a99cf0; }
+.spectro-trigger-wide { border-color: #4b7ea8; color: #8fc3e8; }
+.spectro-st-spectrum  { border-color: #3d8f66; color: #63d29a; }
+.spectro-st-transient { border-color: #3f7ea3; color: #6cc4ff; }
+
+.spectro-thumbs { display: flex; gap: 8px; flex-wrap: wrap; }
+.spectro-thumb { margin: 0; flex: 1 1 180px; min-width: 0; }
+.spectro-thumb img {
+  width: 100%; display: block; border-radius: var(--radius-sm); background: #000;
+  cursor: zoom-in; aspect-ratio: 16 / 9; object-fit: cover;
+  border: 1px solid var(--border);
+}
+.spectro-thumb img:hover { border-color: #6cc4ff; }
+/* The spectrum plot is a chart, not a frame: show it whole, not cropped. */
+.spectro-thumb:last-child img[alt="Reduced spectrum"] { object-fit: contain; }
+.spectro-thumb figcaption {
+  font-size: var(--fs-xs); color: var(--muted); margin-top: 3px;
+}
+.spectro-noimg { font-size: var(--fs-sm); color: var(--muted); padding: 6px 0; }
+
+.spectro-links { font-size: var(--fs-sm); color: var(--muted); margin-top: 8px; }
+
+/* ── lightbox ─────────────────────────────────────────────────────────── */
+
+.spectro-modal {
+  display: none; position: fixed; inset: 0; z-index: 1100;  /* above the sticky site header (1001) */
+  background: rgba(0, 0, 0, .88);
+}
+.spectro-modal.open { display: flex; align-items: center; justify-content: center; }
+.spectro-modal-inner {
+  display: flex; flex-direction: column; max-width: 96vw; max-height: 94vh;
+}
+.spectro-modal-hdr {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 4px; color: var(--muted); font-size: var(--fs-md);
+}
+.spectro-modal-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.spectro-modal-pos { font-variant-numeric: tabular-nums; }
+.spectro-modal-hdr a, .spectro-modal-hdr button, .spectro-modal-nav button {
+  font: inherit; font-size: var(--fs-sm); cursor: pointer; text-decoration: none;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 3px 9px;
+}
+.spectro-modal-hdr a:hover, .spectro-modal-hdr button:hover,
+.spectro-modal-nav button:hover { color: var(--text); border-color: var(--blue); }
+.spectro-modal-img {
+  max-width: 96vw; max-height: 84vh; object-fit: contain;
+  border-radius: var(--radius-sm); background: #000;
+}
+.spectro-modal-nav {
+  display: flex; justify-content: space-between; gap: 8px; padding-top: 8px;
+}
+
+/* Keyboard focus: the thumbnails open the lightbox, so they are focusable. */
+.spectro-filter:focus-visible,
+.spectro-thumb img:focus-visible,
+.spectro-modal-hdr a:focus-visible,
+.spectro-modal-hdr button:focus-visible,
+.spectro-modal-nav button:focus-visible,
+#spectro-night:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.spectro-modal { overscroll-behavior: contain; }

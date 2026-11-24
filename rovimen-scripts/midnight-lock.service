@@ -1,0 +1,24 @@
+[Unit]
+Description=ROVIMEN mid-night additive detection-lock pass
+# Gate on a synced clock: on RTC-less hosts (e.g. the Bacau Pi 4B) the wall
+# clock can be days off at boot until chrony steps it, which would date
+# "tonight" wrong. chrony-wait is best-effort — absent on non-chrony hosts, the
+# ordering simply has no effect and the pass still uses UTC + FF-file stamps.
+After=network.target chrony-wait.service
+Wants=chrony-wait.service
+
+[Service]
+Type=oneshot
+User=gmn
+Group=gmn
+WorkingDirectory=/home/gmn/rovimen_scripts
+# Needs numpy/PIL/flags_manager -> the RMS venv (updater._localise_unit rewrites
+# this to the station's actual venv interpreter). Additive-only pass, so a
+# missed run is harmless; keep it niced well below capture.
+ExecStart=/home/gmn/RMS/venv/bin/python /home/gmn/rovimen_scripts/detection_lock.py -c /home/gmn/rovimen_scripts/config.json --midnight
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=40%
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+Environment=LC_ALL=C.UTF-8

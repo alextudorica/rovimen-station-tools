@@ -1,0 +1,28 @@
+[Unit]
+Description=ROVIMEN fireball watcher (live fieldsum spikes and FR tracks to the VPS)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Stdlib-only, Python 3.8 safe: system python3, no venv. Reads RMS's
+# CapturedFiles, writes nothing next to them, posts small JSON events over the
+# same outbound ingest path and key as rovimen-pusher.
+ExecStart=/usr/bin/env python3 %h/rovimen_scripts/fireball_watch.py
+WorkingDirectory=%h/rovimen_scripts
+# The watcher exits 0 when its code changes on disk (bundle update) and
+# systemd starts the new version.
+Restart=always
+RestartSec=20
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+EnvironmentFile=-%h/.config/rovimen/ingest.env
+# Keep it out of capture's way. CPUQuota/MemoryMax apply where the user
+# manager has the controllers delegated; elsewhere systemd ignores them.
+Nice=15
+IOSchedulingClass=idle
+CPUQuota=20%
+MemoryMax=200M
+
+[Install]
+WantedBy=default.target

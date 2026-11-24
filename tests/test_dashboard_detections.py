@@ -1,7 +1,7 @@
 """Tests for dashboard detection payload clustering — P0 #5.
 
 P0 #5: A malformed meteor_time from any station crashes
-       _compute_detections_payload for ALL users (datetime.fromisoformat
+       compute_detections_payload for ALL users (datetime.fromisoformat
        at line 7084 is not wrapped in try/except).
 """
 
@@ -13,7 +13,7 @@ import pytest
 
 
 class TestDetectionClustering:
-    """Test the greedy clustering logic from _compute_detections_payload
+    """Test the greedy clustering logic from compute_detections_payload
     (lines 7076-7111) in isolation."""
 
     @staticmethod
